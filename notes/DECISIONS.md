@@ -396,13 +396,55 @@ build and run the tests before reading the diff as anything but formatting.
 ### The toolchain in use is not current, and one binary is unusable
 
 - `v_old.exe` (`2ffd1b8`) works for `fmt`, `test` and `run`, and is what this project
-  has been verified against.
-- `v.exe` (`e690943`, newer) **cannot run the formatter on this host at all**. It
-  reports `exec failed (SetHandleInformation): The handle is invalid` and then claims
-  `1 formatting errors` on a file that `v_old.exe` confirms is already formatted. Its
-  verdict is therefore worthless and must not be read as a formatting difference.
+  was verified against for most of its life.
+- `v.exe` (`e690943`, newer by date but stale by build) **could not run the formatter on
+  this host at all.** It printed `exec failed (SetHandleInformation): The handle is
+  invalid` and then claimed `1 formatting errors` on a file `v_old.exe` confirmed was
+  already formatted. Its verdict was worthless.
 
-This is the failure mode the differential harness keeps `BLOCKED` separate for.
+**Both oddities turned out to be one cause, and there was nothing to fix.** `e690943` is
+dated 2026-10-01 13:14. These merged to master hours later:
+
+| PR | merged | what |
+|---|---|---|
+| vlang/v#29244 | 2026-10-01 16:20 | cgen: preserve C output-pointer storage on Windows |
+| vlang/v#29256 | 2026-10-02 07:51 | os: fix latent C type errors that block fmt and tests on Windows |
+
+Both are ancestors of `origin/master` and of the local HEAD, so the source was already
+correct. Proof: one `os.execute` probe gives 10/10 failures when compiled by `e690943`
+and 10/10 successes when compiled from this checkout. **The remedy was to rebuild, not to
+patch.** `v.exe` is now `67f4642`, built from the checkout on 2026-10-03, and this
+project's 119 tests pass under it.
+
+### `v test <dir>` intermittently fails to create its build directory
+
+Symptom: `failed to create C build directory <TMPDIR>/v_0/session_.../N_0/... : mkdir
+failed`, at comptime after ~30s, on a different file each run.
+
+Measured before concluding anything:
+
+| Test | Result |
+|---|---|
+| failure rate, `v_old.exe` | 1 of 4 runs |
+| failure rate, `v.exe` | 1 of 4 runs |
+| failure rate, `v.exe`, later, no change | 0 of 6 runs |
+| failure rate with a different `TMPDIR` | 0 of 4 runs |
+| free disk on C: | 16.5 GB |
+| single-file `v test <one file>` | never failed |
+| `VJOBS=1` | passed |
+
+**Classified as environmental, not a compiler bug, and deliberately not filed.** The same
+rate on two independently built compilers, and a rate that dropped to zero without any
+change, is not the shape of a deterministic defect in the compiler's `mkdir` logic. No PR
+was opened, because filing a non-bug costs a maintainer's time.
+
+### Standing rules
+
+- Compare a compiler binary's commit against upstream before blaming the compiler.
+- Never compare formatting verdicts from two binaries without confirming both can run the
+  formatter — a stale binary reports its own exec failure as a formatting error.
+- Do not write `[]T{1, 2, 3}`. Current V rejects positional elements in a braced array
+  initializer (vlang/v#29217); use `init: [...]`, `[1, 2, 3]` or `[3]int[1, 2, 3]`.
 
 Each of these produced a **clean build and a wrong result**. None would have been
 found by reading the code. All are now regression tests.
