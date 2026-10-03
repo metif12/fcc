@@ -1,0 +1,20 @@
+# Build output
+*.exe
+# Anchored to the repo root: a bare `vcc` also matches the `src/vcc/` package
+# directory, which silently excluded the tokenizer from version control.
+/vcc
+*.o
+*.obj
+*.dll
+*.lib
+*.a
+
+# Phase 0 artefacts
+/vccbuild/
+*.tmp.c
+
+# Editor and OS noise
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
