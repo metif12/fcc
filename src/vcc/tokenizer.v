@@ -793,9 +793,11 @@ fn (mut t Tokenizer) read_directive() ast.Token {
 	// `u8.str()` looks right but produces `"#100101..."`, because `str` on a `u8` is
 	// its decimal value and not the character.
 	//
-	// The accumulator starts empty and is appended to, rather than being written as a
-	// one-element literal: `v fmt -w` rewrites `[]u8{hash_byte}` into
-	// `[]u8{hash_byte: }`, which does not compile. See notes/DECISIONS.md.
+	// The accumulator starts empty and is appended to rather than written as a
+	// one-element literal. A current V rejects positional elements in a braced array
+	// initializer outright (vlang/v#29217); the toolchain this project was verified
+	// against predates that fix and rewrites such a literal into non-compiling code.
+	// See notes/DECISIONS.md.
 	mut folded := []u8{}
 	folded << hash_byte
 	for i < t.src.len {

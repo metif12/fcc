@@ -336,21 +336,73 @@ version of the function contained `for cond { return s }` — a loop used as an 
 and that was doing the actual work, so removing the condition I had edited changed
 nothing. The function is now a plain loop and the revert is meaningful.
 
-### `v fmt -w` has now corrupted a file twice
+### `v fmt` did not corrupt anything mysterious: this is a known, fixed bug
 
-Both times in `src/vcc/tokenizer.v`, both times silently, both times caught only by
-building afterwards:
+An earlier revision of this note blamed `v fmt` for corrupting
+`src/vcc/tokenizer.v` twice and called it a formatter defect. **That was wrong, and
+checking the reports showed why.**
 
-1. `[]u8{'#'}` became `[]u8{#: }`. The formatter parses a braced element list as
-   key/value syntax and appends `: `.
-2. A duplicated comment block, from an edit made during repair.
+**The bug is real.** `v fmt -w` rewrites a typed array initializer with positional
+elements into code that does not compile:
 
-The workaround is in the source: the accumulator starts empty and is appended to,
-rather than being written as a one-element literal.
+| input | `v fmt -w` output |
+|---|---|
+| `[]int{1, 2, 3}` | `[]int{1: , 2: , 3: }` |
+| `[]string{'a', 'b'}` | `[]string{a: , b: , c: }` |
+| `[]u8{35}` | `[]u8{35: }` |
+| `[]u8{'x'}` | `[]u8{x: }` — the quotes are dropped too |
 
-**Standing rule for this repository:** run `v fmt -w`, then build and run the tests
-before reading the diff as anything but formatting. Do not commit on the formatter's
-word that a file was only reformatted.
+**It is already reported and fixed upstream.** vlang/v#29110 documents the identical
+output byte for byte, and its body calls it "a data-loss bug independent of bug 1".
+It was fixed by PR #29217, *parser: reject positional elements in braced array
+initializers*, merged to master as `d70e43c1` on 2026-10-01 and closing the issue.
+
+The fix rejects the syntax in the parser instead of teaching the formatter about it,
+which is why `init_fields` in `vlib/v/gen/v/gen.v:2386` is unchanged:
+
+```v ignore
+fn (mut g Gen) init_fields(ids []flat.NodeId) {
+	for i, fid in ids {
+		f := g.a.node(fid)
+		if f.value.len > 0 {
+			g.write('${f.value}: ')   // correct for a map or struct, wrong for an array
+		}
+```
+
+`init_fields` is shared by `.array_init`, and a positional element is stored as an
+ordinary expression node carrying a `value`, so the formatter spells it as a keyed
+entry. Once the parser rejects the construct, the path is unreachable.
+
+The added test asserts the guarantee this project was missing: for each rejected
+expression, `v fmt -w` must exit non-zero **and leave the file byte-identical**
+(`assert os.read_file(path)! == source`).
+
+**Why this checkout still has it.** The local V tree is on branch `v-tool` at
+`665874bfd3` (`0.5.2-1977-g665874bfd3`), and:
+
+| Tree | contains `d70e43c1` |
+|---|---|
+| `origin/master` | yes |
+| local `HEAD` (`v-tool`) | no |
+
+So the toolchain in use predates the fix. The source-level workaround in
+`read_directive` — building the accumulator with `<<` instead of a one-element
+literal — is kept, because it is harmless, but it is no longer described as a
+formatter bug.
+
+**Standing rule, unchanged and now for a different reason:** run `v fmt -w`, then
+build and run the tests before reading the diff as anything but formatting.
+
+### The toolchain in use is not current, and one binary is unusable
+
+- `v_old.exe` (`2ffd1b8`) works for `fmt`, `test` and `run`, and is what this project
+  has been verified against.
+- `v.exe` (`e690943`, newer) **cannot run the formatter on this host at all**. It
+  reports `exec failed (SetHandleInformation): The handle is invalid` and then claims
+  `1 formatting errors` on a file that `v_old.exe` confirms is already formatted. Its
+  verdict is therefore worthless and must not be read as a formatting difference.
+
+This is the failure mode the differential harness keeps `BLOCKED` separate for.
 
 Each of these produced a **clean build and a wrong result**. None would have been
 found by reading the code. All are now regression tests.
