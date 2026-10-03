@@ -49,20 +49,27 @@ Scope: **full C11, chibicc-style** (decision D15). Narrowing this to only what V
 codegen emits would be faster to reach, but it would reject the chibicc test suite
 that phase 2 depends on for correctness.
 
-- `src/vcc/tokenizer.v` — lexing, including the C/C++ comment and literal rules
-- `src/vcc/preprocess.v` — **the largest missing piece**: `#if`/`#elif`/`#ifdef`,
-  `defined()`, `#include` with the full search order, `#line`, `#pragma once`,
-  `_Pragma`, `##` and `#`, variadic `__VA_ARGS__`, `#error`, `#warning`, and
-  macro-expansion diagnostics that point at the origin rather than the expansion
-- `src/vcc/parser.v` — recursive descent to the AST in `src/ast`
-- `src/vcc/types.v` — struct, union, **bitfields**, enum, typedef, function
-  pointers, arrays, VLA, `const`/`volatile`/`restrict`
+- `src/vcc/tokenizer.v` — **done**: lexing, line splicing, both comment forms, every
+  integer and floating base including hex floats, the full escape set, wide and UTF
+  literals, and `#` lines captured whole for the preprocessor
+- `src/vcc/preprocess.v` — **done**: `#define`/`#undef`, `#if`/`#ifdef`/`#ifndef`,
+  `#elif`/`#else`/`#endif`, `#include` with the full search order, `#pragma once`,
+  `#error`, `#line`, and macro expansion including `#`, `##` and the GNU variadic forms
+- `src/vcc/expand.v` — **done**: phase-2 expansion with the recursion guard
+- `src/vcc/cond_eval.v` — **done**: the `#if` expression evaluator
+- `src/vcc/parser.v` — **not started**
+- `src/vcc/types.v` — **not started**: struct, union, **bitfields**, enum, typedef,
+  function pointers, arrays, VLA, `const`/`volatile`/`restrict`
+
+`--preprocess` is the acceptance signal for the part that exists: it prints the token
+stream after phase 1, so the front end can be validated on its own before any code
+generation is attempted.
 
 `-O` and `-W` selection flags are parsed and ignored; V only asks a compiler to
 optimise under `-prod`, and then only for gcc/clang.
 
-**Acceptance:** parse the whole corpus without crashing; `--dump-ast` completes.
-No code generation yet, so this phase can be validated on its own.
+**Acceptance for the whole phase:** parse the whole corpus without crashing;
+`--dump-ast` completes.
 
 ### Phase 2 — assembly-text backend
 

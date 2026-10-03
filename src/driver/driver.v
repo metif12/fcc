@@ -58,9 +58,12 @@ pub mut:
 	show_version bool
 	show_help    bool
 	// dump_tokens mirrors `-E`: tokenize and print the stream instead of
-	// compiling. It is phase 1's acceptance signal, so it is a real option rather
-	// than a debug leftover.
+	// compiling. It is phase 1's first acceptance signal, so it is a real option
+	// rather than a debug leftover.
 	dump_tokens bool
+	// preprocess_only mirrors `-E` after the preprocessor exists: run phase 1 and
+	// print the result.
+	preprocess_only bool
 	// verbose prints the command it would run.
 	verbose bool
 	// options_not_yet_honoured maps an accepted-but-unimplemented option to the
@@ -129,6 +132,8 @@ pub fn parse_args(args []string) !Options {
 			o.compile_only = true
 		} else if arg == '-E' || arg == '--dump-tokens' {
 			o.dump_tokens = true
+		} else if arg == '--preprocess' {
+			o.preprocess_only = true
 		} else if arg == '-shared' {
 			o.shared = true
 		} else if arg == '-S' {
@@ -294,8 +299,44 @@ pub fn main(args []string) {
 		dump_tokens(o)
 		return
 	}
-	eprintln('vcc: phase 0 — the command line is parsed but no C is compiled yet')
+	if o.preprocess_only {
+		dump_preprocessed(o)
+		return
+	}
+	eprintln('vcc: phase 1 — the command line is parsed and the preprocessor runs, but no C is compiled yet')
 	exit(1)
+}
+
+// preprocess_only mirrors `-E`: run the preprocessor and print the resulting
+// tokens. It is how phase 1 is validated, since every phase-2 acceptance criterion
+// depends on the front end being right.
+fn dump_preprocessed(o &Options) {
+	mut p := vcc.preprocessor(o.includes, o.sys_includes)
+	for spec in o.defines {
+		p.define_from_option(spec)
+	}
+	for name in o.undefines {
+		p.undefine(name)
+	}
+	p.define_builtins()
+	mut failed := false
+	for path in o.inputs {
+		r := p.run(path)
+		for e in r.errors {
+			eprintln('${path}: ${e}')
+			failed = true
+		}
+		println('--- ${path}')
+		for t in r.tokens {
+			if t.kind == .eof {
+				continue
+			}
+			println('${t.line.disp_line}: ${t.kind} "${t.text}"')
+		}
+	}
+	if failed {
+		exit(1)
+	}
 }
 
 // dump_tokens tokenizes every input and writes the stream to stdout.

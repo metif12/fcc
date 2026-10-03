@@ -23,6 +23,12 @@ import ast
 // `` `x` `` denote a `u8`, so they are interchangeable here and the backtick form
 // is used throughout for consistency with the source's own punctuation.
 
+// hash_byte is `#`. It is a named constant rather than a literal because a `u8`
+// array element written as a character gets mangled by the formatter, and because
+// `str` on a `u8` yields its decimal value rather than the character, so the two
+// mistakes look deceptively similar.
+const hash_byte = u8(35)
+
 pub struct Tokenizer {
 pub mut:
 	// src is the whole file text. Tokenizing indexes into it rather than copying
@@ -122,12 +128,31 @@ pub const simple_escapes = {
 //
 // The eof token is what lets the parser loop on "is the next token x?" without
 // separately testing for end of input at every call site.
+//
+// The first token is treated as being at the beginning of a line, because that is
+// true of a whole file. Use `tokenize_fragment` for a piece of text lifted out of a
+// file, such as a macro body.
 pub fn tokenize(src string) []ast.Token {
+	return tokenize_with(src, true)
+}
+
+// tokenize_fragment is `tokenize` for text that is not a whole file: a macro body,
+// a directive's argument text, or a `#if` expression.
+//
+// The difference is decisive rather than cosmetic. In a whole file a `#` at the start
+// of a line begins a directive, so `#define S(x) #x` re-tokenized as a body would
+// turn `#x` into a directive token and the stringize operator would vanish. A
+// fragment's leading `#` is an operator.
+pub fn tokenize_fragment(src string) []ast.Token {
+	return tokenize_with(src, false)
+}
+
+fn tokenize_with(src string, first_at_bol bool) []ast.Token {
 	mut t := Tokenizer{
 		src:    src
 		pos:    0
 		line:   1
-		at_bol: true
+		at_bol: first_at_bol
 	}
 	mut out := []ast.Token{}
 	for {
@@ -516,10 +541,12 @@ fn digit_value(c u8) int {
 // survive.
 fn strip_numeric_suffix(s string) string {
 	floor_len := numeric_min_length(s)
-	mut hex := s.len >= 2 && s[0] == `0` && (s[1] == `x` || s[1] == `X`)
-	for s.len > floor_len && hex && !s.contains('p') {
-		return s
-	}
+	// `hex_int` is what makes `0x1F` survive. `f` and `F` are float suffixes but
+	// also hexadecimal digits, so they may only be stripped from a literal that is
+	// not hexadecimal. A hexadecimal *float* is exempt because it always carries a
+	// `p` exponent, and then `f` really is a suffix.
+	mut hex_int := s.len >= 2 && s[0] == `0` && (s[1] == `x` || s[1] == `X`)
+		&& !s.contains('p')
 	mut end := s.len
 	for end > floor_len {
 		c := s[end - 1]
@@ -527,7 +554,7 @@ fn strip_numeric_suffix(s string) string {
 			end--
 			continue
 		}
-		if !hex && (c == `f` || c == `F`) {
+		if !hex_int && (c == `f` || c == `F`) {
 			end--
 			continue
 		}
@@ -756,34 +783,44 @@ fn decode_escape(src string, i int) (u8, int) {
 // macro expansion would be far more work — so the line is captured up to an
 // unescaped newline, with splices folded away.
 fn (mut t Tokenizer) read_directive() ast.Token {
-	start := t.pos
 	mut i := t.pos + 1
-	mut folded := 0
+	// The captured text has its line splices folded away rather than merely counted.
+	// Returning the raw slice would leave `#def\` + newline + `ine` spelling out as
+	// `#def\<newline>ine`, and the directive name would come back as `def`, which
+	// matches no directive at all.
+	//
+	// Bytes are accumulated and converted once at the end. Building the string with
+	// `u8.str()` looks right but produces `"#100101..."`, because `str` on a `u8` is
+	// its decimal value and not the character.
+	//
+	// The accumulator starts empty and is appended to, rather than being written as a
+	// one-element literal: `v fmt -w` rewrites `[]u8{hash_byte}` into
+	// `[]u8{hash_byte: }`, which does not compile. See notes/DECISIONS.md.
+	mut folded := []u8{}
+	folded << hash_byte
 	for i < t.src.len {
 		if t.src[i] == `\n` {
 			break
 		}
 		if t.src[i] == `\\` && i + 1 < t.src.len && t.src[i + 1] == `\n` {
 			i += 2
-			folded++
 			continue
 		}
 		if t.src[i] == `\\` && i + 1 < t.src.len && t.src[i + 1] == `\r`
 			&& i + 2 < t.src.len && t.src[i + 2] == `\n` {
 			i += 3
-			folded++
 			continue
 		}
+		folded << t.src[i]
 		i++
 	}
 	t.pos = i
 	t.line_start = i
+	text := folded.bytestr()
 	return ast.Token{
 		kind: .preproc_any
-		text: t.src[start..i]
-		// The recorded length excludes the splices that were folded away, so a
-		// consumer that indexes by `loc + len` stays inside the line.
-		len:  i - start - 2 * folded
+		text: text
+		len:  text.len
 		line: t.make_line()
 	}
 }
