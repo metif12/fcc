@@ -159,7 +159,6 @@ is the regression test and a table is not.
 
 | file | what it needs |
 |---|---|
-| `function` | the backend leaves three values on the stack in `main` |
 | `control:94` | `initializer element is not constant` — a constant-expression rule to widen |
 | `literal:94` | **a line splice is not applied outside a string literal** |
 | `alignof:33` | `_Alignof` of an expression rather than of a type name |
@@ -190,9 +189,8 @@ count — is wrong here, because `parse_params` deliberately leaves `...` out of
 and records it as the variadic flag. Subtracting one made `want` negative for a
 pure-variadic macro and indexed `args[-1]`. That is why `want` is `params.len`.
 
-Ten compile, assemble, link and execute. None crashes the compiler any more, and the
-ten that run all exit non-zero, so their code computes the wrong answer rather than
-failing to be produced. That is the next list, once the eight above are through.
+Four fail to compile. The other fourteen compile, and every one of them fails the
+same way, at its first assertion, for one reason.
 
 **The line splice is the interesting one, and it is a design decision rather than a
 bug.** `int size\` / `of(char);` must lex as the single identifier `sizeof`, and it
@@ -207,6 +205,50 @@ runs, carrying a line number per output byte so diagnostics still point where th
 Handled per-scanner instead, it means teaching the identifier, number, character and
 punctuator scanners four variants of the same rule, and the fourth is the one that will
 be wrong.
+
+**The remaining thirteen are one bug, and it is the calling convention.** Every one of
+them fails the same way, at the first assertion, with a garbage pointer where `assert`'s
+third argument should be. `printf("noargs\n")` in a vcc program crashes with an access
+violation. The generated call sequence is SysV AMD64:
+
+```
+  lea printf(%rip), %rax
+  pop %rdi
+  mov %rax, %r10
+  mov $0, %rax
+  call *%r10
+```
+
+Arguments in `%rdi`/`%rsi`, no shadow space, `mov $0, %rax` for the vector-register
+count. Windows x64 is the Microsoft ABI: integer arguments in `%rcx`/`%rdx`/`%r8`/`%r9`,
+floats in `%xmm0`–`%xmm3`, **32 bytes of shadow space the caller must allocate**, every
+vector argument mirrored into its GPR, and the fifth integer argument on the stack rather
+than in a fifth register. mingw's `printf` follows that, so every call vcc makes into the
+C library is wrong.
+
+**Why 264 tests and five working programs did not catch it.** Every call in those was
+between two vcc-compiled functions. Both sides use the same wrong convention, so the
+arguments land in the same wrong registers and the answer comes out right. The bug is
+invisible from inside the compiler and invisible from any test that does not cross the
+boundary to a library — which is to say invisible until a real program calls `printf`.
+
+The recorded target ABI in this file — `long` 4, `long long` 8, pointers 8, `sizeof(void)`
+1 — was measured correctly, and it is *data layout*. The calling convention was never
+measured, because measuring it requires linking against something that was not compiled
+by vcc. That is the gap, and the suite exposed it by being the first thing in the project
+that crosses the boundary.
+
+**What this means for the phase.** No front-end work will move these thirteen. The next
+piece of work is the calling convention, and it is a single well-specified change:
+register assignment, the shadow space, the GPR mirrors, and the stack argument placement.
+`-m32` is not needed to find it — it is one convention to replace, in `classify_args`,
+`push_args` and `gen_funcall` — and doing it against tcc's own output is the check, since
+tcc on this host already uses the Microsoft ABI.
+
+Until then, the honest statement of where phase 2 stands is: **four files fail to compile,
+thirteen compile to code that cannot call anything.** The earlier framing — thirteen files
+"computing the wrong answer" — was wrong, and it was wrong because it credited the
+compiler with producing an answer at all.
 
 **One acceptance criterion has to be restated.** The suite's expected values are
 chibicc's, written for the Linux target it runs on, and two of them cannot both hold
