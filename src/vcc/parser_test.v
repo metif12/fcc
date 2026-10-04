@@ -746,9 +746,9 @@ fn test_the_middle_operand_of_a_gnu_conditional_may_be_left_out() {
 	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
 }
 
-// returned walks to the expression of a one-statement function body's `return`, which is
-// the only public path from a parsed translation unit to a node: a global's initializer
-// is consumed into its byte image and is not kept.
+// returned walks to the expression of a function body's `return`, which is the only
+// public path from a parsed translation unit to a node: a global's initializer is
+// consumed into its byte image and is not kept.
 //
 // The casts come off first, because `add_type` wraps the returned expression in one to
 // the function's return type — and it is `add_type` that puts a cast on each branch of
@@ -757,12 +757,19 @@ fn test_the_middle_operand_of_a_gnu_conditional_may_be_left_out() {
 fn returned(src string) &ast.Node {
 	r := parsed(src)
 	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
-	assert r.globals[0].body.len == 1, 'got ${r.globals[0].body.len} statements'
-	mut n := r.globals[0].body[0].lhs
-	for n.kind == .cast {
-		n = n.lhs
+	mut found := 0
+	for s in r.globals[0].body {
+		if s.kind == .return_ {
+			found++
+			mut n := s.lhs
+			for n.kind == .cast {
+				n = n.lhs
+			}
+			return n
+		}
 	}
-	return n
+	assert found == 1, 'expected exactly one return, found ${found}'
+	return unsafe { nil }
 }
 
 fn test_an_omitted_middle_operand_is_recorded_rather_than_inferred() {
@@ -821,4 +828,59 @@ fn test_sizeof_of_a_parenthesised_comma_expression_is_the_size_of_its_type() {
 fn test_an_assignment_inside_parentheses_is_still_an_assignment() {
 	r := parsed('int f(void) { int a = 0; return (a = 5); }')
 	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+}
+
+// --- _Alignof and anonymous members ---
+
+fn test_alignof_of_an_expression_asks_the_expression_s_type_alignment() {
+	// C11 allows only a type name. gcc, clang, tcc and chibicc all accept an expression
+	// as well, and V's generated C uses that form.
+	n := returned('int f(void) { char c; return _Alignof(c); }')
+	assert n.kind == .num, 'got ${n.kind}'
+	assert n.num == 1, 'got ${n.num}'
+}
+
+fn test_alignof_of_an_expression_without_parentheses_is_accepted() {
+	// Four bytes, because a `long` is four bytes on this target — which is the whole
+	// point of asking tcc rather than assuming.
+	r := parsed('unsigned long a = _Alignof(double);')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].ty.size == 4, 'got ${r.globals[0].ty.size}'
+	assert bytes_of(r.globals[0]) == '08000000', bytes_of(r.globals[0])
+}
+
+fn test_a_field_of_an_anonymous_member_is_reached_through_it() {
+	// The descent reads one token, not one per level. It used to recurse into
+	// `struct_ref`, which read the member name a second time and so ate the token after
+	// the field name — which is why this reported `expected a member name after "."`.
+	n := returned('int f(void) { struct { struct { unsigned char a; }; int e; } y; return y.a; }')
+	assert n.kind == .member, 'got ${n.kind}'
+	// The access is a member of the anonymous member, which is itself a member.
+	assert n.lhs.kind == .member, 'got ${n.lhs.kind}'
+	m := n.member or {
+		assert false, 'the field access has no member'
+		return
+	}
+	assert m.name == 'a', 'got ${m.name}'
+}
+
+fn test_an_anonymous_union_member_contributes_its_fields_too() {
+	// A bare `union U {...};` declares a tag and no object, so there is no global to ask
+	// about; the object is declared separately.
+	r := parsed('union U { union { unsigned char a; }; long e; }; union U u;')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].ty.members.len == 2, 'got ${r.globals[0].ty.members.len}'
+	assert r.globals[0].ty.members[0].name == '', 'the inner union should be anonymous'
+	assert r.globals[0].ty.members[1].name == 'e', 'got ${r.globals[0].ty.members[1].name}'
+}
+
+fn test_a_named_member_still_resolves_without_descending() {
+	n := returned('int f(void) { struct { int e; } y; return y.e; }')
+	assert n.kind == .member, 'got ${n.kind}'
+	m := n.member or {
+		assert false, 'the field access has no member'
+		return
+	}
+	assert m.name == 'e', 'got ${m.name}'
+	assert n.lhs.kind != .member, 'a named member should not be reached through another'
 }

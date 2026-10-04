@@ -2911,25 +2911,34 @@ fn (mut p Parser) struct_ref(mut node &ast.Node) &ast.Node {
 		p.error_at(tok, 'member access on a value that is not a struct or union')
 		return node
 	}
-	idx := p.get_struct_member(node.ty, tok.text) or {
+	mut idx := p.get_struct_member(node.ty, tok.text) or {
 		p.error_at(tok, 'no member named "${tok.text}"')
 		return node
 	}
-	mem := node.ty.members[idx]
 	// An anonymous member's field is reached by stepping through the anonymous
-	// member, so this recurses until a named member matches.
-	if mem.name == '' {
-		mut inner := p.new_node(.member, tok)
-		inner.lhs = node
-		inner.member = mem
-		add_type(mut inner)
-		return p.struct_ref(mut inner)
+	// member, so the lookup descends until a named member matches.
+	//
+	// This is a loop rather than a recursion back into `struct_ref`, because the member
+	// name was read once, above. The recursive version read it a second time, so every
+	// access through an anonymous member ate the token *after* the field name — and the
+	// next thing it found was usually not an identifier, which is why this surfaced as
+	// `expected a member name after "."` on `y.a` and on nothing else.
+	mut base := node
+	for {
+		mem := base.ty.members[idx]
+		mut step := p.new_node(.member, tok)
+		step.lhs = base
+		step.member = mem
+		add_type(mut step)
+		if mem.name != '' {
+			return step
+		}
+		base = step
+		idx = p.get_struct_member(base.ty, tok.text) or {
+			p.error_at(tok, 'no member named "${tok.text}"')
+			return base
+		}
 	}
-	mut member := p.new_node(.member, tok)
-	member.lhs = node
-	member.member = mem
-	add_type(mut member)
-	return member
 }
 
 // primary parses the leaves: literals, names, parenthesised expressions and the
@@ -2974,6 +2983,16 @@ fn (mut p Parser) primary() &ast.Node {
 		ty := p.typename()
 		p.expect(')')
 		return p.new_size_t(i64(ty.align), tok)
+	}
+	if tok.text == '_Alignof' {
+		// C11 only allows a type name here. gcc, clang, tcc and chibicc all also accept
+		// an expression, and V's own generated C uses that form, so it is accepted too:
+		// the alignment asked for is the alignment of the expression's type either way,
+		// which is the same answer the type-name spelling gives.
+		p.pos++
+		mut node := p.unary()
+		add_type(mut node)
+		return p.new_size_t(i64(node.ty.align), tok)
 	}
 	if tok.text == '__builtin_types_compatible_p' {
 		p.pos += 2
