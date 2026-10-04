@@ -395,6 +395,55 @@ in `.tls$` and is reached through a two-byte index into the TLS directory, and
 that index is allocated by the object writer.
 
 ---
+---
+
+## D31. A float's bits are read by reinterpretation, not by conversion
+
+**Decision.** `f32_bits` and `f64_bits` in `src/backend/gen.v` read a float's
+IEEE-754 representation through an unsafe pointer cast. `u64(f)` is never used for
+it.
+
+**Why.** In V `u64(some_float)` converts the *value*, so `u64(2.0f32)` is `2`. The
+first version of the literal loader did exactly that, and emitted
+
+```
+  mov $2, %rax
+  movq %rax, %xmm0
+```
+
+for the literal `2.0f` — the integer two, loaded into an SSE register. Every
+program that used floats produced the right answer for every value except the ones
+it was actually compared against, because the only wrong values were the literals.
+
+The initializer path already had this right. `write_float` uses `float_bits`, so
+the byte image of `float c = 2.0f` was correct while the same literal in an
+expression was not — which is why the defect survived a test that checked the
+initializer and only appeared when the generated code was *run*. A code generator
+that gets this wrong passes every test comparing an address and fails every test
+comparing a float, which is the argument for executing generated code rather than
+reading it.
+
+---
+
+## D32. The generator strips the conversions the front end inserted
+
+**Decision.** `gen_addr` and `to_assign` both look through `.cast` before deciding
+what an expression is.
+
+**Why.** `usual_arith_conv` wraps *both* operands of every arithmetic node in a
+cast, unconditionally. Two defects came out of that, in two different places, and
+the second only appeared once the first was fixed:
+
+- `s.a += 1` never took the member path, so it took `&s.a` — not an lvalue C can
+  assign through, and a hard error for a bitfield (D26).
+- `x += 1` never reached `gen_addr` on the target at all, and the backend
+  reported "not an lvalue" for **every** compound assignment. The node kind of the
+  left operand of an assignment cannot be trusted, because it is very often `.cast`.
+
+The rule is now stated once in the frontend comment and obeyed in both places:
+an operator's conversion is not part of the expression's shape.
+
+---
 ## Open items for the end of the project
 
 Recorded rather than decided, because each of them is a question about the finished

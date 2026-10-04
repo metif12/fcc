@@ -93,32 +93,44 @@ the bundled tcc rather than an expectation derived from the algorithm being test
 object are reported rather than translated; both need a node kind the backend has to
 implement anyway.
 
-### Phase 2 — assembly-text backend *(in progress)*
+### Phase 2 — assembly-text backend
 
-Port chibicc's `codegen.c` (43,920 B of C, 1,595 lines) behind `backend.Emit`.
+Port chibicc's `codegen.c` (43,920 B of C, 1,595 lines) behind `backend.Emit`. **Done.**
 
-**Done:** `src/backend/asm.v` — the text emitter behind `Emit`, and the half of
-chibicc's generator that does not need the expression and statement state
-machine. Addressing, loads and stores, the comparison and conversion tables, the
-psABI's register classification, frame layout, and the data section with its
-relocations. `vcc -S` writes it, and the output assembles: a global with an
-initializer, a tentative definition in `.bss`, a string literal as its own object,
-and a pointer into a table all round-trip through GNU `as` into a PE object.
+`src/backend/asm.v` is the text emitter behind `Emit` and everything about where
+things live: addressing, loads and stores, the comparison and conversion tables,
+the psABI's register classification, frame layout, and the data section with its
+relocations.
+
+`src/backend/gen.v` is the other half — the value-stack walk over the statement
+tree: `gen_expr` and `gen_stmt`, the prologue and epilogue, the call sequence and
+its argument classification, the variadic register save area, the VLA allocator,
+and the bitfield extract and merge. The whole of codegen.c is now in V.
 
 **Two of chibicc's data directives are wrong for this target and were replaced.**
 `.local` and `.type x, @object` are ELF spellings that GNU as rejects here, with
 `unknown pseudo-op` and `junk at end of line`. A symbol with no `.globl` is
 already local, and COFF takes an object's size from its symbol table.
 
-**Not done:** `gen_expr` and `gen_stmt`, the value-stack walk over the statement
-tree — roughly 1,100 of the 1,595 lines. A translation unit containing a function
-definition is *reported*, not emitted with an empty body: an object that links and
-does the wrong thing is the failure this project is least willing to accept.
+**Verified by running it.** Five programs are assembled by GNU as, linked by gcc
+and executed, each returning 0 only if it computed the expected value: integer
+arithmetic in a loop, `switch` with a case range, a backward `goto`, array
+indexing through a parameter, struct assignment and return, bitfield
+read-modify-write, and floating-point division and multiplication. tcc was run
+over the same expressions so the expected values are C's rather than this
+implementation's.
+
+**Known, and the next things to fix.** Two front-end defects surfaced by running
+the generator over tcc's own `stdio.h`: a diagnostic from an included file is
+reported against the *including* file's path and line, and the arity of the
+`getwchar` builtin macro is mis-evaluated. Neither is worked around in the
+generator. `.loc` directives are not emitted, so the objects carry no line
+information yet.
 
 **Acceptance: the chibicc test suite passes**, adapted to invoke `vcc -S` then
 `gcc`. This is the strongest correctness signal available anywhere in this
-project — it compares runtime behaviour against gcc, not text. It cannot run
-until the expression and statement walk exists.
+project — it compares runtime behaviour against gcc, not text. The suite itself
+has not been fetched yet, so this acceptance criterion is not yet met.
 
 ### Phase 3 — machine-code backend and COFF objects
 

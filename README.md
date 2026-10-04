@@ -27,12 +27,12 @@ not an expectation derived from the algorithm under test. Two constructs are rep
 rather than translated, and both need a node kind the backend must implement anyway:
 `asm` statements, and compound assignment to an `_Atomic` object.
 
-The code generator is started. `vcc -S` writes AT&T assembly for the data section —
-initializers, string literals, relocations, `.bss` and the psABI's alignment rules — and
-the output assembles into a PE object with GNU `as`. A translation unit with a
-function definition is reported rather than emitted, because the expression and
-statement walk is not written yet and an object that links and does the wrong thing
-is worse than one that refuses to be produced.
+`vcc -S` writes AT&T assembly for whole translation units: the data section,
+the expression and statement walk, the frame layout and the psABI's argument passing.
+The output assembles into a PE object with GNU `as` and links with gcc, and five
+programs built this way are executed and checked against the values tcc computes for
+the same expressions — loops, `switch` with a case range, `goto`, array indexing
+through a parameter, struct return, bitfields and floating point.
 
 ## Layout
 
