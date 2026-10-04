@@ -129,8 +129,27 @@ information yet.
 
 **Acceptance: the chibicc test suite passes**, adapted to invoke `vcc -S` then
 `gcc`. This is the strongest correctness signal available anywhere in this
-project — it compares runtime behaviour against gcc, not text. The suite itself
-has not been fetched yet, so this acceptance criterion is not yet met.
+project — it compares runtime behaviour against gcc, not text.
+
+**The suite is fetched and wired up; the criterion is not met.** All 18 test files
+are read from `rui314/chibicc` at `test/`, run through `vcc -S`, assembled by GNU
+`as`, and linked by gcc against the suite's own `common`. The blocker is one
+thing, and it is in the front end rather than the generator: every file's parse
+**stops after the declarations in `test.h`** and never reaches the file's own
+`main`, with no diagnostic. `--dump-ast` shows it directly — `arith.c` reports
+seven declarations from the header and nothing else.
+
+The two are therefore separable: the generator produces working code for
+everything that reaches it, and the front end stops reading. What to do next is
+find what in `test.h`'s include closure ends the translation unit silently;
+`translation_unit` has a path that returns without consuming the rest of the
+input and without reporting.
+
+Found while chasing that, and fixed: `-S` used to write a one-line stub when the
+front end reported errors. It assembled cleanly and then failed at link with
+`undefined reference to WinMain` — a message about the link stage that was really
+about the parse, and one that cost a whole suite run to read past. It now writes
+no file at all and exits 1.
 
 ### Phase 3 — machine-code backend and COFF objects
 

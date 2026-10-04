@@ -381,12 +381,21 @@ fn emit_asm(o &Options) {
 			eprintln('${path}: ${e}')
 			failed = true
 		}
-		parsed := vcc.parse_tokens(pre.tokens, path, p.packs)
+		// parsed is mutable so that mut parsed.globals below is a reference to
+		// the result's own slice rather than to a temporary copy of its header. A copy
+		// is silently empty, and an empty globals list produces a one-line assembly
+		// file that assembles and links into nothing.
+		mut parsed := vcc.parse_tokens(pre.tokens, path, p.packs)
 		for e in parsed.errors {
 			eprintln(e)
 			failed = true
 		}
 		if parsed.errors.len > 0 {
+			// Nothing is generated for a translation unit the front end rejected. It
+			// used to be skipped, which left a one-line file behind that the assembler
+			// accepted and the linker then failed with `undefined reference to WinMain`
+			// — a message about the *link* that was really about the parse. The
+			// diagnostics above are the useful output, so no file is written at all.
 			continue
 		}
 		mut g := backend.AsmGen{}
@@ -402,14 +411,15 @@ fn emit_asm(o &Options) {
 		all << unit
 	}
 
+	if failed {
+		exit(1)
+	}
+
 	text := all.join('\n')
 	if o.output == '' {
 		print(text)
 	} else if os.write_file(o.output, text) or { -1 } != 0 {
 		eprintln('vcc: cannot write ${o.output}')
-		exit(1)
-	}
-	if failed {
 		exit(1)
 	}
 }
