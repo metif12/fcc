@@ -73,10 +73,21 @@ fn (mut g AsmGen) classify_args(node &ast.Node) (int, []ArgClass) {
 				}
 				fp++
 			} else if ty.basic == .ldouble_ {
-				// The 80-bit format has no register class, so it is always on the stack,
-				// and it takes two slots.
-				c.by_stack = true
-				stack += 2
+				// [MS x64 2.2.5] An argument larger than eight bytes that is not a
+				// structure is passed by *reference*: the caller spills it and puts the
+				// address in the next integer register. x87 has no register class here
+				// either, and the psABI's two-stack-slot x87 argument does not exist on
+				// this target — gcc does `fstpt` to its own frame and `movq` the address.
+				//
+				// So it is classified exactly like a pointer: one general register, whose
+				// value is an address. `push_args_pass` spills the value and pushes that
+				// address, which is what makes the ordinary `pop arg_regs[gp]` below load
+				// it.
+				if gp >= gp_max {
+					c.by_stack = true
+					stack++
+				}
+				gp++
 			} else {
 				if gp >= gp_max {
 					c.by_stack = true
@@ -182,9 +193,15 @@ fn (mut g AsmGen) push_args_pass(node &ast.Node, classes []ArgClass, first_pass 
 			&& (ty.basic == .float_ || ty.basic == .double_) {
 			g.pushf()
 		} else if ty.kind == .basic && ty.basic == .ldouble_ {
+			// Spill the value where it will survive the call, then push its *address* so
+			// the rest of the machinery treats it as the pointer-sized argument it now is.
+			// The 16 bytes stay on the stack until the call returns, which is exactly the
+			// window the callee has to read them.
 			g.line('  sub $16, %rsp')
 			g.line('  fstpt (%rsp)')
 			g.depth += 2
+			g.line('  mov %rsp, %rax')
+			g.push()
 		} else {
 			g.push()
 		}
@@ -782,6 +799,12 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 			continue
 		}
 		if ty.kind == .basic && ty.basic == .ldouble_ {
+			// The address `push_args_pass` pushed is loaded like any other pointer-sized
+			// argument, which is what it now is.
+			if !c.by_stack && gp < gp_max {
+				g.pop(arg_regs[gp])
+				gp++
+			}
 			continue
 		}
 		if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_) {
@@ -821,8 +844,18 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 	// ABI, which has no such save area.
 	g.line('  sub $${shadow_space}, %rsp')
 	g.line('  call *%r10')
-	g.line('  add $${shadow_space + stack_args * 8}, %rsp')
-	g.depth -= stack_args
+	// The by-reference spill is released here too. It is not part of `stack_args` — those
+	// are the arguments the *callee* pops — so without this the frame would grow by 16
+	// bytes at every call passing a `long double`, and the function would end with a
+	// depth it could never account for.
+	mut spill := 0
+	for i, arg in node.args {
+		if arg.ty.kind == .basic && arg.ty.basic == .ldouble_ && !classes[i].by_stack {
+			spill += 2
+		}
+	}
+	g.line('  add $${shadow_space + (stack_args + spill) * 8}, %rsp')
+	g.depth -= stack_args + spill
 
 	// A narrow return type leaves the upper bits of %rax undefined and the next
 	// operation would read them, so they are cleared here rather than at every use.
@@ -1312,6 +1345,18 @@ fn (mut g AsmGen) spill_params(fun &ast.Obj) {
 		if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_) {
 			g.store_fp(fp, param.offset, ty.size)
 			fp++
+			continue
+		}
+		if ty.kind == .basic && ty.basic == .ldouble_ {
+			// The register holds the *address* of the caller's 16 bytes, not the value,
+			// so the value is loaded through it and then written to the frame slot. This
+			// is the same two instructions the psABI needed in the other direction, which
+			// is how the mistake is easy to make: `fldt` from the register, `fstpt` to
+			// the slot, and the general-register spill is not used at all.
+			reg := arg_regs[gp]
+			g.line('  fldt (${reg})')
+			g.line('  fstpt ${param.offset}(%rbp)')
+			gp++
 			continue
 		}
 		g.store_gp(gp, param.offset, ty.size)

@@ -577,18 +577,20 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			}
 
 			// A pointer is passed like any other integer, so the test for "goes in a
-			// general register" is "is not a floating or extended value" rather than
+			// general register" is "is not a floating-point value" rather than
 			// "is a basic type". Getting that backwards puts every pointer parameter
 			// on the stack at +16, where the caller never put it.
+			//
+			// A `long double` is a general-register argument too, and its register holds
+			// an *address* rather than the value: [MS x64 2.2.5] passes anything wider
+			// than eight bytes by reference. Listing it with the floating-point types is
+			// what put it on the stack on the caller side as well, which is the other
+			// half of why `sprintf(buf, "%Lf", x)` never worked.
 			is_float := ty.kind == .basic
-				&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_)
-			if !passed && is_float {
-				// The 80-bit format has no register class, so it is always passed on
-				// the stack.
-				if ty.basic != .ldouble_ && fp < fp_max {
-					fp++
-					passed = true
-				}
+				&& (ty.basic == .float_ || ty.basic == .double_)
+			if !passed && is_float && fp < fp_max {
+				fp++
+				passed = true
 			}
 			if !passed && !is_float && gp < gp_max {
 				gp++

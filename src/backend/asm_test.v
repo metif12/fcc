@@ -271,19 +271,39 @@ fn test_a_symbol_without_a_dollar_sign_is_not_quoted() {
 	assert text.contains('lea q(%rip), %rax'), 'an ordinary symbol should not be quoted'
 }
 
-fn test_a_long_double_stack_argument_takes_two_slots() {
-	// `long double` has no register class, so it goes in the argument area, and it is
-	// pushed as two eight-byte slots. Counting one slot per stack argument made the
-	// caller's own cleanup a slot short, and the enclosing function finished with one
-	// value still on the stack — which is how `sprintf(buf, "%Lf", x)` was rejected.
+fn test_a_long_double_argument_is_passed_by_address() {
+	// [MS x64 2.2.5] Anything wider than eight bytes that is not a structure is passed by
+	// reference. gcc does `fstpt` to its own frame and `movq` the address into a general
+	// register; there is no x87 argument on the stack on this target at all. The previous
+	// version of this test asserted the psABI's two stack slots and had to be rewritten.
 	text, errs := generated('int f(char *b, char *g, ...); int h(void) { char b[8]; return f(b, "", (long double)1.5); }')
 	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
-	// Three slots go in the area — the format pointer, and the long double as two — so
-	// [psABI] pads to an even four: one padding slot and the long double's own `sub`.
-	// The bug was never the emitted code but the depth it was counted at, which is what
-	// `errs` above asserts on: before the fix this reported a value left on the stack.
-	assert text.contains('fstpt (%rsp)'), 'the long double was not stored on the stack'
-	assert text.count('sub $16, %rsp') == 2, 'the argument area was sized for one slot per argument'
+	assert text.contains('  fstpt (%rsp)'), 'the value was not spilled'
+	// Then the address is pushed, so the ordinary pop loads it like a pointer.
+	assert text.contains('  mov %rsp, %rax'), 'the address of the spill was not taken'
+	assert text.contains('  pop %rdx'), 'the address did not reach the second integer register'
+}
+
+fn test_the_by_reference_spill_is_released_after_the_call() {
+	// The spill is not one of `stack_args` — those are what the *callee* pops — so
+	// without adding it to the cleanup the frame grew 16 bytes at every such call and the
+	// function ended with a depth it could never account for.
+	text, errs := generated('int f(...); int h(void) { return f((long double)1.5); }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	// 32 of home area plus the 16-byte spill, which is 48 and not a multiple of 16 on its
+	// own because the spill is below the area and was already accounted for in the depth.
+	assert text.contains('  add $48, %rsp'), 'got: ' + text
+}
+
+fn test_a_long_double_parameter_is_loaded_through_its_address() {
+	// The callee receives an address, so the value is `fldt`-ed from the register and
+	// `fstpt`-ed to the frame slot. The general-register spill is not used at all, which
+	// is what makes this easy to get backwards: it is the psABI's pair with the operands
+	// swapped, and swapping it back is the bug this replaced.
+	text, errs := generated('long double f(long double x) { return x + x; }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert text.contains('  fldt (%rcx)'), 'the parameter was not loaded through its address'
+	assert text.contains('  fstpt'), 'the parameter was not written to its frame slot'
 }
 
 fn test_an_ordinary_stack_argument_is_still_one_slot() {
