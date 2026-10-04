@@ -130,8 +130,19 @@ fn (mut g AsmGen) popf(reg int) {
 // parts of the frame and evaluating them in one pass would interleave them.
 fn (mut g AsmGen) push_args(node &ast.Node, classes []ArgClass) int {
 	mut total := 0
-	for c in classes {
-		if c.by_stack {
+	for i, c in classes {
+		if !c.by_stack {
+			continue
+		}
+		// The argument area is counted in eight-byte slots, not in arguments: a
+		// `long double` is pushed as two of them (`sub $16, %rsp; fstpt (%rsp)`).
+		// Counting one slot per argument made the caller's own cleanup a slot short, so
+		// `main` finished with one value still on the stack — and `sprintf(buf, "%Lf", x)`
+		// is ordinary C.
+		ty := node.args[i].ty
+		if ty.kind == .basic && ty.basic == .ldouble_ {
+			total += 2
+		} else {
 			total++
 		}
 	}

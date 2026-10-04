@@ -266,3 +266,24 @@ fn test_a_symbol_without_a_dollar_sign_is_not_quoted() {
 	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
 	assert text.contains('lea q(%rip), %rax'), 'an ordinary symbol should not be quoted'
 }
+
+fn test_a_long_double_stack_argument_takes_two_slots() {
+	// `long double` has no register class, so it goes in the argument area, and it is
+	// pushed as two eight-byte slots. Counting one slot per stack argument made the
+	// caller's own cleanup a slot short, and the enclosing function finished with one
+	// value still on the stack — which is how `sprintf(buf, "%Lf", x)` was rejected.
+	text, errs := generated('int f(char *b, char *g, ...); int h(void) { char b[8]; return f(b, "", (long double)1.5); }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	// Three slots go in the area — the format pointer, and the long double as two — so
+	// [psABI] pads to an even four: one padding slot and the long double's own `sub`.
+	// The bug was never the emitted code but the depth it was counted at, which is what
+	// `errs` above asserts on: before the fix this reported a value left on the stack.
+	assert text.contains('fstpt (%rsp)'), 'the long double was not stored on the stack'
+	assert text.count('sub $16, %rsp') == 2, 'the argument area was sized for one slot per argument'
+}
+
+fn test_an_ordinary_stack_argument_is_still_one_slot() {
+	text, errs := generated('int f(int a, int b, int c); int h(void) { return f(1, 2, 3); }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert text.contains('sub $16, %rsp'), 'three eight-byte arguments should be padded to two slots'
+}
