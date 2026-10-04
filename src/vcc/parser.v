@@ -2556,19 +2556,30 @@ fn (mut p Parser) const_expr_node() &ast.Node {
 // The middle of a conditional can be any expression, not a constant one: `x ? f() :
 // 1` is legal. Here only the constant form is parsed, and a non-constant middle is
 // reported rather than mis-evaluated.
+// conditional parses `c ? a : b`, and the GNU form `a ?: b`.
+//
+// The middle operand of `?:` may be left out, and then it is the condition again: the
+// whole expression is `a` when `a` is nonzero and `b` when it is zero. Written out as
+// `a ? a : b` here rather than as its own node kind, because there is nothing else for
+// the backend to do differently.
 fn (mut p Parser) conditional() &ast.Node {
 	cond := p.logor()
 	if !p.at('?') {
 		return cond
 	}
 	tok := p.next()
-	then := p.conditional()
+	// The middle operand of `?:` may be left out, and then it is the condition again.
+	// It is recorded as a flag rather than left to be discovered by comparing `then` and
+	// `cond`, because `add_type` casts each branch and the cast replaces the pointer.
+	gnu := p.at(':')
+	then := if gnu { cond } else { p.conditional() }
 	p.expect(':')
 	els := p.conditional()
 	mut node := p.new_node(.cond_expr, tok)
 	node.cond = cond
 	node.then = then
 	node.els = els
+	node.then_is_cond = gnu
 	add_type(mut node)
 	return node
 }
@@ -3054,6 +3065,13 @@ fn (mut p Parser) primary() &ast.Node {
 //
 // Consuming rather than stopping is what lets the corpus sweep see every construct
 // vcc cannot yet parse instead of only the first one in the file.
+// unsupported_expression skips an expression this front end does not implement and
+// stands a zero in its place.
+//
+// The stand-in is typed. It used to be an untyped `.generic` node, and an untyped node
+// reaches `add_type`, which reads `node.then.ty` and crashes on the nil — so a
+// construct that was merely *unimplemented* aborted the compiler instead of being
+// reported. `a ?: b` did exactly that.
 fn (mut p Parser) unsupported_expression() &ast.Node {
 	tok := p.tok()
 	mut depth := 0
@@ -3072,7 +3090,12 @@ fn (mut p Parser) unsupported_expression() &ast.Node {
 		}
 		p.pos++
 	}
-	return p.new_node(.generic, tok)
+	return &ast.Node{
+		kind: .num
+		tok:  tok
+		num:  0
+		ty:   ty_int
+	}
 }
 
 // size_of_type returns `sizeof` of a type.

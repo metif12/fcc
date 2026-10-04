@@ -179,10 +179,16 @@ pub mut:
 	lhs &Node = unsafe { nil }
 	rhs &Node = unsafe { nil }
 
-	// cond, then and els form a three-way conditional.
-	cond &Node = unsafe { nil }
-	then &Node = unsafe { nil }
-	els  &Node = unsafe { nil }
+// cond, then and els form a three-way conditional.
+cond &Node = unsafe { nil }
+then &Node = unsafe { nil }
+els  &Node = unsafe { nil }
+// then_is_cond says the middle operand was left out, so this is the GNU `a ?: b` and
+// `then` is the very node `cond` is. It is a fact about the source rather than a
+// decision about code generation, which is why it belongs here and not in the backend's
+// own state — and it has to survive the cast `add_type` puts on each branch, so the
+// backend cannot discover it by comparing the two pointers.
+then_is_cond bool
 
 	// body, init, inc and brk_label make up a loop: `for (init; cond; inc) body`.
 	// brk_label and cont_label are already-unique names, resolved by the parser,

@@ -439,7 +439,14 @@ fn (mut g AsmGen) gen_expr(node &ast.Node) {
 			g.gen_expr(node.cond)
 			g.cmp_zero(node.cond.ty)
 			g.line('  je .L.else.${c}')
-			g.gen_expr(node.then)
+			// The GNU `a ?: b` has no middle operand: `a` is evaluated once and its
+			// value is the result when it is nonzero. Generating the branch again would
+			// evaluate `a` twice, which is observable — `++i ?: 10` increments twice and
+			// answers 5 where the answer is 4. The value is already in %rax from the test
+			// above, so the branch is already taken.
+			if !node.then_is_cond {
+				g.gen_expr(node.then)
+			}
 			g.line('  jmp .L.end.${c}')
 			g.line('.L.else.${c}:')
 			g.gen_expr(node.els)

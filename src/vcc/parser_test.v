@@ -738,3 +738,64 @@ fn test_the_parser_makes_progress_past_a_token_it_did_not_expect() {
 	assert r.errors.len > 0, 'expected a diagnostic'
 	assert r.errors.len < 10, 'a missing semicolon produced ${r.errors.len} diagnostics'
 }
+
+// --- the GNU conditional ---
+
+fn test_the_middle_operand_of_a_gnu_conditional_may_be_left_out() {
+	r := parsed('int n = 3 ?: 5;')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+}
+
+// returned walks to the expression of a one-statement function body's `return`, which is
+// the only public path from a parsed translation unit to a node: a global's initializer
+// is consumed into its byte image and is not kept.
+//
+// The casts come off first, because `add_type` wraps the returned expression in one to
+// the function's return type — and it is `add_type` that puts a cast on each branch of
+// the conditional too, which is why the GNU form cannot be recognised by comparing
+// pointers.
+fn returned(src string) &ast.Node {
+	r := parsed(src)
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].body.len == 1, 'got ${r.globals[0].body.len} statements'
+	mut n := r.globals[0].body[0].lhs
+	for n.kind == .cast {
+		n = n.lhs
+	}
+	return n
+}
+
+fn test_an_omitted_middle_operand_is_recorded_rather_than_inferred() {
+	// It has to be a flag: `add_type` casts each branch, so the backend cannot tell the
+	// GNU form from `a ? a : b` by comparing the two pointers afterwards. It matters
+	// because `a ?: b` evaluates `a` once, and generating the branch twice evaluates
+	// `++i ?: 10` twice.
+	n := returned('int f(void) { return 1 ?: 2; }')
+	assert n.kind == .cond_expr, 'got ${n.kind}'
+	assert n.then_is_cond, 'the omitted operand was not recorded'
+}
+
+fn test_a_written_out_middle_operand_is_not_the_gnu_form() {
+	n := returned('int f(void) { return 1 ? 1 : 2; }')
+	assert n.kind == .cond_expr, 'got ${n.kind}'
+	assert !n.then_is_cond, 'a written-out operand was read as omitted'
+}
+
+fn test_the_gnu_conditional_picks_the_condition_when_it_is_nonzero() {
+	r := parsed('int a = 3 ?: 5;')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert bytes_of(r.globals[0]) == '03000000', bytes_of(r.globals[0])
+}
+
+fn test_the_gnu_conditional_falls_through_when_the_condition_is_zero() {
+	r := parsed('int a = 0 ?: 5;')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert bytes_of(r.globals[0]) == '05000000', bytes_of(r.globals[0])
+}
+
+fn test_an_unsupported_expression_is_reported_rather_than_crashing_the_parser() {
+	// The stand-in used to be an untyped node and `add_type` reads `node.then.ty`, so an
+	// unimplemented construct aborted the compiler instead of producing a diagnostic.
+	r := parsed('int f(void) { return 1 @ 2; }')
+	assert r.errors.len > 0, 'expected a diagnostic'
+}
