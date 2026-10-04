@@ -64,6 +64,9 @@ pub mut:
 	// preprocess_only mirrors `-E` after the preprocessor exists: run phase 1 and
 	// print the result.
 	preprocess_only bool
+	// dump_ast runs the parser and prints what it produced. It is how phase 1 is
+	// signed off — see `dump_ast`.
+	dump_ast bool
 	// verbose prints the command it would run.
 	verbose bool
 	// options_not_yet_honoured maps an accepted-but-unimplemented option to the
@@ -95,9 +98,12 @@ pub const usage = 'usage: vcc [options] file...
   -w               suppress warnings
   -Werror=implicit-function-declaration
                    make an implicit function declaration an error
+-E            tokenize only, print the token stream
+  --preprocess  preprocess only, print the resulting tokens
+  --dump-ast    parse and print the declarations that were read
   --version        print the version
   --help           print this message
-'
+  '
 
 // parse_args turns a raw argument list into options.
 //
@@ -134,6 +140,8 @@ pub fn parse_args(args []string) !Options {
 			o.dump_tokens = true
 		} else if arg == '--preprocess' {
 			o.preprocess_only = true
+		} else if arg == '--dump-ast' {
+			o.dump_ast = true
 		} else if arg == '-shared' {
 			o.shared = true
 		} else if arg == '-S' {
@@ -303,8 +311,47 @@ pub fn main(args []string) {
 		dump_preprocessed(o)
 		return
 	}
-	eprintln('vcc: phase 1 — the command line is parsed and the preprocessor runs, but no C is compiled yet')
+	if o.dump_ast {
+		dump_ast(o)
+		return
+	}
+	eprintln('vcc: phase 1 — the front end runs, but no code is generated yet')
 	exit(1)
+}
+
+// dump_ast preprocesses and parses every input, then prints what the parser produced.
+//
+// It is the acceptance signal for phase 1: the sweep that matters is running it over a
+// corpus and reading the diagnostics, not checking that it exits zero. So every input
+// is attempted even after one fails, and the exit code reflects whether anything was
+// reported.
+fn dump_ast(o &Options) {
+	mut failed := false
+	for path in o.inputs {
+		mut p := vcc.preprocessor(o.includes, o.sys_includes)
+		for spec in o.defines {
+			p.define_from_option(spec)
+		}
+		for name in o.undefines {
+			p.undefine(name)
+		}
+		p.define_builtins()
+		pre := p.run(path)
+		for e in pre.errors {
+			eprintln('${path}: ${e}')
+			failed = true
+		}
+		parsed := vcc.parse_tokens(pre.tokens, path, p.packs)
+		for e in parsed.errors {
+			eprintln(e)
+			failed = true
+		}
+		print('--- ${path}\n')
+		print(parsed.dump())
+	}
+	if failed {
+		exit(1)
+	}
 }
 
 // preprocess_only mirrors `-E`: run the preprocessor and print the resulting

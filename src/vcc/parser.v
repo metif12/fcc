@@ -1,0 +1,3040 @@
+module vcc
+
+import ast
+
+
+// The declaration half of the parser.
+//
+// It is chibicc's `parse.c` restricted to declarations: declspec, declarators,
+// struct, union, enum, typedef, attributes, `typeof`, initializers, and the
+// constant-expression evaluator they all need. Expressions and statements are the
+// next slice.
+//
+// The restriction has one consequence worth stating up front. An initializer's
+// elements are expressions, and chibicc parses them with its full expression
+// grammar. Here only *constant* expressions are parsed, because that is all a
+// global initializer may legally contain, and it is also all an array bound, an
+// enum value, a bitfield width and a `sizeof` needs. A non-constant form — a
+// function call, an assignment — is recorded as a `.generic` node with a
+// diagnostic, so a corpus sweep finds every one of them instead of stopping at
+// the first.
+//
+// Two things are parsed rather than skipped: a function's parameter list, because
+// its types are declarations; and its body's token extent, which is recorded on
+// the object so the next slice resumes there rather than re-reading the file.
+
+// VarScope is what one name means in one block scope: a variable, a typedef, or
+// an enumeration constant.
+struct VarScope {
+mut:
+	name string
+	obj &ast.Obj = unsafe { nil }
+	// type_def is an option, not a bare pointer. Returning a bare nil pointer from a
+	// `?&T` function yields `some(nil)` rather than `none` in this V build — measured
+	// with a two-line probe, where `f(s) == none` printed false — and `some(nil)`
+	// survives `or { default }`, so `find_typedef` would report a variable as a type
+	// name and `declspec` would hand on a nil type. Storing the option keeps `none`
+	// and `some` distinguishable.
+	type_def ?&ast.Type = none
+	// enum_ty is non-nil when the name is an enumeration constant, and is the
+	// enum the constant belongs to. `enum_val` is only then meaningful.
+	enum_ty &ast.Type = unsafe { nil }
+	enum_val i64
+}
+
+// Scope is one block. C has two namespaces per block, so a struct tag and a
+// variable of the same name do not collide, and this keeps them apart.
+struct Scope {
+mut:
+	vars map[string]&VarScope
+	tags map[string]&ast.Type
+}
+
+// VarAttr carries the storage class and alignment of a declaration. They are not
+// part of the type, because `static int x` and `int x` are the same type.
+struct VarAttr {
+mut:
+	is_typedef bool
+	is_static bool
+	is_extern bool
+	is_inline bool
+	is_tls    bool
+	align     int
+}
+
+// Initializer is one node of the initializer tree. An initializer nests because an
+// aggregate can be initialized by an aggregate: `int x[2][2] = {{1,2},{3,4}}`.
+struct Initializer {
+mut:
+	ty &ast.Type = unsafe { nil }
+	// is_flexible marks an aggregate whose extent the initializer has yet to
+	// decide, which is how `int x[] = {1,2,3}` learns its length.
+	is_flexible bool
+	// expr is the initializing expression of a scalar, or of an aggregate that is
+	// initialized from a single value of the same struct type.
+	expr &ast.Node = unsafe { nil }
+	// children are the element initializers of an array or struct.
+	children []&Initializer
+	// mem_index is the index of the union member being initialized, or -1.
+	mem_index int = -1
+}
+
+// InitDesg is a step in the chain of lvalues an initializer writes through, for
+// example `x` then `x[2]` then `x[2].b` for `struct S x[3]`.
+//
+// `@[heap` because each step holds a reference to the one before it, and those steps
+// live for as long as the initializer tree that created them.
+@[heap]
+struct InitDesg {
+mut:
+	next &InitDesg = unsafe { nil }
+	idx  int
+	// member is the struct field this step names, or none when the step is an array
+	// index or the object itself.
+	member ?&ast.Member
+	obj    &ast.Obj = unsafe { nil }
+}
+
+// ParseResult is what parsing one translation unit produced. It is not called Result because
+// the preprocessor already has one of those in this module.
+pub struct ParseResult {
+pub mut:
+	globals []&ast.Obj
+	errors []string
+}
+
+// Parser holds the state of one parse.
+//
+// The token stream is a slice with an index rather than a linked list, and parsing
+// functions move `pos` themselves instead of returning "the rest of the input".
+// chibicc threads a `Token **rest` through every function; with a mutable struct
+// that becomes the same thing without a second return value at every level.
+pub struct Parser {
+pub mut:
+	toks []ast.Token
+	pos  int
+	// path names the file the tokens came from, for diagnostics.
+	path string
+	// scopes is a stack; the last entry is the innermost block.
+	scopes []Scope
+	globals []&ast.Obj
+	locals  []&ast.Obj
+	// builtin_alloca is the object the VLA translation refers to. It is declared by
+	// the parser rather than by any C source.
+	builtin_alloca &ast.Obj = unsafe { nil }
+	errors []string
+	// quiet suppresses diagnostics while the parser speculates — looking ahead to
+	// decide whether a declaration is a function, for instance. Speculation must
+	// not report, or every lookahead would double every error.
+	quiet int
+	// counter names anonymous globals.
+	counter int
+	// current_fn is the function whose body is being parsed, which is what a `return`
+	// casts to and what a parameter list is attached to.
+	current_fn &ast.Obj = unsafe { nil }
+	// current_switch is the innermost `switch`, which a `case` attaches itself to.
+	current_switch &ast.Node = unsafe { nil }
+	// brk_label and cont_label are the labels `break` and `continue` jump to. They
+	// are resolved while parsing because a one-pass backend cannot invent them later,
+	// and a `break` outside any loop is an error rather than a label to nowhere.
+	brk_label string
+	cont_label string
+	// gotos and labels collect the two halves of a goto so that a forward reference
+	// can be resolved once the whole body has been read.
+	gotos []&ast.Node
+	labels []&ast.Node
+	// packs are the `#pragma pack` events the preprocessor saw, in order.
+	packs []PackEvent
+}
+
+// parse_tokens parses a preprocessed token stream into global declarations.
+//
+// `packs` carries the `#pragma pack` state, which the preprocessor sees and the
+// layout code needs; see `Parser.pack_at`.
+pub fn parse_tokens(toks []ast.Token, path string, packs []PackEvent) ParseResult {
+	mut p := Parser{
+		toks:   toks
+		path:   path
+		packs:  packs
+		scopes: [
+			Scope{
+				vars: map[string]&VarScope{}
+				tags: map[string]&ast.Type{}
+			},
+		]
+		globals: []&ast.Obj{}
+		locals:  []&ast.Obj{}
+		errors:  []string{}
+	}
+	p.translation_unit()
+	p.scan_globals()
+	return ParseResult{
+		globals:         p.globals
+		errors:          p.errors
+		}
+}
+
+// --- token access ---
+
+// tok is the token at the cursor.
+fn (p &Parser) tok() ast.Token {
+	return p.toks[p.pos]
+}
+
+// tok_at is the token n positions ahead, clamped to the last one so that lookahead
+// at the end of a file reads the eof sentinel rather than running off.
+fn (p &Parser) tok_at(n int) ast.Token {
+	mut i := p.pos + n
+	if i >= p.toks.len {
+		i = p.toks.len - 1
+	}
+	return p.toks[i]
+}
+
+// at reports whether the token at the cursor has this spelling.
+//
+// It compares the raw spelling rather than a keyword's canonical name, because
+// GNU accepts several spellings of the same keyword (`restrict`, `__restrict`,
+// `__restrict__`) and every place that cares names the ones it accepts — which is
+// what chibicc does too.
+fn (p &Parser) at(text string) bool {
+	return p.tok().text == text
+}
+
+fn (p &Parser) at_kw(n int) bool {
+	return p.tok_at(n).kind == .keyword
+}
+
+// next consumes and returns the token at the cursor.
+fn (mut p Parser) next() ast.Token {
+	t := p.toks[p.pos]
+	if t.kind != .eof {
+		p.pos++
+	}
+	return t
+}
+
+// consume consumes the token at the cursor if it has this spelling.
+fn (mut p Parser) consume(text string) bool {
+	if !p.at(text) {
+		return false
+	}
+	p.pos++
+	return true
+}
+
+// expect consumes a token that must have this spelling.
+//
+// The token is read *before* the cursor moves, and the cursor is advanced *outside* the
+// branch. Both halves matter: this V build loses a receiver-field write that is followed
+// by a read of the receiver's slice field in the same method, which is exactly what
+// reading `p.toks[p.pos]` after `p.pos++` looks like. See notes/DECISIONS.md.
+//
+// A mismatch is reported and the cursor is left where it was, rather than consuming
+// something that is probably the start of the next declaration. That choice is what
+// keeps a malformed declaration from eating the rest of the file.
+fn (mut p Parser) expect(text string) ast.Token {
+	tok := p.tok()
+	if tok.text != text {
+		p.error_at(tok, 'expected "${text}", found "${tok.str()}"')
+		return tok
+	}
+	p.pos++
+	return tok
+}
+
+// is_end reports whether the cursor is at the end of an initializer list, which is
+// either `}` or `,}` because a trailing comma is allowed.
+fn (p &Parser) is_end() bool {
+	return p.at('}') || (p.at(',') && p.tok_at(1).text == '}')
+}
+
+fn (mut p Parser) consume_end() bool {
+	if p.at('}') {
+		p.pos++
+		return true
+	}
+	if p.at(',') && p.tok_at(1).text == '}' {
+		p.pos += 2
+		return true
+	}
+	return false
+}
+
+// --- diagnostics ---
+
+// error_at records a diagnostic at a token.
+//
+// The message is prefixed `tcc:` rather than `vcc:` because that is what V's
+// driver looks for: `v3_is_tcc_compilation_failure` treats any output line
+// starting with `tcc:` as a compiler failure, and a compiler that reported errors
+// in a format V does not recognise would make V fall back to `cc` instead of
+// reporting what went wrong. See D22.
+fn (mut p Parser) error_at(tok ast.Token, msg string) {
+	if p.quiet > 0 {
+		return
+	}
+	p.errors << 'tcc: ${p.path}:${tok.line.disp_line}: ${msg}'
+}
+
+// error_here records a diagnostic at the cursor.
+fn (mut p Parser) error_here(msg string) {
+	p.error_at(p.tok(), msg)
+}
+
+// warn_at records a diagnostic that does not prevent compilation.
+fn (mut p Parser) warn_at(tok ast.Token, msg string) {
+	if p.quiet > 0 {
+		return
+	}
+	p.errors << 'tcc: ${p.path}:${tok.line.disp_line}: warning: ${msg}'
+}
+
+// --- scopes ---
+
+fn (mut p Parser) enter_scope() {
+	p.scopes << Scope{
+		vars: map[string]&VarScope{}
+		tags: map[string]&ast.Type{}
+	}
+}
+
+fn (mut p Parser) leave_scope() {
+	if p.scopes.len > 1 {
+		p.scopes.delete(p.scopes.len - 1)
+	}
+}
+
+// push_scope binds a name in the current block.
+fn (mut p Parser) push_scope(name string) &VarScope {
+	sc := &VarScope{name: name}
+	p.scopes[p.scopes.len - 1].vars[name] = sc
+	return sc
+}
+
+// push_tag_scope binds a struct, union or enum tag in the current block.
+fn (mut p Parser) push_tag_scope(name string, ty &ast.Type) {
+	p.scopes[p.scopes.len - 1].tags[name] = ty
+}
+
+// find_var looks a name up through the block chain.
+fn (p &Parser) find_var(name string) ?&VarScope {
+	for i := p.scopes.len - 1; i >= 0; i-- {
+		if sc := p.scopes[i].vars[name] {
+			// A missing map entry reads as a nil pointer, and handing that back inside
+			// an option would make is_typename true for a name that was never declared.
+			if sc != unsafe { nil } {
+				return sc
+			}
+		}
+	}
+	return none
+}
+
+// find_tag looks a tag up through the block chain.
+fn (p &Parser) find_tag(name string) ?&ast.Type {
+	for i := p.scopes.len - 1; i >= 0; i-- {
+		if ty := p.scopes[i].tags[name] {
+			return ty
+		}
+	}
+	return none
+}
+
+// find_typedef returns the type a name is a typedef for, or none.
+fn (p &Parser) find_typedef(tok ast.Token) ?&ast.Type {
+	if tok.kind != .ident {
+		return none
+	}
+	sc := p.find_var(tok.text) or { return none }
+	return sc.type_def
+}
+
+// find_func returns the file-scope function with this name.
+fn (p &Parser) find_func(name string) ?&ast.Obj {
+	if p.scopes.len == 0 {
+		return none
+	}
+	sc := p.scopes[0].vars[name] or { return none }
+	if sc.obj != unsafe { nil } && sc.obj.is_function {
+		return sc.obj
+	}
+	return none
+}
+
+// --- objects ---
+
+// new_obj creates an object and binds its name in the current block.
+fn (mut p Parser) new_obj(name string, ty &ast.Type, line int) &ast.Obj {
+	obj := &ast.Obj{
+		name:  name
+		ty:    ty
+		align: ty.align
+		line:  line
+	}
+	if name != '' {
+		p.push_scope(name).obj = obj
+	}
+	return obj
+}
+
+fn (mut p Parser) new_lvar(name string, ty &ast.Type, line int) &ast.Obj {
+	mut obj := p.new_obj(name, ty, line)
+	obj.is_local = true
+	p.locals << obj
+	return obj
+}
+
+fn (mut p Parser) new_gvar(name string, ty &ast.Type, line int) &ast.Obj {
+	mut obj := p.new_obj(name, ty, line)
+	obj.is_static = true
+	obj.is_definition = true
+	p.globals << obj
+	return obj
+}
+
+// new_unique_name returns a name no other object has.
+//
+// The spelling matches chibicc's `.L..N` so that a `-S` dump can be compared with
+// one, and because a dot cannot begin a C identifier, so a compiler-generated name
+// can never collide with a user's.
+fn (mut p Parser) new_unique_name() string {
+	p.counter++
+	return '.L..${p.counter}'
+}
+
+// new_anon_gvar creates a global with a generated name, which is what a string
+// literal and a compound literal both need.
+fn (mut p Parser) new_anon_gvar(ty &ast.Type, line int) &ast.Obj {
+	return p.new_gvar(p.new_unique_name(), ty, line)
+}
+
+// --- nodes ---
+
+fn (p &Parser) new_node(kind ast.NodeKind, tok ast.Token) &ast.Node {
+	return &ast.Node{
+		kind: kind
+		tok:  tok
+	}
+}
+
+fn (p &Parser) new_binary(kind ast.NodeKind, lhs &ast.Node, rhs &ast.Node,
+	tok ast.Token) &ast.Node {
+	return &ast.Node{
+		kind: kind
+		tok:  tok
+		lhs:  lhs
+		rhs:  rhs
+	}
+}
+
+fn (p &Parser) new_unary(kind ast.NodeKind, expr &ast.Node, tok ast.Token) &ast.Node {
+	return &ast.Node{
+		kind: kind
+		tok:  tok
+		lhs:  expr
+	}
+}
+
+// new_num makes an integer literal node. Its type is left unset so that add_type
+// gives it the type its spelling implies, which is not always int.
+fn (p &Parser) new_num(val i64, tok ast.Token) &ast.Node {
+	return &ast.Node{
+		kind: .num
+		tok:  tok
+		num:  val
+	}
+}
+
+// new_size_t makes the node `sizeof` and `_Alignof` return.
+//
+// It is an unsigned long long rather than an unsigned long because on this target
+// `size_t` is 8 bytes while `long` is 4 — measured, not assumed. chibicc returns
+// an unsigned long, which is right for System V and wrong here.
+fn (p &Parser) new_size_t(val i64, tok ast.Token) &ast.Node {
+	return &ast.Node{
+		kind: .num
+		tok:  tok
+		num:  val
+		ty:   ty_size_t
+	}
+}
+
+fn (p &Parser) new_var_node(obj &ast.Obj, tok ast.Token) &ast.Node {
+	return &ast.Node{
+		kind: .var_ref
+		tok:  tok
+		var:  obj
+	}
+}
+
+// new_alloca makes the call that allocates a variable-length array.
+//
+// It is built in vcc rather than emitted as a call to `alloca` because that keeps
+// the runtime helper out of the phase 2 backend's way; the backend decides how to
+// allocate.
+fn (mut p Parser) new_alloca(sz &ast.Node, tok ast.Token) &ast.Node {
+	ty := func_type(pointer_to(ty_void))
+	return &ast.Node{
+		kind:    .funcall
+		tok:     tok
+		lhs:     p.new_var_node(p.builtin_alloca, tok)
+		func_ty: ty
+		ty:      ty.ret_type
+		args:    [&sz]
+	}
+}
+
+// skip_balanced consumes a bracketed group, given its opening and closing spellings.
+// An unterminated group stops at end of input rather than running off the end.
+fn (mut p Parser) skip_balanced(open string, close string) {
+	if !p.at(open) {
+		return
+	}
+	mut depth := 0
+	for p.tok().kind != .eof {
+		if p.at(open) {
+			depth++
+		} else if p.at(close) {
+			depth--
+			if depth == 0 {
+				p.pos++
+				return
+			}
+		}
+		p.pos++
+	}
+	p.error_here('unterminated ${open} group')
+}
+
+// skip_one_attribute consumes one attribute and its optional argument.
+//
+// The attributes vcc does not act on are consumed rather than rejected, because
+// V's generated C carries several of them (`constructor`, `naked`,
+// `visibility("default")`) and refusing them would make vcc unable to compile
+// V's own output.
+fn (mut p Parser) skip_one_attribute() {
+	p.next()
+	if p.at('(') {
+		p.skip_balanced('(', ')')
+	}
+}
+
+// attribute_list parses any number of `__attribute__((...))` groups and returns the
+// alignment the last one asked for, or 0 for none.
+//
+// Two of them change the layout and so are honoured: `packed`, which is
+// `#pragma pack(1)` spelled as an attribute, and `aligned(N)`. chibicc honours the
+// same two. The rest are read and discarded, and that is a deliberate difference:
+// chibicc reports "unknown attribute" for anything else, which would reject every
+// function V marks `__attribute__((constructor))`.
+fn (mut p Parser) attribute_list(ty ?&ast.Type) int {
+	mut align := 0
+	for p.at('__attribute__') || p.at('__attribute') {
+		p.pos++
+		p.expect('(')
+		p.expect('(')
+		for !p.at(')') {
+			if p.consume(',') {
+				continue
+			}
+			if p.at('packed') || p.at('__packed__') {
+				if mut t := ty {
+					t.pack = 1
+				}
+				p.pos++
+				continue
+			}
+			if p.at('aligned') || p.at('__aligned__') {
+				p.pos++
+				p.expect('(')
+				align = int(p.const_expr())
+				p.expect(')')
+				continue
+			}
+			p.skip_one_attribute()
+		}
+		p.expect(')')
+		p.expect(')')
+	}
+	return align
+}
+
+// pack_at returns the `#pragma pack` value in effect at a line, or 0 when none is.
+//
+// The preprocessor sees `#pragma pack` and the layout code needs it, but the parser
+// is not the preprocessor's caller in a way that lets it hold preprocessor state.
+// Recording where each pragma took effect and asking by line number is enough,
+// because a pragma is always on an earlier line than the struct it governs.
+fn (p &Parser) pack_at(line int) int {
+	mut pack := 0
+	for e in p.packs {
+		if e.line < line {
+			pack = e.pack
+		} else {
+			break
+		}
+	}
+	return pack
+}
+
+// --- declaration specifiers ---
+
+// The type specifiers are counted rather than matched, so that the order does not
+// matter and `unsigned long long int` falls out of the same table as `long long`.
+// Each constant is one bit of the counter's high half; `ts_other` marks that a
+// struct, union, enum, typedef or `typeof` supplied the type instead.
+const ts_void = 1 << 0
+const ts_bool = 1 << 2
+const ts_char = 1 << 4
+const ts_short = 1 << 6
+const ts_int = 1 << 8
+const ts_long = 1 << 10
+const ts_float = 1 << 12
+const ts_double = 1 << 14
+const ts_other = 1 << 16
+const ts_signed = 1 << 17
+const ts_unsigned = 1 << 18
+
+// declspec parses a declaration's specifiers and returns the type they name.
+//
+//	 declspec = ("void" | "_Bool" | "char" | "short" | "int" | "long"
+//	            | "typedef" | "static" | "extern" | "inline"
+//	            | "_Thread_local" | "signed" | "unsigned"
+//	            | struct-decl | union-decl | typedef-name
+//	            | enum-specifier | typeof-specifier
+//	            | "const" | "volatile" | "auto" | "register" | "restrict"
+//	            | "_Noreturn")+
+//
+// The order of the type specifiers is free: `int long static` means the same as
+// `static long int`. Something like `char int` is not valid, and the counter is
+// what rejects it: the combination matches no arm.
+fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
+	mut ty := ty_int
+	mut counter := 0
+	mut atomic_spec := false
+
+	for p.is_typename() {
+		tok := p.tok()
+
+		if tok.text == 'typedef' || tok.text == 'static' || tok.text == 'extern'
+			|| tok.text == 'inline' || tok.text == '_Thread_local'
+			|| tok.text == '__thread' {
+			if mut a := attr {
+				if tok.text == 'typedef' {
+					a.is_typedef = true
+				} else if tok.text == 'static' {
+					a.is_static = true
+				} else if tok.text == 'extern' {
+					a.is_extern = true
+				} else if tok.text == 'inline' {
+					a.is_inline = true
+				} else {
+					a.is_tls = true
+				}
+				if a.is_typedef && (int(a.is_static) + int(a.is_extern)
+					+ int(a.is_inline) + int(a.is_tls)) > 1 {
+					p.error_at(tok, 'typedef may not be used together with static, extern, inline, __thread or _Thread_local')
+				}
+			} else {
+				p.error_at(tok, 'storage class specifier is not allowed in this context')
+			}
+			p.pos++
+			continue
+		}
+
+		// Recognised and ignored: they qualify the type without changing it.
+		if p.consume('const') || p.consume('volatile') || p.consume('auto')
+			|| p.consume('register') || p.consume('restrict') || p.consume('__restrict')
+			|| p.consume('__restrict__') || p.consume('_Noreturn')
+			|| p.consume('__extension__') {
+			continue
+		}
+
+		if p.at('_Atomic') {
+			p.pos++
+			atomic_spec = true
+			if p.consume('(') {
+				ty = p.typename()
+				p.expect(')')
+			}
+			continue
+		}
+
+		if p.at('_Alignas') {
+			p.pos++
+			p.expect('(')
+			mut align := 0
+			if p.is_typename() {
+				align = p.typename().align
+			} else {
+				align = int(p.const_expr())
+			}
+			if mut a := attr {
+				a.align = align
+			} else {
+				p.error_at(tok, '_Alignas is not allowed in this context')
+			}
+			p.expect(')')
+			continue
+		}
+
+		// A type the user defined supplies the whole type, so it cannot be combined
+		// with a built-in specifier.
+		user_ty := p.find_typedef(tok)
+		if tok.text == 'struct' || tok.text == 'union' || tok.text == 'enum'
+			|| tok.text == 'typeof' || tok.text == '__typeof__' || user_ty != none {
+			if counter != 0 {
+				break
+			}
+			if tok.text == 'struct' {
+				p.pos++
+				ty = p.struct_union_decl(.struct_)
+			} else if tok.text == 'union' {
+				p.pos++
+				ty = p.struct_union_decl(.union_)
+			} else if tok.text == 'enum' {
+				p.pos++
+				ty = p.enum_specifier()
+			} else if tok.text == 'typeof' || tok.text == '__typeof__' {
+				p.pos++
+				ty = p.typeof_specifier()
+			} else {
+				ty = user_ty or { ty_int }
+				p.pos++
+			}
+			counter += ts_other
+			continue
+		}
+
+		if tok.text == 'void' {
+			counter += ts_void
+		} else if tok.text == '_Bool' {
+			counter += ts_bool
+		} else if tok.text == 'char' {
+			counter += ts_char
+		} else if tok.text == 'short' {
+			counter += ts_short
+		} else if tok.text == 'int' {
+			counter += ts_int
+		} else if tok.text == 'long' {
+			counter += ts_long
+		} else if tok.text == 'float' {
+			counter += ts_float
+		} else if tok.text == 'double' {
+			counter += ts_double
+		} else if tok.text == 'signed' {
+			counter |= ts_signed
+		} else if tok.text == 'unsigned' {
+			counter |= ts_unsigned
+		} else {
+			p.error_at(tok, 'unexpected type specifier "${tok.text}"')
+			p.pos++
+			continue
+		}
+
+		ty = match counter {
+			ts_void { ty_void }
+			ts_bool { ty_bool }
+			ts_char, ts_signed + ts_char { ty_char }
+			ts_unsigned + ts_char { ty_uchar }
+			ts_short, ts_short + ts_int, ts_signed + ts_short, ts_signed + ts_short + ts_int {
+				ty_short
+			}
+			ts_unsigned + ts_short, ts_unsigned + ts_short + ts_int { ty_ushort }
+			ts_int, ts_signed, ts_signed + ts_int { ty_int }
+			ts_unsigned, ts_unsigned + ts_int { ty_uint }
+			ts_long, ts_long + ts_int, ts_signed + ts_long, ts_signed + ts_long + ts_int {
+				ty_long
+			}
+			// `long long` is a distinct type from `long` on this target: 8 bytes
+			// against 4. Collapsing the two would mis-size every `long long` in
+			// V's generated C and every 64-bit constant.
+			ts_long + ts_long, ts_long + ts_long + ts_int, ts_signed + ts_long + ts_long, ts_signed + ts_long + ts_long + ts_int {
+				ty_llong
+			}
+			ts_unsigned + ts_long, ts_unsigned + ts_long + ts_int { ty_ulong }
+			ts_unsigned + ts_long + ts_long, ts_unsigned + ts_long + ts_long + ts_int {
+				ty_ullong
+			}
+			ts_float { ty_float }
+			ts_double { ty_double }
+			ts_long + ts_double { ty_ldouble }
+			else {
+				p.error_at(tok, 'invalid combination of type specifiers')
+				ty_int
+			}
+		}
+		p.pos++
+	}
+
+	if atomic_spec {
+		ty = copy_type(ty)
+		ty.is_atomic = true
+	}
+	return ty
+}
+
+// is_typename reports whether the token at the cursor can begin a type.
+//
+// The answer decides how a declaration is read, so it must not consume anything.
+// A typedef name counts, which is why it is a scope lookup rather than a keyword
+// test.
+fn (p &Parser) is_typename() bool {
+	tok := p.tok()
+	if tok.kind == .ident {
+		return p.find_typedef(tok) != none
+	}
+	if tok.kind != .keyword {
+		return false
+	}
+	return tok.text in type_specifier_keywords
+}
+
+// type_specifier_keywords are the keywords that can begin a type. `__thread` is not
+// a C keyword but is a GNU one, and it is listed here rather than added to the
+// lexer because adding a keyword would make it unspellable as an identifier.
+const type_specifier_keywords = [
+	'void'
+	'_Bool'
+	'char'
+	'short'
+	'int'
+	'long'
+	'struct'
+	'union'
+	'typedef'
+	'enum'
+	'static'
+	'extern'
+	'_Alignas'
+	'signed'
+	'unsigned'
+	'const'
+	'volatile'
+	'auto'
+	'register'
+	'restrict'
+	'__restrict'
+	'__restrict__'
+	'_Noreturn'
+	'float'
+	'double'
+	'typeof'
+	'__typeof__'
+	'inline'
+	'_Thread_local'
+	'__thread'
+	'_Atomic'
+	'__extension__'
+]
+
+// --- declarators ---
+//
+// A declarator is read as a *shape* first and turned into a type afterwards.
+//
+// chibicc reads one and returns a type directly, which means it has to parse a nested
+// declarator twice: once against a throwaway type to find where it ends, and once
+// against the real type once the suffixes are known. That trick needs the cursor to be
+// saved and restored around the first pass, and `int (*fp)(void)` — where the first
+// pass and the second pass disagree about where the group ends — took the parser into
+// unbounded recursion.
+//
+// Reading the shape and building the type afterwards has no such hazard: the shape is a
+// small tree, it is read once, and building it cannot loop.
+
+// Decl is the shape of one declarator.
+//
+// The order the fields are applied in is the order C reads a declarator right to left:
+// a suffix binds tighter than a `*`, and a parenthesised group is read last.
+struct Decl {
+mut:
+	// ptrs is the number of `*` before the name.
+	ptrs int
+	// nested is a declarator inside parentheses, as in `(*fp)`.
+	nested ?&Decl
+	name string
+	line int
+	// suffixes are the `(` and `[` groups that follow, in source order.
+	suffixes []Suffix
+}
+
+// Suffix is one `(` or `[` group of a declarator.
+//
+// A function suffix keeps its parameter types but not its return type: the return type
+// is whatever the declarator ends up modifying, which is only known when the shape is
+// built.
+struct Suffix {
+mut:
+	is_func  bool
+	func_ty  &ast.Type = unsafe { nil }
+	is_array bool
+	// array_len is the element count, or -1 when it is not known from the source.
+	array_len int = -1
+	// vla_len is the element count as an expression, for a variable-length array.
+	vla_len &ast.Node = unsafe { nil }
+}
+
+// parse_decl_shape reads one declarator's shape.
+//
+//	declarator = pointers ("(" declarator ")")? ident? type-suffix
+//
+// A `(` immediately after the pointers is a group only when a declarator follows it;
+// otherwise it is a parameter list, which is what distinguishes `int (*fp)(void)` from
+// `int (*)(void)`.
+fn (mut p Parser) parse_decl_shape(allow_name bool) &Decl {
+	mut d := &Decl{
+		ptrs:     0
+		nested:   none
+		name:     ''
+		line:     p.tok().line.disp_line
+		suffixes: []Suffix{}
+	}
+	for p.consume('*') {
+		d.ptrs++
+		for p.at('const') || p.at('volatile') || p.at('restrict') || p.at('__restrict')
+			|| p.at('__restrict__') {
+			p.pos++
+		}
+	}
+
+	if p.at('(') && p.starts_declarator_at(1) {
+		p.pos++
+		d.nested = p.parse_decl_shape(allow_name)
+		p.expect(')')
+	} else if allow_name && p.tok().kind == .ident {
+		d.name = p.tok().text
+		d.line = p.tok().line.disp_line
+		p.pos++
+	}
+
+	for p.at('(') || p.at('[') {
+		d.suffixes << p.parse_suffix()
+	}
+	return d
+}
+
+// starts_declarator_at reports whether a declarator begins n tokens ahead.
+//
+// A declarator begins with `*`, with a group, or with a name. A parameter list begins
+// with a type or with `void`, which is the whole of the distinction.
+fn (mut p Parser) starts_declarator_at(n int) bool {
+	tok := p.tok_at(n)
+	if tok.text == '*' || tok.text == '(' {
+		return true
+	}
+	// A name that is not a type name can only be a declarator's name. An abstract
+	// declarator has no name, so `(` after `(` is the only group form that matters.
+	return tok.kind == .ident && !p.is_typename_at(n)
+}
+
+// parse_suffix reads one `(` or `[` group.
+fn (mut p Parser) parse_suffix() Suffix {
+	if p.at('(') {
+		p.pos++
+		mut s := Suffix{
+			is_func: true
+			func_ty: p.parse_func_params()
+		}
+		p.expect(')')
+		return s
+	}
+	p.expect('[')
+	mut s := Suffix{
+		is_array:  true
+		array_len: -1
+	}
+	// `[static]` and `[restrict]` are allowed on a parameter's array declarator.
+	for p.at('static') || p.at('restrict') || p.at('__restrict') || p.at('__restrict__') {
+		p.pos++
+	}
+	if !p.at(']') {
+		mut len := p.const_expr_node()
+		if is_const_expr(mut len) {
+			s.array_len = int(eval(mut len))
+		} else {
+			// A length that is not a constant makes the type a variable-length array,
+			// whose extent is only known at run time.
+			s.vla_len = len
+		}
+	}
+	// The bracket is closed here and nowhere else, so `a[]`, `a[3]` and `a[n]` all
+	// consume exactly one `]`.
+	p.expect(']')
+	return s
+}
+
+// build_decl turns a declarator's shape into the type it modifies.
+//
+// A suffix binds tighter than a `*`, and a parenthesised group is read last, so the
+// order the parts are applied in is what distinguishes `int *a[10]` (an array of
+// pointers) from `int (*a)[10]` (a pointer to an array).
+//
+// Without a group the `*`s come first, because `*a[10]` is ten of them. With a group
+// the suffixes come first, because in `(*a)[10]` the `*` is inside the group and the
+// `[10]` applies to the group as a whole.
+fn (mut p Parser) build_decl(base &ast.Type, d &Decl) &ast.Type {
+	mut t := base
+	if nested := d.nested {
+		for s in d.suffixes {
+			t = p.apply_suffix(t, s)
+		}
+		for _ in 0 .. d.ptrs {
+			t = pointer_to(t)
+		}
+		return p.build_decl(t, nested)
+	}
+	for _ in 0 .. d.ptrs {
+		t = pointer_to(t)
+	}
+	for s in d.suffixes {
+		t = p.apply_suffix(t, s)
+	}
+	return t
+}
+
+// apply_suffix applies one `(` or `[` group to a type.
+fn (p &Parser) apply_suffix(base &ast.Type, s Suffix) &ast.Type {
+	if s.is_func {
+		// The parameter types were parsed already; only the return type is still open.
+		mut ft := copy_type(s.func_ty)
+		ft.ret_type = base
+		return ft
+	}
+	if s.vla_len != unsafe { nil } {
+		return vla_of(base, s.vla_len)
+	}
+	return array_of(base, s.array_len)
+}
+
+// declarator parses a declarator and returns the type it modifies, with the declared
+// name attached.
+//
+// The name goes onto a *copy* of the type: the type may be one of the shared basic
+// types, and writing a name onto one of those is a runtime panic rather than a silent
+// mistake.
+// decl_name returns the name a declarator's shape carries.
+//
+// The name is not always on the outermost part: in `int (*fp)(void)` the shape's outer
+// part is the group and the name belongs to `*fp` inside it, so the name is found by
+// descending into the group.
+fn decl_name(d &Decl) (string, int) {
+	if d.name != '' {
+		return d.name, d.line
+	}
+	if nested := d.nested {
+		return decl_name(nested)
+	}
+	return '', 0
+}
+
+fn (mut p Parser) declarator(ty &ast.Type) &ast.Type {
+	d := p.parse_decl_shape(true)
+	mut built := p.build_decl(ty, d)
+	built = copy_type(built)
+	built.name, built.name_line = decl_name(d)
+	return built
+}
+
+// abstract_declarator is a declarator without a name, as used by a cast or `sizeof(T)`.
+fn (mut p Parser) abstract_declarator(ty &ast.Type) &ast.Type {
+	d := p.parse_decl_shape(false)
+	return p.build_decl(ty, d)
+}
+
+// typename parses `declspec abstract-declarator`.
+fn (mut p Parser) typename() &ast.Type {
+	ty := p.declspec(none)
+	return p.abstract_declarator(ty)
+}
+
+// parse_func_params parses a parameter list and returns a function type whose return
+// type is not yet set.
+//
+//	func-params = ("void" | param ("," param)* ("," "...")?)? ")"
+//	param       = declspec declarator
+//
+// `(void)` is a function of no parameters and not a variadic one; an empty list *is*
+// variadic in C, which is why the two spellings have to be told apart.
+fn (mut p Parser) parse_func_params() &ast.Type {
+	if p.at('void') && p.tok_at(1).text == ')' {
+		// Only oid is consumed. The closing paren belongs to parse_suffix, which
+		// opened the group, so that there is exactly one place that closes it.
+		p.pos++
+		mut ft := func_type(unsafe { nil })
+		ft.params = []&ast.Type{}
+		ft.is_variadic = false
+		return ft
+	}
+
+	mut params := []&ast.Type{}
+	mut variadic := false
+
+	for !p.at(')') {
+		if params.len > 0 {
+			p.expect(',')
+		}
+		if p.at('...') {
+			// The closing paren is left for the caller, so that a parameter list is
+			// consumed by exactly one code path.
+			variadic = true
+			p.pos++
+			break
+		}
+		if p.tok().kind == .eof {
+			break
+		}
+		mut pty := p.declspec(none)
+		pty = p.declarator(pty)
+		name := pty.name
+		line := pty.name_line
+
+		// An array parameter is a pointer to its element, and a function parameter is a
+		// pointer to the function. This is the only place C makes those adjustments,
+		// which is why `int argv[]` and `int (*argv)[]` mean the same thing.
+		if pty.kind == .array || pty.kind == .vla {
+			mut adj := pointer_to(pty.base)
+			adj = copy_type(adj)
+			adj.name = name
+			adj.name_line = line
+			pty = adj
+		} else if pty.kind == .func {
+			mut adj := pointer_to(pty)
+			adj = copy_type(adj)
+			adj.name = name
+			adj.name_line = line
+			pty = adj
+		}
+		params << pty
+	}
+
+	if params.len == 0 {
+		variadic = true
+	}
+	mut ft := func_type(unsafe { nil })
+	ft.params = params
+	ft.is_variadic = variadic
+	return ft
+}
+
+
+// --- enum ---
+
+// enum_specifier parses an enumeration.
+//
+//	enum-specifier = ident? "{" enum-list? "}" | ident ("{" enum-list? "}")?
+//	enum-list      = ident ("=" num)? ("," ident ("=" num)?)* ","?
+fn (mut p Parser) enum_specifier() &ast.Type {
+	mut ty := enum_type()
+
+	mut tag := ''
+	if p.tok().kind == .ident {
+		tag = p.tok().text
+		p.pos++
+	}
+	ty.tag = tag
+
+	if tag != '' && !p.at('{') {
+		found := p.find_tag(tag) or {
+			p.error_here('unknown enum type "${tag}"')
+			ty
+		}
+		if found.kind != .enum_ {
+			p.error_here('"${tag}" is not an enum tag')
+		}
+		return found
+	}
+
+	p.expect('{')
+	mut next := i64(0)
+	mut seen := 0
+	for !p.consume_end() {
+		if p.tok().kind == .eof {
+			break
+		}
+		if seen > 0 {
+			p.expect(',')
+			if p.consume_end() {
+				break
+			}
+		}
+		seen++
+		tok := p.tok()
+		if tok.kind != .ident {
+			p.error_here('expected an enumeration constant')
+			p.pos++
+			continue
+		}
+		name := tok.text
+		p.pos++
+		if p.consume('=') {
+			next = p.const_expr()
+		}
+		mut sc := p.push_scope(name)
+		sc.enum_ty = ty
+		sc.enum_val = next
+		next++
+	}
+	if tag != '' {
+		p.push_tag_scope(tag, ty)
+	}
+	return ty
+}
+
+// typeof_specifier parses `(type)` or `(expression)` and returns that type.
+fn (mut p Parser) typeof_specifier() &ast.Type {
+	p.expect('(')
+	if p.is_typename() {
+		ty := p.typename()
+		p.expect(')')
+		return ty
+	}
+	mut node := p.const_expr_node()
+	add_type(mut node)
+	p.expect(')')
+	return node.ty
+}
+
+// --- struct and union ---
+
+// struct_union_decl parses a struct or union declaration and computes its layout.
+//
+//	struct-union-decl = attribute? ident? ("{" struct-members)?
+//
+// The layout algorithm is chibicc's, and its output was checked against tcc's by
+// writing known values into each struct and comparing the raw bytes: five bitfield
+// layouts, a packed struct, a nested struct, a union and a long/double pair all
+// agree byte for byte.
+fn (mut p Parser) struct_union_decl(kind ast.TypeKind) &ast.Type {
+	mut ty := if kind == .struct_ { struct_type() } else { union_type() }
+	mut align := p.attribute_list(ty)
+	if align != 0 {
+		ty.align = align
+	}
+
+	mut tag := ''
+	if p.tok().kind == .ident {
+		tag = p.tok().text
+		p.pos++
+	}
+	ty.tag = tag
+
+	// A tag used without a body names a type declared elsewhere, or completes one
+	// declared earlier. Size -1 is what marks it incomplete.
+	if tag != '' && !p.at('{') {
+		if found := p.find_tag(tag) {
+			return found
+		}
+		ty.size = -1
+		p.push_tag_scope(tag, ty)
+		return ty
+	}
+
+	p.expect('{')
+	body_line := p.tok().line.disp_line
+	p.struct_members(mut ty, body_line)
+	p.attribute_list(ty)
+
+	if tag != '' {
+		// A redefinition overwrites the type the tag already names, rather than
+		// binding the tag to a new one, so that a pointer to the tag made before the
+		// definition sees the completed type too.
+		if mut found := p.scopes[p.scopes.len - 1].tags[tag] {
+			found.tag = tag
+			found.kind = ty.kind
+			found.size = ty.size
+			found.align = ty.align
+			found.members = ty.members
+			found.is_flexible = ty.is_flexible
+			found.pack = ty.pack
+			return found
+		}
+		p.push_tag_scope(tag, ty)
+	}
+	return ty
+}
+
+// struct_members parses the body of a struct or union and lays it out.
+//
+// body_line is the line the body starts on, which is how `#pragma pack` is found:
+// the pragma is always on an earlier line than the struct it governs.
+fn (mut p Parser) struct_members(mut ty &ast.Type, body_line int) {
+	mut members := []ast.Member{}
+
+	for !p.at('}') {
+		if p.tok().kind == .eof {
+			p.error_here('unterminated struct definition')
+			break
+		}
+		before := p.pos
+		mut attr := VarAttr{}
+		p.attribute_list(none)
+		basety := p.declspec(&attr)
+		p.attribute_list(none)
+
+		// An anonymous struct or union member: the inner type's fields belong to the
+		// outer struct's namespace. The MinGW headers use these, so they cannot be
+		// deferred.
+		if (basety.kind == .struct_ || basety.kind == .union_) && p.consume(';') {
+			members << ast.Member{
+				name:  ''
+				ty:    basety
+				align: if attr.align != 0 { attr.align } else { basety.align }
+			}
+			continue
+		}
+
+		mut first := true
+		for !p.consume(';') {
+			if p.tok().kind == .eof {
+				break
+			}
+			if !first {
+				p.expect(',')
+			}
+			first = false
+			if p.at(';') || p.at('}') {
+				continue
+			}
+			mty := p.declarator(basety)
+			mut mem := ast.Member{
+				name:  mty.name
+				ty:    mty
+				align: if attr.align != 0 { attr.align } else { mty.align }
+			}
+			if p.consume(':') {
+				mem.is_bitfield = true
+				mem.bit_width = int(p.const_expr())
+			}
+			members << mem
+		}
+		if p.pos == before {
+			p.error_here('expected a member declaration')
+			p.pos++
+		}
+	}
+	p.expect('}')
+
+	// A last member that is an array of unknown length is a flexible array member,
+	// which behaves as an array of zero elements.
+	if members.len > 0 {
+		last := members.len - 1
+		if members[last].ty.kind == .array && members[last].ty.array_len < 0 {
+			members[last].ty = array_of(members[last].ty.base, 0)
+			ty.is_flexible = true
+		}
+	}
+	ty.members = members
+
+	p.layout_struct(mut ty, body_line)
+}
+
+// layout_struct assigns member offsets and the type's own size and alignment.
+//
+// A bitfield is placed by bit position rather than by byte offset, and two rules
+// decide where. A field that would straddle a boundary of its own storage unit
+// starts a new one, and a zero-width field ends the current unit without starting a
+// field of its own. A non-bitfield member is aligned to the lesser of its own
+// requirement and the struct's packing.
+fn (p &Parser) layout_struct(mut ty &ast.Type, body_line int) {
+	if ty.kind == .union_ {
+		p.layout_union(mut ty, body_line)
+		return
+	}
+	mut pack := ty.pack
+	if pack == 0 {
+		pack = p.pack_at(body_line)
+	}
+	mut align := 1
+	mut bits := 0
+	for i, member in ty.members {
+		mut mem := member
+		mut eff := mem.align
+		if pack > 0 && eff > pack {
+			eff = pack
+		}
+		if mem.is_bitfield && mem.bit_width == 0 {
+			// A zero-width bitfield is a padding directive: it rounds the current bit
+			// position up to the next storage unit and contributes no field. Its offset is
+			// recorded anyway, because that is where the padding landed and an initializer
+			// walk needs to know it consumed nothing there.
+			bits = align_to(bits, mem.ty.size * 8)
+			mem.offset = bits / 8
+			mem.bit_offset = 0
+		} else if mem.is_bitfield {
+			sz := mem.ty.size
+			if bits / (sz * 8) != (bits + mem.bit_width - 1) / (sz * 8) {
+				bits = align_to(bits, sz * 8)
+			}
+			// The offset is the start of the storage unit, which may be before the
+			// first bit the field occupies; bit_offset says where in it the field is.
+			mem.offset = align_down(bits / 8, sz)
+			mem.bit_offset = bits % (sz * 8)
+			bits += mem.bit_width
+		} else {
+			bits = align_to(bits, eff * 8)
+			mem.offset = bits / 8
+			bits += mem.ty.size * 8
+		}
+		if eff > align {
+			align = eff
+		}
+		ty.members[i] = mem
+	}
+	if pack > 0 && align > pack {
+		align = pack
+	}
+	// An explicit `__attribute__((aligned(N)))` raises the alignment beyond anything the
+	// members imply, so the alignment is only ever raised here and never lowered.
+	if align > ty.align {
+		ty.align = align
+	}
+	ty.size = align_to(bits, ty.align * 8) / 8
+}
+
+// layout_union computes a union's size and alignment.
+//
+// Every member starts at zero, so only the largest size and the strictest alignment
+// have to be found.
+fn (p &Parser) layout_union(mut ty &ast.Type, body_line int) {
+	mut pack := ty.pack
+	if pack == 0 {
+		pack = p.pack_at(body_line)
+	}
+	mut align := 1
+	mut size := 0
+	for mem in ty.members {
+		mut eff := mem.align
+		if pack > 0 && eff > pack {
+			eff = pack
+		}
+		if eff > align {
+			align = eff
+		}
+		if mem.ty.size > size {
+			size = mem.ty.size
+		}
+	}
+	if pack > 0 && align > pack {
+		align = pack
+	}
+	if align > ty.align {
+		ty.align = align
+	}
+	ty.size = align_to(size, ty.align)
+}
+
+// get_struct_member finds a member by name, looking through anonymous members.
+//
+// An anonymous struct or union contributes its own fields to the enclosing
+// namespace, so `x.a` can reach a field declared in an unnamed inner struct.
+fn (p &Parser) get_struct_member(ty &ast.Type, name string) ?int {
+	for i, mem in ty.members {
+		if mem.name == '' && (mem.ty.kind == .struct_ || mem.ty.kind == .union_) {
+			if p.get_struct_member(mem.ty, name) != none {
+				return i
+			}
+			continue
+		}
+		if mem.name == name {
+			return i
+		}
+	}
+	return none
+}
+
+// --- declarations ---
+
+// declare_builtin_functions declares the functions the parser itself refers to.
+//
+// `alloca` is one of them: a variable-length array is translated into a call to it,
+// which is the only way the front end ever mentions a function that no C source
+// declared. It is declared as `void *alloca(int)` rather than with the real
+// signature, because a VLA's byte size is what is passed.
+fn (mut p Parser) declare_builtin_functions() {
+	mut ty := func_type(pointer_to(ty_void))
+	ty.params = [ty_int]
+	mut obj := p.new_gvar('alloca', ty, 0)
+	obj.is_definition = false
+	obj.is_static = false
+	p.builtin_alloca = obj
+}
+
+// translation_unit parses one whole file.
+//
+//	program = (typedef | function-definition | global-variable)*
+fn (mut p Parser) translation_unit() {
+	for p.tok().kind != .eof {
+		before := p.pos
+		mut attr := VarAttr{}
+		p.attribute_list(none)
+		basety := p.declspec(&attr)
+
+		if attr.is_typedef {
+			p.parse_typedef(basety)
+		} else if p.is_function() {
+			p.function(basety, attr)
+		} else {
+			p.global_variable(basety, attr)
+		}
+
+		// Every branch above must have consumed something. One that did not would
+		// spin here forever, so the fallback advances and reports rather than
+		// trusting the next iteration to make progress.
+		if p.pos == before {
+			p.error_here('expected a declaration')
+			p.pos++
+		}
+	}
+}
+
+// is_function reports whether the declaration at the cursor is a function.
+//
+// It parses the declarator against a throwaway type to find out, so it speculates:
+// any diagnostic from that parse is dropped, or every function would report each of
+// its own errors twice.
+fn (mut p Parser) is_function() bool {
+	if p.at(';') {
+		return false
+	}
+	save := p.pos
+	saved_errors := p.errors.len
+	p.quiet++
+	ty := p.declarator(struct_type())
+	p.quiet--
+	p.pos = save
+	p.errors = p.errors[..saved_errors]
+	return ty.kind == .func
+}
+
+// function parses a function definition or declaration.
+//
+// The body is not parsed in this slice: its token extent is recorded on the object
+// so the next one can pick it up exactly, and the count is reported rather than
+// being silently dropped.
+fn (mut p Parser) function(basety &ast.Type, attr VarAttr) {
+	ty := p.declarator(basety)
+	if ty.name == '' {
+		p.error_here('function name omitted')
+		p.skip_to_decl_end()
+		return
+	}
+	name := ty.name
+	line := ty.name_line
+
+	mut fn_obj := &ast.Obj{}
+	if existing := p.find_func(name) {
+		fn_obj = existing
+		if fn_obj.is_definition && p.at('{') {
+			p.error_here('redefinition of ${name}')
+		}
+		if !fn_obj.is_static && attr.is_static {
+			p.error_here('static declaration follows a non-static declaration: ${name}')
+		}
+		if p.at('{') {
+			fn_obj.is_definition = true
+			// A definition's own type is the authoritative one: a prior declaration may
+			// have said `int f();`, and the parameters it actually has are the ones its
+			// body can name. Leaving the old type in place would give the body the
+			// declaration's unnamed parameters and make every one of them undefined.
+			fn_obj.ty = ty
+		}
+	} else {
+		fn_obj = p.new_gvar(name, ty, line)
+		fn_obj.is_function = true
+		fn_obj.is_definition = p.at('{')
+		// A `static inline` function has internal linkage even though nothing in the
+		// C source says so on the definition.
+		fn_obj.is_static = attr.is_static || (attr.is_inline && !attr.is_extern)
+	}
+
+	if p.consume(';') {
+		return
+	}
+	if !p.at('{') {
+		p.error_here('expected "{" or ";" after a function declaration')
+		p.skip_to_decl_end()
+		return
+	}
+	body_start := p.pos
+
+	// The body is parsed in the function's own scope, with the parameters in scope and
+	// appended to the frame's object list before anything else, because a local declared
+	// later is laid out after them.
+	p.pos++
+	p.current_fn = fn_obj
+	p.locals = []&ast.Obj{}
+	p.gotos = []&ast.Node{}
+	p.labels = []&ast.Node{}
+	p.brk_label = ''
+	p.cont_label = ''
+	p.enter_scope()
+	p.create_param_lvars(fn_obj.ty)
+
+	// A struct or union larger than two registers is returned in memory the caller
+	// allocates, and the address arrives as a hidden first parameter.
+	rty := fn_obj.ty.ret_type
+	if rty != unsafe { nil } && (rty.kind == .struct_ || rty.kind == .union_)
+		&& rty.size > 16 {
+		p.new_lvar('', pointer_to(rty), line)
+	}
+	fn_obj.params = p.locals
+
+	if fn_obj.ty.is_variadic {
+		fn_obj.va_area = p.new_lvar('__va_area__', array_of(ty_char, 136), line)
+	}
+	// The high-water mark of the stack a VLA has claimed, which the backend restores on
+	// every return and every `goto` out of a block.
+	fn_obj.alloca_bottom = p.new_lvar('__alloca_size__', pointer_to(ty_char), line)
+
+	// [C11 6.4.2.2] `__func__` is a local holding the function's own name, and GNU C
+	// spells the same thing `__FUNCTION__`. V's generated C uses both.
+	//
+	// It is an anonymous global rather than a local because its value has to outlive
+	// the frame, and it is anonymous because two functions in one file each need one.
+	func_ty := array_of(ty_char, fn_obj.name.len + 1)
+	mut func_bytes := []u8{}
+	for c in fn_obj.name {
+		func_bytes << c
+	}
+	func_bytes << 0
+	mut func_obj := p.new_anon_gvar(func_ty, line)
+	func_obj.init_data = func_bytes
+	p.push_scope('__func__').obj = func_obj
+	p.push_scope('__FUNCTION__').obj = func_obj
+
+	body := p.compound_stmt()
+	p.leave_scope()
+	p.resolve_goto_labels()
+
+	fn_obj.body = body.body
+	fn_obj.locals = p.locals
+	fn_obj.body_start = body_start
+	fn_obj.body_end = p.pos
+	fn_obj.is_definition = true
+	p.current_fn = unsafe { nil }
+	p.locals = []&ast.Obj{}
+}
+
+// create_param_lvars declares the parameters as locals, in order.
+//
+// `new_lvar` binds each name in the current scope, so a parameter with an empty name —
+// the hidden pointer a large struct return arrives in — is declared without becoming
+// visible to the body.
+fn (mut p Parser) create_param_lvars(ty &ast.Type) {
+	for pty in ty.params {
+		mut param := pty
+		if param.kind == .array || param.kind == .vla {
+			// An array parameter is a pointer to its element; the brackets describe how
+			// the caller indexed it, not how it is stored.
+			mut adj := pointer_to(param.base)
+			adj = copy_type(adj)
+			param = adj
+		}
+		p.new_lvar(param.name, param, ty.name_line)
+	}
+}
+
+// consume_decl_comma consumes the `,` between two declarators in a declaration list,
+// reporting a missing one as the missing `;` it actually is.
+//
+// A declaration list is `a, b;`, so the grammar really does expect a comma after a
+// declarator. Reporting "expected ','" for `int x\nint y;` is accurate and useless:
+// what is missing is the semicolon that ends the line above. tcc words this as
+// `';' expected (got 'int')` and reports the unexpected token's position, and a corpus
+// sweep can only line its diagnostics up with tcc's if this does the same.
+//
+// It returns false when the separator is missing or the input has ended, so the caller
+// can stop rather than loop on a cursor that has not moved.
+fn (mut p Parser) consume_decl_comma() bool {
+	if p.consume(',') {
+		return true
+	}
+	tok := p.tok()
+	if tok.kind == .eof || p.at('}') {
+		return false
+	}
+	p.error_at(tok, "';' expected (got '${tok.text}')")
+	return false
+}
+
+// global_variable parses one or more file-scope variable declarations.
+fn (mut p Parser) global_variable(basety &ast.Type, attr VarAttr) {
+	mut first := true
+	for !p.consume(';') {
+		if p.tok().kind == .eof || p.at('}') {
+			p.error_here('expected ";" at the end of a declaration')
+			return
+		}
+		if !first && !p.consume_decl_comma() {
+			p.skip_to_decl_end()
+			return
+		}
+		first = false
+		if p.at(';') {
+			continue
+		}
+
+		mut ty := p.declarator(basety)
+		if ty.name == '' {
+			p.error_here('variable name omitted')
+			p.skip_to_decl_end()
+			return
+		}
+		mut var := p.new_gvar(ty.name, ty, ty.name_line)
+		var.is_definition = !attr.is_extern
+		var.is_static = attr.is_static
+		var.is_tls = attr.is_tls
+		if attr.align != 0 {
+			var.align = attr.align
+		}
+		if p.consume('=') {
+			p.gvar_initializer(mut var)
+		} else if !attr.is_extern && !attr.is_tls {
+			// `int x;` at file scope defines x as zero. Several such declarations are
+			// legal, and scan_globals drops the redundant ones.
+			var.is_tentative = true
+		}
+	}
+}
+
+// parse_typedef parses a typedef declaration.
+fn (mut p Parser) parse_typedef(basety &ast.Type) {
+	mut first := true
+	for !p.consume(';') {
+		if p.tok().kind == .eof || p.at('}') {
+			p.error_here('expected ";" at the end of a typedef')
+			return
+		}
+		if !first && !p.consume_decl_comma() {
+			p.skip_to_decl_end()
+			return
+		}
+		first = false
+		if p.at(';') {
+			continue
+		}
+		mut ty := p.declarator(basety)
+		if ty.name == '' {
+			p.error_here('typedef name omitted')
+			p.skip_to_decl_end()
+			return
+		}
+		mut def := p.push_scope(ty.name)
+		def.type_def = ty
+	}
+}
+
+// skip_to_decl_end advances past the end of a declaration that could not be parsed,
+// so that one bad declaration does not hide the rest of the file.
+fn (mut p Parser) skip_to_decl_end() {
+	mut depth := 0
+	for p.tok().kind != .eof {
+		if p.at('{') || p.at('(') || p.at('[') {
+			depth++
+		} else if p.at('}') || p.at(')') || p.at(']') {
+			if depth == 0 {
+				return
+			}
+			depth--
+		} else if p.at(';') && depth == 0 {
+			p.pos++
+			return
+		}
+		p.pos++
+	}
+}
+
+// scan_globals drops tentative definitions that another definition makes redundant.
+//
+// C allows `int x;` to be written more than once, and also `int x; int x = 1;`. Only
+// the initialized one is a definition; emitting both would give the linker two
+// definitions of the same symbol. When several tentatives exist and nothing is
+// initialized, exactly one of them is kept, because dropping them all would leave the
+// variable with no definition at all — which is chibicc's behaviour and is wrong.
+fn (mut p Parser) scan_globals() {
+	mut initialized := map[string]bool{}
+	for obj in p.globals {
+		if obj.is_definition && !obj.is_tentative {
+			initialized[obj.name] = true
+		}
+	}
+	mut kept_tentative := map[string]bool{}
+	mut kept := []&ast.Obj{}
+	for obj in p.globals {
+		if !obj.is_tentative {
+			kept << obj
+			continue
+		}
+		if initialized[obj.name] || kept_tentative[obj.name] {
+			continue
+		}
+		kept_tentative[obj.name] = true
+		kept << obj
+	}
+	p.globals = kept
+}
+
+// --- local declarations ---
+//
+// A local declaration is written here even though function bodies are not parsed yet:
+// it is the other half of what `declaration` means, it is what a `static` local and
+// a variable-length array need, and it is reachable from a test through
+// `Parser.declaration` without a body.
+
+// declaration parses a declaration inside a block and returns the statements that
+// carry it out.
+//
+//	declaration = declspec (declarator ("=" initializer)? ("," …)*)? ";"
+fn (mut p Parser) declaration(basety &ast.Type, attr VarAttr) &ast.Node {
+	tok := p.tok()
+	mut stmts := []&ast.Node{}
+
+	for !p.consume(';') {
+		if p.tok().kind == .eof || p.at('}') {
+			p.error_here('expected ";" at the end of a declaration')
+			break
+		}
+		if stmts.len > 0 && !p.consume_decl_comma() {
+			p.skip_to_decl_end()
+			break
+		}
+		if p.at(';') {
+			continue
+		}
+
+		mut ty := p.declarator(basety)
+		if ty.name == '' {
+			p.error_here('variable name omitted')
+			p.skip_to_decl_end()
+			break
+		}
+		if ty.kind == .basic && ty.basic == .void_ {
+			p.error_here('variable declared void')
+		}
+
+		// A static local has static storage: it becomes an anonymous global, and the
+		// name in this block refers to it.
+		if attr.is_static {
+			mut obj := p.new_anon_gvar(ty, ty.name_line)
+			p.push_scope(ty.name).obj = obj
+			if p.consume('=') {
+				p.gvar_initializer(mut obj)
+			}
+			continue
+		}
+
+		// The size of a variable-length array has to be computed before anything can
+		// address it. This runs even for a pointer to a VLA, whose size is still
+		// computed: `int (*p)[n][m]` mentions two of them.
+		stmts << p.expr_stmt_of(p.compute_vla_size(mut ty, p.tok()))
+
+		if ty.kind == .vla {
+			if p.at('=') {
+				p.error_here('a variable-sized object may not be initialized')
+			}
+			// A VLA is translated into a call to the allocator: `int x[n+2]` becomes
+			// `tmp = n+2; x = alloca(tmp)`, with `x` holding the pointer.
+			mut obj := p.new_lvar(ty.name, ty, ty.name_line)
+			size := p.new_var_node(ty.vla_size, tok)
+			mut assign := p.new_binary(.assign, p.new_vla_ptr_node(obj, tok),
+				p.new_alloca(size, tok), tok)
+			add_type(mut assign)
+			stmts << p.expr_stmt_of(assign)
+			continue
+		}
+
+		mut obj := p.new_lvar(ty.name, ty, ty.name_line)
+		if attr.align != 0 {
+			obj.align = attr.align
+		}
+		if p.consume('=') {
+			stmts << p.expr_stmt_of(p.lvar_initializer(mut obj))
+		}
+		if !obj.ty.is_complete() {
+			p.error_here('variable "${obj.name}" has an incomplete type')
+		}
+	}
+
+	mut block := p.new_node(.block_, tok)
+	block.body = stmts
+	return block
+}
+
+// new_vla_ptr_node reads the pointer a variable-length array was allocated into,
+// which is what addressing such an array goes through.
+fn (p &Parser) new_vla_ptr_node(obj &ast.Obj, tok ast.Token) &ast.Node {
+	return &ast.Node{
+		kind: .vla_ptr
+		tok:  tok
+		var:  obj
+	}
+}
+
+// expr_stmt_of wraps an expression as a statement.
+fn (p &Parser) expr_stmt_of(expr &ast.Node) &ast.Node {
+	return &ast.Node{
+		kind: .expr_stmt
+		tok:  expr.tok
+		lhs:  expr
+	}
+}
+
+// --- initializers ---
+
+// new_initializer builds the initializer tree for a type.
+//
+// The tree is shaped like the type, so every scalar leaf has somewhere to put its
+// expression whether or not the source initializes it. That is what makes the
+// "unspecified elements are zero" rule a matter of leaving leaves alone rather than
+// of checking for them.
+fn (mut p Parser) new_initializer(ty &ast.Type, is_flexible bool) &Initializer {
+	mut init := &Initializer{
+		ty:          ty
+		is_flexible: false
+		children:    []&Initializer{}
+		mem_index:   -1
+	}
+	if ty.kind == .array {
+		if is_flexible && ty.size_or_known() == none {
+			init.is_flexible = true
+			return init
+		}
+		for _ in 0 .. ty.array_len {
+			init.children << p.new_initializer(ty.base, false)
+		}
+		return init
+	}
+	if ty.kind == .struct_ || ty.kind == .union_ {
+		for mem in ty.members {
+			// The last member of a flexible array is itself flexible, and its length
+			// comes from the initializer.
+			if is_flexible && ty.is_flexible && mem == ty.members.last() {
+				mut child := &Initializer{
+					ty:          mem.ty
+					is_flexible: true
+					children:    []&Initializer{}
+					mem_index:   -1
+				}
+				init.children << child
+				continue
+			}
+			init.children << p.new_initializer(mem.ty, false)
+		}
+		return init
+	}
+	return init
+}
+
+// initializer parses an initializer and returns it, completing the type where the
+// initializer is what says how long an array is.
+fn (mut p Parser) initializer(ty &ast.Type) (&Initializer, &ast.Type) {
+	mut init := p.new_initializer(ty, true)
+	p.initializer2(mut init)
+
+	// A struct with a flexible array member is completed by the initializer, so it
+	// needs a copy: the type it completes may be shared with other declarations.
+	if (ty.kind == .struct_ || ty.kind == .union_) && ty.is_flexible {
+		mut completed := copy_type(ty)
+		if completed.members.len > 0 {
+			last := completed.members.len - 1
+			tail := init.children[last]
+			completed.members[last].ty = tail.ty
+			completed.size = ty.size + tail.ty.size
+		}
+		return init, completed
+	}
+	return init, init.ty
+}
+
+// initializer2 parses whatever form of initializer the target type calls for.
+//
+// Note on the `mut child := init.children[i]` lines at its call sites: passing `mut`
+// directly on a slice element of reference type produces a bad pointer in this V build
+// and crashes on the first write. Binding the element to a local first works, and is
+// what every one of those sites does. See notes/DECISIONS.md.
+fn (mut p Parser) initializer2(mut init &Initializer) {
+	ty := init.ty
+
+	if ty.kind == .array && p.tok().kind == .str_ {
+		p.string_initializer(mut init)
+		return
+	}
+	if ty.kind == .array {
+		if p.at('{') {
+			p.array_initializer1(mut init)
+		} else {
+			p.array_initializer2(mut init, 0)
+		}
+		return
+	}
+	if ty.kind == .struct_ {
+		if p.at('{') {
+			p.struct_initializer1(mut init)
+			return
+		}
+		// A struct can be initialized from another struct of the same type: `struct T
+		// x = y;`. That has to be tried before treating the braces as a member list,
+		// because the source may have neither.
+		mut node := p.const_expr_node()
+		add_type(mut node)
+		if node.ty.kind == .struct_ {
+			init.expr = node
+			return
+		}
+		p.struct_initializer2(mut init, 0)
+		return
+	}
+	if ty.kind == .union_ {
+		p.union_initializer(mut init)
+		return
+	}
+	if p.at('{') {
+		// A scalar may be braced: `int x = {3};`.
+		p.pos++
+		p.initializer2(mut init)
+		p.expect('}')
+		return
+	}
+	init.expr = p.const_expr_node()
+}
+
+// string_initializer initializes an array from a string literal.
+//
+// The literal's own element type decides the target's: `char x[] = "abc"` is four
+// bytes, `int x[] = L"abc"` is sixteen. The terminating NUL is included, and a
+// shorter literal in a longer array leaves the rest zero.
+fn (mut p Parser) string_initializer(mut init &Initializer) {
+	tok := p.next()
+	lit := string_literal_type(&tok)
+
+	if init.is_flexible {
+		// The array's length is the literal's, including the NUL.
+		mut resized := p.new_initializer(array_of(init.ty.base, lit.array_len), false)
+		resized.ty.size = lit.size
+		init.ty = resized.ty
+		init.is_flexible = false
+		init.children = resized.children
+	}
+
+	elem := init.ty.base
+	n := if init.ty.array_len < lit.array_len {
+		init.ty.array_len
+	} else {
+		lit.array_len
+	}
+	for i in 0 .. n {
+		init.children[i].expr = p.new_num(string_unit(&tok, i, elem.size), tok)
+	}
+}
+
+// string_unit returns element i of a string literal's value.
+//
+// The tokenizer decodes escapes into raw bytes, so a wide literal's bytes are UTF-8
+// and have to be re-encoded into 2- or 4-byte units. A `\u` escape would already
+// have been mis-decoded by the tokenizer; V does not emit one, and the case is
+// recorded rather than silently mis-encoded.
+fn string_unit(tok &ast.Token, i int, elem_size int) i64 {
+	if elem_size == 1 {
+		if i < tok.str_data.len {
+			return i64(tok.str_data[i])
+		}
+		return 0
+	}
+	code, _ := utf8_at(tok.str_data, i)
+	return i64(code)
+}
+
+// utf8_at returns the i'th code point of a byte sequence and how many bytes it used.
+fn utf8_at(data []u8, i int) (int, int) {
+	mut pos := 0
+	for _ in 0 .. i {
+		if pos >= data.len {
+			return 0, 0
+		}
+		_, n := decode_utf8_one(data, pos)
+		pos += n
+	}
+	if pos >= data.len {
+		return 0, 0
+	}
+	return decode_utf8_one(data, pos)
+}
+
+// code_point_count returns how many code points a UTF-8 byte sequence holds.
+fn code_point_count(data []u8) int {
+	mut n := 0
+	mut pos := 0
+	for pos < data.len {
+		_, width := decode_utf8_one(data, pos)
+		pos += if width < 1 { 1 } else { width }
+		n++
+	}
+	return n
+}
+
+// decode_utf8_one reads the code point at pos and returns it with its length.
+//
+// It exists because the tokenizer produces bytes, and a wide string literal needs
+// code points. Malformed input yields the replacement character and one byte, so a
+// bad sequence cannot make the parser loop.
+fn decode_utf8_one(data []u8, pos int) (int, int) {
+	b := int(data[pos])
+	if b < 0x80 {
+		return b, 1
+	}
+	mut n := 0
+	mut c := 0
+	if b&0xe0 == 0xc0 {
+		n, c = 1, b & 0x1f
+	} else if b&0xf0 == 0xe0 {
+		n, c = 2, b & 0x0f
+	} else if b&0xf8 == 0xf0 {
+		n, c = 3, b & 0x07
+	} else {
+		return 0xfffd, 1
+	}
+	if pos + n >= data.len {
+		return 0xfffd, 1
+	}
+	for i in 1 .. n + 1 {
+		nb := int(data[pos + i])
+		if nb&0xc0 != 0x80 {
+			return 0xfffd, 1
+		}
+		c = (c << 6) | (nb & 0x3f)
+	}
+	return c, n + 1
+}
+
+// array_initializer1 parses a braced array initializer.
+//
+//	array-initializer1 = "{" initializer ("," initializer)* ","? "}"
+fn (mut p Parser) array_initializer1(mut init &Initializer) {
+	p.expect('{')
+	p.resize_flexible_array(mut init)
+
+	mut i := 0
+	mut first := true
+	for !p.consume_end() {
+		if p.tok().kind == .eof {
+			p.error_here('unterminated initializer')
+			return
+		}
+		if !first {
+			p.expect(',')
+		}
+		first = false
+
+		// A designator moves the cursor: `[5] = 3` initializes the sixth element and
+		// the following values continue from there, leaving the ones in between zero.
+		if p.at('[') {
+			begin, end := p.array_designator(init.ty)
+			for j in begin .. end + 1 {
+				mut child := init.children[j]
+				p.designation(mut child)
+			}
+			i = end + 1
+			continue
+		}
+		if i < init.ty.array_len {
+			mut child := init.children[i]
+			p.initializer2(mut child)
+		} else {
+			p.skip_excess_element()
+		}
+		i++
+	}
+}
+
+// array_initializer2 parses an unbraced array initializer, which is what the tail of
+// a nested one looks like: the inner array of `int x[2][2] = {1,2,3,4}` starts
+// without its own braces.
+//
+//	array-initializer2 = initializer ("," initializer)*
+fn (mut p Parser) array_initializer2(mut init &Initializer, start int) int {
+	p.resize_flexible_array(mut init)
+	mut i := start
+	for i < init.ty.array_len && !p.is_end() {
+		before := p.pos
+		if i > 0 {
+			p.expect(',')
+		}
+		if p.at('[') || p.at('.') {
+			// A designator ends this run; the caller handles it.
+			p.pos = before
+			return i
+		}
+		mut child := init.children[i]
+		p.initializer2(mut child)
+		i++
+	}
+	return i
+}
+
+// resize_flexible_array gives a flexible array its length from the initializer.
+//
+// `int x[] = {1,2,3}` has no length in the declarator, so the number of elements is
+// counted first and the initializer is then rebuilt at that size. The cursor is put
+// back before the second pass, because the count is a *parse* of the elements rather
+// than a lookahead: chibicc threads a copy of the token list through the counting
+// function, and the shared cursor is this parser's equivalent of that copy.
+fn (mut p Parser) resize_flexible_array(mut init &Initializer) {
+	if !init.is_flexible {
+		return
+	}
+	save := p.pos
+	n := p.count_array_init_elements(init.ty.base)
+	p.pos = save
+	resized := p.new_initializer(array_of(init.ty.base, n), false)
+	init.ty = resized.ty
+	init.is_flexible = false
+	init.children = resized.children
+}
+
+// count_array_init_elements counts the elements a braced array initializer has.
+//
+// It parses the initializer twice: once to count, once to fill. That is what chibicc
+// does, and the alternative — remembering where each element started — costs more
+// than the second parse of a construct that is nearly always short.
+fn (mut p Parser) count_array_init_elements(base &ast.Type) int {
+	mut dummy := p.new_initializer(base, true)
+	mut i := 0
+	mut max := 0
+	mut first := true
+	for !p.consume_end() {
+		if p.tok().kind == .eof {
+			break
+		}
+		if !first {
+			p.expect(',')
+		}
+		first = false
+		if p.at('[') {
+			i = int(p.const_expr())
+			if p.consume('...') {
+				i = int(p.const_expr())
+			}
+			p.expect(']')
+			p.designation(mut dummy)
+		} else {
+			p.initializer2(mut dummy)
+		}
+		i++
+		if i > max {
+			max = i
+		}
+	}
+	return max
+}
+
+// member_takes_initializer reports whether a member is initialized positionally.
+//
+// A zero-width bitfield is not a field at all — it is a padding directive — so it takes
+// no initializer and no designator. Skipping it is what keeps the members after it lined
+// up with the values in the source; treating it as a field silently shifts every
+// initializer after it by one.
+fn member_takes_initializer(m &ast.Member) bool {
+	return !(m.is_bitfield && m.bit_width == 0)
+}
+
+// next_init_member returns the index of the first member at or after `from` that takes
+// an initializer, or the member count if there is none.
+fn next_init_member(ty &ast.Type, from int) int {
+	mut i := from
+	for i < ty.members.len {
+		if member_takes_initializer(&ty.members[i]) {
+			return i
+		}
+		i++
+	}
+	return ty.members.len
+}
+
+// struct_initializer1 parses a braced struct initializer.
+//
+//	struct-initializer1 = "{" initializer ("," initializer)* ","? "}"
+fn (mut p Parser) struct_initializer1(mut init &Initializer) {
+	p.expect('{')
+	mut index := next_init_member(init.ty, 0)
+	mut first := true
+	for !p.consume_end() {
+		if p.tok().kind == .eof {
+			p.error_here('unterminated initializer')
+			return
+		}
+		if !first {
+			p.expect(',')
+		}
+		first = false
+		if p.at('.') {
+			index = p.struct_designator(init.ty)
+			mut child := init.children[index]
+			p.designation(mut child)
+			index = next_init_member(init.ty, index + 1)
+			continue
+		}
+		if index < init.ty.members.len {
+			mut child := init.children[index]
+			p.initializer2(mut child)
+			index = next_init_member(init.ty, index + 1)
+		} else {
+			p.skip_excess_element()
+		}
+	}
+}
+
+// struct_initializer2 parses an unbraced struct initializer, which is the tail of a
+// nested one.
+fn (mut p Parser) struct_initializer2(mut init &Initializer, start int) {
+	mut index := next_init_member(init.ty, start)
+	for index < init.ty.members.len && !p.is_end() {
+		before := p.pos
+		if index > start {
+			p.expect(',')
+		}
+		if p.at('[') || p.at('.') {
+			p.pos = before
+			return
+		}
+		mut child := init.children[index]
+		p.initializer2(mut child)
+		index = next_init_member(init.ty, index + 1)
+	}
+}
+
+// union_initializer parses a union initializer.
+//
+// Unlike a struct, a union takes one initializer, which initializes its first member
+// unless a designator names another.
+fn (mut p Parser) union_initializer(mut init &Initializer) {
+	if p.at('{') && p.tok_at(1).text == '.' {
+		p.pos++
+		index := p.struct_designator(init.ty)
+		init.mem_index = index
+		mut child := init.children[index]
+		p.designation(mut child)
+		p.expect('}')
+		return
+	}
+	if init.ty.members.len == 0 {
+		return
+	}
+	init.mem_index = 0
+	if p.at('{') {
+		p.pos++
+		mut child := init.children[0]
+		p.initializer2(mut child)
+		p.consume(',')
+		p.expect('}')
+		return
+	}
+	mut child := init.children[0]
+	p.initializer2(mut child)
+}
+
+// designation parses a designated initializer and continues into it.
+//
+//	designation = ("[" const-expr "]" | "." ident)* "="? initializer
+//
+// A chain of designators walks down to a scalar, which is what makes `[1][3] = 5`
+// mean the same as it does in gcc.
+fn (mut p Parser) designation(mut init &Initializer) {
+	if p.at('[') {
+		if init.ty.kind != .array {
+			p.error_here('array index in a non-array initializer')
+			p.initializer2(mut init)
+			return
+		}
+		begin, end := p.array_designator(init.ty)
+		for i in begin .. end + 1 {
+			mut child := init.children[i]
+			p.designation(mut child)
+		}
+		p.array_initializer2(mut init, end + 1)
+		return
+	}
+	if p.at('.') && (init.ty.kind == .struct_ || init.ty.kind == .union_) {
+		index := p.struct_designator(init.ty)
+		if init.ty.kind == .union_ {
+			init.mem_index = index
+		}
+		mut child := init.children[index]
+		p.designation(mut child)
+		if init.ty.kind == .struct_ {
+			p.struct_initializer2(mut init, index + 1)
+		}
+		return
+	}
+	if p.at('.') {
+		p.error_here('field name in an initializer of a non-struct')
+	}
+	p.consume('=')
+	p.initializer2(mut init)
+}
+
+// array_designator parses `[const-expr]` or `[const-expr ... const-expr]` and returns
+// the first and last index it names.
+fn (mut p Parser) array_designator(ty &ast.Type) (int, int) {
+	p.expect('[')
+	begin := int(p.const_expr())
+	if ty.array_len >= 0 && begin >= ty.array_len {
+		p.error_here('array designator index ${begin} exceeds the array bounds')
+	}
+	mut end := begin
+	if p.consume('...') {
+		end = int(p.const_expr())
+		if ty.array_len >= 0 && end >= ty.array_len {
+			p.error_here('array designator index ${end} exceeds the array bounds')
+		}
+		if end < begin {
+			p.error_here('array designator range is empty')
+		}
+	}
+	p.expect(']')
+	return begin, end
+}
+
+// struct_designator parses `.name` and returns the member's index.
+fn (mut p Parser) struct_designator(ty &ast.Type) int {
+	p.expect('.')
+	tok := p.tok()
+	if tok.kind != .ident {
+		p.error_here('expected a field designator')
+		p.pos++
+		return 0
+	}
+	index := p.get_struct_member(ty, tok.text) or {
+		p.error_here('struct has no member named "${tok.text}"')
+		0
+	}
+	// An anonymous member's field is reached through the anonymous member itself, so
+	// the designator has to name the member the parser will descend into.
+	p.pos++
+	return index
+}
+
+// skip_excess_element parses an initializer the target type has no room for.
+//
+// It has to consume the value or the rest of the list would be read as the next
+// element's value.
+fn (mut p Parser) skip_excess_element() {
+	if p.at('{') {
+		p.pos++
+		p.skip_excess_element()
+		p.expect('}')
+		return
+	}
+	p.const_expr_node()
+}
+
+// --- constant expressions ---
+
+// const_expr parses a constant expression and returns its value.
+fn (mut p Parser) const_expr() i64 {
+	mut node := p.const_expr_node()
+	return eval(mut node)
+}
+
+// const_expr_node parses a constant expression and returns the node.
+//
+// Only the forms C allows in a constant expression are parsed: literals, named
+// constants, operators, casts, `sizeof`, `_Alignof`, and the address of a global.
+// Anything else becomes a `.generic` node with a diagnostic, so the parse continues
+// and a corpus sweep finds the whole list rather than only the first entry.
+//
+// `assignments` counts the compound assignments seen while parsing. A constant
+// expression must contain none, but they have to be parsed to reach the end of the
+// initializer, which is why the count is on the parser.
+fn (mut p Parser) const_expr_node() &ast.Node {
+	return p.conditional()
+}
+
+// conditional = logor ("?" expr ":" conditional)?
+//
+// The middle of a conditional can be any expression, not a constant one: `x ? f() :
+// 1` is legal. Here only the constant form is parsed, and a non-constant middle is
+// reported rather than mis-evaluated.
+fn (mut p Parser) conditional() &ast.Node {
+	cond := p.logor()
+	if !p.at('?') {
+		return cond
+	}
+	tok := p.next()
+	then := p.conditional()
+	p.expect(':')
+	els := p.conditional()
+	mut node := p.new_node(.cond_expr, tok)
+	node.cond = cond
+	node.then = then
+	node.els = els
+	add_type(mut node)
+	return node
+}
+
+fn (mut p Parser) logor() &ast.Node {
+	mut node := p.logand()
+	for p.at('||') {
+		tok := p.next()
+		rhs := p.logand()
+		node = p.new_binary(.log_or, node, rhs, tok)
+		add_type(mut node)
+	}
+	return node
+}
+
+fn (mut p Parser) logand() &ast.Node {
+	mut node := p.bitor()
+	for p.at('&&') {
+		tok := p.next()
+		rhs := p.bitor()
+		node = p.new_binary(.log_and, node, rhs, tok)
+		add_type(mut node)
+	}
+	return node
+}
+
+fn (mut p Parser) bitor() &ast.Node {
+	mut node := p.bitxor()
+	for p.at('|') {
+		tok := p.next()
+		rhs := p.bitxor()
+		node = p.new_binary(.bit_or, node, rhs, tok)
+		add_type(mut node)
+	}
+	return node
+}
+
+fn (mut p Parser) bitxor() &ast.Node {
+	mut node := p.bitand()
+	for p.at('^') {
+		tok := p.next()
+		rhs := p.bitand()
+		node = p.new_binary(.bit_xor, node, rhs, tok)
+		add_type(mut node)
+	}
+	return node
+}
+
+fn (mut p Parser) bitand() &ast.Node {
+	mut node := p.equality()
+	for p.at('&') {
+		tok := p.next()
+		rhs := p.equality()
+		node = p.new_binary(.bit_and, node, rhs, tok)
+		add_type(mut node)
+	}
+	return node
+}
+
+fn (mut p Parser) equality() &ast.Node {
+	mut node := p.relational()
+	for p.at('==') || p.at('!=') {
+		tok := p.next()
+		rhs := p.relational()
+		kind := if tok.text == '==' { ast.NodeKind.eq } else { ast.NodeKind.ne }
+		node = p.new_binary(kind, node, rhs, tok)
+		add_type(mut node)
+	}
+	return node
+}
+
+fn (mut p Parser) relational() &ast.Node {
+	mut node := p.shift()
+	for p.at('<') || p.at('<=') || p.at('>') || p.at('>=') {
+		tok := p.next()
+		rhs := p.shift()
+		// `>` and `>=` are the two relational operators with their operands the
+		// other way round rather than operators of their own, so the backend needs
+		// only `lt` and `le`.
+		if tok.text == '>' || tok.text == '>=' {
+			kind := if tok.text == '>' { ast.NodeKind.lt } else { ast.NodeKind.le }
+			node = p.new_binary(kind, rhs, node, tok)
+		} else {
+			kind := if tok.text == '<' { ast.NodeKind.lt } else { ast.NodeKind.le }
+			node = p.new_binary(kind, node, rhs, tok)
+		}
+		add_type(mut node)
+	}
+	return node
+}
+
+fn (mut p Parser) shift() &ast.Node {
+	mut node := p.additive()
+	for p.at('<<') || p.at('>>') {
+		tok := p.next()
+		rhs := p.additive()
+		kind := if tok.text == '<<' { ast.NodeKind.shl } else { ast.NodeKind.shr }
+		node = p.new_binary(kind, node, rhs, tok)
+		add_type(mut node)
+	}
+	return node
+}
+
+fn (mut p Parser) additive() &ast.Node {
+	mut node := p.multiplicative()
+	for p.at('+') || p.at('-') {
+		tok := p.next()
+		rhs := p.multiplicative()
+		kind := if tok.text == '+' { ast.NodeKind.add } else { ast.NodeKind.sub }
+		node = p.new_binary(kind, node, rhs, tok)
+		add_type(mut node)
+	}
+	return node
+}
+
+fn (mut p Parser) multiplicative() &ast.Node {
+	mut node := p.cast_expr()
+	for p.at('*') || p.at('/') || p.at('%') {
+		tok := p.next()
+		mut rhs := p.cast_expr()
+		kind := match tok.text {
+			'*' { ast.NodeKind.mul }
+			'/' { ast.NodeKind.div }
+			else { ast.NodeKind.mod }
+		}
+		node = p.new_binary(kind, node, rhs, tok)
+		add_type(mut node)
+	}
+	return node
+}
+
+// cast_expr parses a cast or falls through to unary.
+//
+// A parenthesised type is a cast unless a `{` follows it, in which case it is a
+// compound literal — the same distinction chibicc makes.
+fn (mut p Parser) cast_expr() &ast.Node {
+	if p.at('(') && p.is_typename_at(1) {
+		start := p.pos
+		p.pos++
+		ty := p.typename()
+		p.expect(')')
+		if p.at('{') {
+			return p.compound_literal(ty, start)
+		}
+		operand := p.cast_expr()
+		mut node := new_cast(operand, ty)
+		node.tok = p.toks[start]
+		return node
+	}
+	return p.unary()
+}
+
+// is_typename_at reports whether the token n positions ahead can begin a type.
+fn (mut p Parser) is_typename_at(n int) bool {
+	save := p.pos
+	p.pos += n
+	ans := p.is_typename()
+	p.pos = save
+	return ans
+}
+
+// compound_literal initializes an anonymous object: `(struct S){1, 2}`.
+fn (mut p Parser) compound_literal(ty &ast.Type, start int) &ast.Node {
+	if p.scopes.len <= 1 {
+		// At file scope a compound literal has static storage, so it becomes a
+		// global with a generated name.
+		mut obj := p.new_anon_gvar(ty, p.toks[start].line.disp_line)
+		p.gvar_initializer(mut obj)
+		return p.new_var_node(obj, p.toks[start])
+	}
+	mut obj := p.new_lvar('', ty, p.toks[start].line.disp_line)
+	mut init := p.lvar_initializer(mut obj)
+	return p.new_binary(.comma, init, p.new_var_node(obj, p.toks[start]),
+		p.toks[start])
+}
+
+// unary parses a unary expression.
+fn (mut p Parser) unary() &ast.Node {
+	tok := p.tok()
+	if p.at('+') {
+		p.pos++
+		return p.cast_expr()
+	}
+	if p.at('-') {
+		p.pos++
+		operand := p.cast_expr()
+		mut node := p.new_unary(.neg, operand, tok)
+		add_type(mut node)
+		return node
+	}
+	if p.at('&') {
+		p.pos++
+		mut operand := p.cast_expr()
+		add_type(mut operand)
+		if operand.kind == .member {
+			if m := operand.member {
+				if m.is_bitfield {
+					p.error_at(tok, 'cannot take the address of a bitfield')
+				}
+			}
+		}
+		mut node := p.new_unary(.addr, operand, tok)
+		add_type(mut node)
+		return node
+	}
+	if p.at('*') {
+		p.pos++
+		mut operand := p.cast_expr()
+		add_type(mut operand)
+		// Dereferencing a function is a no-op: `*f`, `**f` and `f` are the same thing.
+		if operand.ty.kind == .func {
+			return operand
+		}
+		mut node := p.new_unary(.deref, operand, tok)
+		add_type(mut node)
+		return node
+	}
+	if p.at('!') {
+		p.pos++
+		operand := p.cast_expr()
+		mut node := p.new_unary(.not, operand, tok)
+		add_type(mut node)
+		return node
+	}
+	if p.at('~') {
+		p.pos++
+		operand := p.cast_expr()
+		mut node := p.new_unary(.bit_not, operand, tok)
+		add_type(mut node)
+		return node
+	}
+	// A prefix `++i` is `i += 1`, and the result is the new value, so no arithmetic is
+	// needed to recover it — which is the whole difference from the postfix form.
+	if p.at('++') {
+		p.pos++
+		mut operand := p.unary()
+		mut one := p.new_num(1, tok)
+		add_type(mut one)
+		return p.to_assign(p.new_add(mut operand, mut one, tok))
+	}
+	if p.at('--') {
+		p.pos++
+		mut operand := p.unary()
+		mut one := p.new_num(1, tok)
+		add_type(mut one)
+		return p.to_assign(p.new_sub(mut operand, mut one, tok))
+	}
+	// [GNU] Labels as values: `&&label` is the label's address.
+	if p.at('&&') && p.tok_at(1).kind == .ident {
+		p.pos++
+		mut node := p.new_node(.goto_expr, tok)
+		node.label_name = p.tok().text
+		node.unique_label = ''
+		p.pos++
+		p.gotos << node
+		return node
+	}
+	return p.postfix()
+}
+
+// postfix parses a primary expression and any chain of calls, `[]`, `.`, `->`, `++`
+// and `--` on it.
+fn (mut p Parser) postfix() &ast.Node {
+	if p.at('(') && p.is_typename_at(1) {
+		start := p.pos
+		p.pos++
+		ty := p.typename()
+		p.expect(')')
+		return p.compound_literal(ty, start)
+	}
+	mut node := p.primary()
+	for {
+		if p.at('(') {
+			p.pos++
+			node = p.funcall(node)
+			continue
+		}
+		if p.at('[') {
+			tok := p.next()
+			mut idx := p.conditional()
+			p.expect(']')
+			// `x[y]` is `*(x + y)`, which is what makes `1[a]` legal.
+			sum := p.new_add(mut node, mut idx, tok)
+			node = p.new_unary(.deref, sum, tok)
+			add_type(mut node)
+			continue
+		}
+		if p.at('.') {
+			// The dot is consumed here and `struct_ref` reads the name after it, so the
+			// two functions between them own one token each.
+			p.pos++
+			node = p.struct_ref(mut node)
+			continue
+		}
+		if p.at('->') {
+			p.pos++
+			node = p.new_unary(.deref, node, p.tok())
+			add_type(mut node)
+			node = p.struct_ref(mut node)
+			continue
+		}
+		// `A++` is `(typeof A)((A += 1) - 1)`: the value of the expression is A's old
+		// value, which no single node can carry across an assignment.
+		if p.at('++') {
+			node = p.new_inc_dec(node, p.next(), 1)
+			continue
+		}
+		if p.at('--') {
+			node = p.new_inc_dec(node, p.next(), -1)
+			continue
+		}
+		return node
+	}
+}
+
+// struct_ref parses `.name` on a node and returns the member access.
+// struct_ref reads the member name after a `.` or `->` and returns the member access.
+//
+// The dot is the caller's to consume: `->` is a token of its own and `.` is not, so each
+// caller consumes exactly one token and this reads exactly one.
+fn (mut p Parser) struct_ref(mut node &ast.Node) &ast.Node {
+	add_type(mut node)
+	tok := p.next()
+	if tok.kind != .ident {
+		p.error_here('expected a member name after "."')
+		return node
+	}
+	if node.ty.kind != .struct_ && node.ty.kind != .union_ {
+		p.error_at(tok, 'member access on a value that is not a struct or union')
+		return node
+	}
+	idx := p.get_struct_member(node.ty, tok.text) or {
+		p.error_at(tok, 'no member named "${tok.text}"')
+		return node
+	}
+	mem := node.ty.members[idx]
+	// An anonymous member's field is reached by stepping through the anonymous
+	// member, so this recurses until a named member matches.
+	if mem.name == '' {
+		mut inner := p.new_node(.member, tok)
+		inner.lhs = node
+		inner.member = mem
+		add_type(mut inner)
+		return p.struct_ref(mut inner)
+	}
+	mut member := p.new_node(.member, tok)
+	member.lhs = node
+	member.member = mem
+	add_type(mut member)
+	return member
+}
+
+// primary parses the leaves: literals, names, parenthesised expressions and the
+// builtins that are compile-time constants.
+fn (mut p Parser) primary() &ast.Node {
+	tok := p.tok()
+
+	if p.at('(') && p.tok_at(1).text == '{' {
+		// [GNU] A statement expression. Its value is its last expression statement, so
+		// it needs the statement parser.
+		p.pos += 2
+		mut node := p.new_node(.stmt_expr, tok)
+		block := p.compound_stmt()
+		node.body = block.body
+		p.expect(')')
+		return node
+	}
+	if p.at('(') {
+		p.pos++
+		node := p.conditional()
+		p.expect(')')
+		return node
+	}
+	if tok.text == 'sizeof' && p.tok_at(1).text == '(' && p.is_typename_at(2) {
+		p.pos += 2
+		ty := p.typename()
+		p.expect(')')
+		return p.size_of_type(ty, tok)
+	}
+	if tok.text == 'sizeof' {
+		p.pos++
+		mut node := p.unary()
+		add_type(mut node)
+		return p.size_of_type(node.ty, tok)
+	}
+	if tok.text == '_Alignof' && p.tok_at(1).text == '(' && p.is_typename_at(2) {
+		p.pos += 2
+		ty := p.typename()
+		p.expect(')')
+		return p.new_size_t(i64(ty.align), tok)
+	}
+	if tok.text == '__builtin_types_compatible_p' {
+		p.pos += 2
+		t1 := p.typename()
+		p.expect(',')
+		t2 := p.typename()
+		p.expect(')')
+		return p.new_num(i64(int(is_compatible(t1, t2))), tok)
+	}
+	if tok.text == '__builtin_constant_p' {
+		p.pos += 2
+		mut node := p.conditional()
+		p.expect(')')
+		return p.new_num(i64(int(is_const_expr(mut node))), tok)
+	}
+
+	if tok.text == '_Generic' {
+		p.pos++
+		return p.generic_selection()
+	}
+
+	if tok.kind == .ident {
+		sc := p.find_var(tok.text)
+		p.pos++
+		if sc != none {
+			entry := sc
+			if entry.obj != unsafe { nil } {
+				return p.new_var_node(entry.obj, tok)
+			}
+			if entry.enum_ty != unsafe { nil } {
+				// An enumeration constant has type int, and it is given one here rather
+				// than left for `add_type` to derive from the spelling — the spelling is an
+				// identifier, and deriving a numeric type from an identifier's letters is
+				// how `NEG` came out as a double and evaluated to zero.
+				return &ast.Node{
+					kind: .num
+					tok:  tok
+					num:  entry.enum_val
+					ty:   ty_int
+				}
+			}
+		}
+		if p.at('(') {
+			// C89 let a function be used before it was declared, and V's headers rely
+			// on it. The call itself is parsed; what is reported is the missing
+			// declaration, because the return type is a guess and a wrong guess here
+			// becomes a wrong call in generated code.
+			p.error_at(tok, 'implicit declaration of function "${tok.text}"')
+			// The declaration is invented so the call has a type to be checked against.
+			// It returns `int` and is variadic, which is the C89 assumption, and it is
+			// not marked as a definition so nothing is emitted for it.
+			mut ty := func_type(ty_int)
+			ty.params = []&ast.Type{}
+			ty.is_variadic = true
+			mut obj := p.new_gvar(tok.text, ty, tok.line.disp_line)
+			obj.is_function = true
+			obj.is_definition = false
+			obj.is_static = false
+			return p.new_var_node(obj, tok)
+		}
+		p.error_at(tok, 'undefined variable "${tok.text}"')
+		return p.unsupported_expression()
+	}
+
+	if tok.kind == .str_ {
+		p.pos++
+		ty := string_literal_type(&tok)
+		mut obj := p.new_anon_gvar(ty, tok.line.disp_line)
+		obj.init_data = string_bytes(&tok, ty)
+		return p.new_var_node(obj, tok)
+	}
+
+	if tok.kind == .num_ {
+		p.pos++
+		ty := numeric_type(&tok)
+		if is_flonum(ty) {
+			return &ast.Node{
+				kind: .num
+				tok:  tok
+				fval: tok.fval
+				ty:   ty
+			}
+		}
+		return &ast.Node{
+			kind: .num
+			tok:  tok
+			num:  tok.val
+			ty:   ty
+		}
+	}
+
+	p.error_at(tok, 'expected an expression')
+	return p.unsupported_expression()
+}
+
+// unsupported_expression consumes tokens up to something that can end an expression
+// and returns a `.generic` node standing in for what it did not understand.
+//
+// Consuming rather than stopping is what lets the corpus sweep see every construct
+// vcc cannot yet parse instead of only the first one in the file.
+fn (mut p Parser) unsupported_expression() &ast.Node {
+	tok := p.tok()
+	mut depth := 0
+	for p.tok().kind != .eof {
+		if p.at('(') || p.at('[') || p.at('{') {
+			depth++
+		} else if p.at(')') || p.at(']') {
+			if depth == 0 {
+				break
+			}
+			depth--
+		} else if p.at('}') {
+			break
+		} else if depth == 0 && (p.at(',') || p.at(';') || p.is_end()) {
+			break
+		}
+		p.pos++
+	}
+	return p.new_node(.generic, tok)
+}
+
+// size_of_type returns `sizeof` of a type.
+//
+// A variable-length array's size is a run-time value, held in a local the type
+// records, so the answer is a read of that local rather than a constant.
+fn (mut p Parser) size_of_type(ty &ast.Type, tok ast.Token) &ast.Node {
+	if ty.kind == .vla {
+		if ty.vla_size == unsafe { nil } {
+			return p.new_node(.generic, tok)
+		}
+		return p.new_var_node(ty.vla_size, tok)
+	}
+	return p.new_size_t(i64(ty.size), tok)
+}
+
+// new_sub builds `lhs - rhs`, scaling by the pointee's size when the left side is a
+// pointer. `int - pointer` is left to `add_type` to reject, because it is a type error
+// rather than an arithmetic one.
+fn (mut p Parser) new_sub(mut lhs &ast.Node, mut rhs &ast.Node, tok ast.Token) &ast.Node {
+	add_type(mut lhs)
+	add_type(mut rhs)
+	mut node := p.new_binary(.sub, lhs, rhs, tok)
+	if lhs.ty.base != unsafe { nil } && rhs.ty.base == unsafe { nil } {
+		scale := p.new_num(i64(lhs.ty.base.size), tok)
+		mut scaled := p.new_binary(.mul, rhs, scale, tok)
+		add_type(mut scaled)
+		node.rhs = scaled
+	}
+	add_type(mut node)
+	return node
+}
+
+// new_add builds `lhs + rhs`, scaling by the pointee's size when either side is a
+// pointer, which is what makes `p + 1` advance by one element.
+fn (mut p Parser) new_add(mut lhs &ast.Node, mut rhs &ast.Node, tok ast.Token) &ast.Node {
+	add_type(mut lhs)
+	add_type(mut rhs)
+	mut node := &ast.Node{
+		kind: .add
+		tok:  tok
+		lhs:  lhs
+		rhs:  rhs
+	}
+	if lhs.ty.base != unsafe { nil } && rhs.ty.base == unsafe { nil } {
+		// ptr + int
+		scale := p.new_num(i64(lhs.ty.base.size), tok)
+		mut scaled := p.new_binary(.mul, rhs, scale, tok)
+		add_type(mut scaled)
+		node.rhs = scaled
+	} else if lhs.ty.base == unsafe { nil } && rhs.ty.base != unsafe { nil } {
+		// int + ptr
+		scale := p.new_num(i64(rhs.ty.base.size), tok)
+		mut scaled := p.new_binary(.mul, lhs, scale, tok)
+		add_type(mut scaled)
+		node.lhs = scaled
+		node.rhs = rhs
+	}
+	add_type(mut node)
+	return node
+}

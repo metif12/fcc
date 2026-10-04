@@ -47,6 +47,10 @@ pub mut:
 	angle_paths []string
 	// pragma_once holds files marked `#pragma once`.
 	pragma_once map[string]bool
+	// pack_stack is the `#pragma pack(push, N)` stack, and packs records where each
+	// change took effect so the parser can ask what was in force at a given line.
+	pack_stack []int
+	packs      []PackEvent
 	// errors collects diagnostics instead of stopping.
 	errors []string
 	// counter names `__COUNTER__`.
@@ -454,7 +458,7 @@ fn (mut p Preprocessor) simple_directive(name string, rest string, line int, pat
 			// is the product, and a caller that wants them reads `errors`.
 		}
 		'pragma' {
-			p.do_pragma(rest, path)
+			p.do_pragma(rest, line, path)
 		}
 		'line' {
 			// Accepted and ignored. The tokenizer already tracks physical lines, and
@@ -563,10 +567,91 @@ fn parse_params(text string) ([]string, string, bool) {
 
 // do_pragma handles `#pragma`. Only `once` has an effect here; the rest are kept out
 // of the token stream because the parser has no use for them.
-fn (mut p Preprocessor) do_pragma(rest string, path string) {
+// PackEvent records that `#pragma pack` changed the maximum member alignment at one
+// line.
+//
+// The preprocessor sees the pragma and the layout code needs it, and the two are not
+// in the same place: preprocessing produces one token list, and the parser walks it
+// without knowing anything about pragmas. Recording where each pragma took effect and
+// asking by line number is enough, because a pragma is always on an earlier line than
+// the struct definition it governs.
+pub struct PackEvent {
+pub mut:
+	line int
+	// pack is the alignment in force from this line on. 0 means none is in force.
+	pack int
+}
+
+fn (mut p Preprocessor) do_pragma(rest string, line int, path string) {
 	if rest == 'once' {
 		p.pragma_once[path] = true
+		return
 	}
+	p.do_pragma_pack(rest.trim_space(), line)
+}
+
+// do_pragma_pack records a `#pragma pack` directive.
+//
+// The argument is a parenthesised form: `pack(2)`, `pack(push, 4)`, `pack(push)` or
+// `pack(pop)`. The parentheses are stripped first, because the words being looked for
+// are inside them — reading `push` off the front of `(push, 4)` finds nothing, and a
+// pragma that silently does nothing is worse than one that is rejected.
+fn (mut p Preprocessor) do_pragma_pack(body string, line int) {
+	if !body.starts_with('pack') {
+		return
+	}
+	rest := strip_outer_parens(body[4..].trim_space())
+	if rest == '' {
+		return
+	}
+	if rest == 'pop' {
+		if p.pack_stack.len > 0 {
+			p.pack_stack.delete(p.pack_stack.len - 1)
+		}
+	} else if rest.starts_with('push') {
+		mut arg := rest[4..].trim_space()
+		if arg.starts_with(',') {
+			arg = arg[1..].trim_space()
+		}
+		// `push` with no argument keeps the alignment in force.
+		p.pack_stack << if arg == '' { p.pack_value() } else { arg.int() }
+	} else {
+		p.pack_stack.clear()
+		p.pack_stack << rest.int()
+	}
+	p.packs << PackEvent{
+		line: line
+		pack: p.pack_value()
+	}
+}
+
+// strip_outer_parens removes one layer of parentheses if it is there.
+fn strip_outer_parens(s string) string {
+	if s.len >= 2 && s[0] == `(` && s[s.len - 1] == `)` {
+		return s[1..s.len - 1].trim_space()
+	}
+	return s
+}
+
+// pack_value returns the alignment currently in force, or 0 for none.
+fn (p &Preprocessor) pack_value() int {
+	if p.pack_stack.len == 0 {
+		return 0
+	}
+	return p.pack_stack[p.pack_stack.len - 1]
+}
+
+// pack_before returns the alignment in force just before a line.
+pub fn (p &Preprocessor) pack_before(line int) int {
+	mut pack := 0
+	for e in p.packs {
+		if e.line < line {
+			pack = e.pack
+		} else {
+			break
+		}
+	}
+	return pack
 }
 
 // find_from returns the index of the first `ch` at or after `start`, or none.
