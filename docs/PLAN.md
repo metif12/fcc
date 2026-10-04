@@ -153,11 +153,38 @@ defects behind it, in the order a shape matrix found them:
   (x=y).a; })` needs an anonymous struct declaration inside a statement expression, and
   an assignment used as a value.
 
-**Failing now.** Front end: `alignof` mis-reads an expression, `arith` faults in
-`add_type`, `literal` cannot see `size`, `unicode` loses a declaration, `union`
-mis-reads a member access, `vla` loses a token at line 22, `macro` needs `include1.h`.
-Back end: `function` leaves three values on the stack. The eight that run all exit
-non-zero, so their code computes the wrong answer rather than crashing.
+**Failing now: 8 of 18.** Four are one construct each and four are larger. Each was
+narrowed to a minimal reproducer before being recorded here, because the suite itself
+is the regression test and a table is not.
+
+| file | what it needs |
+|---|---|
+| `macro` | `include1.h`, which the suite generates; a fixture, not a defect |
+| `function` | the backend leaves three values on the stack in `main` |
+| `control:94` | `initializer element is not constant` — a constant-expression rule to widen |
+| `literal:94` | **a line splice is not applied outside a string literal** |
+| `alignof:33` | `_Alignof` of an expression rather than of a type name |
+| `unicode:9` | `int π = 3;` — a UTF-8 identifier |
+| `union:13` | an anonymous struct member inside a `union` |
+| `vla:22` | `sizeof(char[2][n])` — a VLA in a type name, whose size is a run-time value |
+
+Ten compile, assemble, link and execute. None crashes the compiler any more, and the
+ten that run all exit non-zero, so their code computes the wrong answer rather than
+failing to be produced. That is the next list, once the eight above are through.
+
+**The line splice is the interesting one, and it is a design decision rather than a
+bug.** `int size\` / `of(char);` must lex as the single identifier `sizeof`, and it
+lexes as two. The tokenizer applies a splice inside a string literal, where a test
+covers it, and nowhere else. C deletes backslash-newline in *translation phase 2*,
+before anything is tokenized, which is why a splice can join the two halves of an
+identifier — and why it cannot be handled by a scanner that reads one character at a
+time.
+
+The fix C specifies is to strip the splices once, in one place, before the tokenizer
+runs, carrying a line number per output byte so diagnostics still point where they did.
+Handled per-scanner instead, it means teaching the identifier, number, character and
+punctuator scanners four variants of the same rule, and the fourth is the one that will
+be wrong.
 
 **One acceptance criterion has to be restated.** The suite's expected values are
 chibicc's, written for the Linux target it runs on, and two of them cannot both hold
