@@ -427,3 +427,17 @@ fn test_a_non_ascii_byte_continues_an_identifier_too() {
 	assert toks[0].kind == .ident, 'got ${toks[0].kind}'
 	assert toks[0].text == 'a×b', 'got ${toks[0].text}'
 }
+
+fn test_a_dollar_sign_belongs_to_an_identifier() {
+	// A GCC extension, not C — but tcc and chibicc both accept it and generated C in the
+	// wild uses it. Measured against tcc rather than assumed: it compiles and runs.
+	toks := tokenize('int $$$ = 5;')
+	assert toks[1].kind == .ident, 'got ${toks[1].kind}'
+	assert toks[1].text == '$$$', 'got ${toks[1].text}'
+}
+
+fn test_a_dollar_sign_continues_an_identifier() {
+	toks := tokenize('int a$b = 1;')
+	assert toks[1].kind == .ident, 'got ${toks[1].kind}'
+	assert toks[1].text == 'a$b', 'got ${toks[1].text}'
+}

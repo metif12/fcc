@@ -243,3 +243,26 @@ fn test_align_to_rounds_up() {
 	assert align_to(9, 16) == 16
 	assert align_to(0, 16) == 0
 }
+
+fn test_a_symbol_containing_a_dollar_sign_is_quoted_in_an_operand() {
+	// GNU `as` reads `$` as the start of an immediate, so `lea $$$(%rip), %rax` is
+	// `junk '(%rip)' after expression`. Measured here: the quoted spelling assembles,
+	// links, and reads the right address.
+	// The `&$$$` initializer is what produces a `.quad` relocation; a function that reads
+	// the global is what produces the `lea`. Both positions need the quoting and neither
+	// is reachable from the other, so both are here.
+	text, errs := generated('int $$$ = 5; int *p = &$$$; int f(void) { return $$$; }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert text.contains('lea "$$$"(%rip), %rax'), 'the operand was not quoted'
+	assert text.contains('.quad "$$$"'), 'the relocation was not quoted'
+	// A label and a `.globl` take the bare name: both accept it, so quoting them would
+	// be noise.
+	assert text.contains('.globl $$$'), 'the directive should keep the bare name'
+	assert assembled(text), 'the assembler rejected the generated text'
+}
+
+fn test_a_symbol_without_a_dollar_sign_is_not_quoted() {
+	text, errs := generated('int q = 5; int *p = &q; int f(void) { return q; }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert text.contains('lea q(%rip), %rax'), 'an ordinary symbol should not be quoted'
+}

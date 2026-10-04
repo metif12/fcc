@@ -315,8 +315,13 @@ fn is_digit(c u8) bool {
 // The rule is the same for the start of an identifier and for a character continuing one,
 // so `a×b` is the single identifier every compiler agrees it is, and
 // `is_ident_cont` inherits it from here rather than repeating it.
+//
+// `$` is a GCC extension rather than C, but it is one tcc and chibicc both accept, and
+// generated C in the wild uses it; `$` is also a legal character in an assembler symbol
+// name, which is what makes it usable here rather than merely tolerated.
 fn is_ident_start(c u8) bool {
-	return c == `_` || (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || c >= 0x80
+	return c == `_` || c == `$` || (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`)
+		|| c >= 0x80
 }
 
 fn is_ident_cont(c u8) bool {

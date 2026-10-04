@@ -167,7 +167,7 @@ fn (mut g AsmGen) gen_addr(node &ast.Node) {
 			// A function or a global: RIP-relative, because the absolute address
 			// is not known at link time — the executable is loaded wherever the
 			// loader puts it, and a shared object may be anywhere at all.
-			g.line('  lea ${obj.name}(%rip), %rax')
+			g.line('  lea ${g.sym_operand(obj.name)}(%rip), %rax')
 			return
 		}
 		.deref {
@@ -649,7 +649,25 @@ fn (mut g AsmGen) emit_data(globals []&ast.Obj) {
 // of the symbol's address plus the offset.
 //
 // The bytes either side of a relocation are plain data, and a relocation is eight
-// bytes wide, so the walk advances by the relocation's width rather than one byte.
+// sym_operand spells a symbol for use *inside an instruction* or a relocation.
+//
+// GNU `as` reads `$` as the start of an immediate, so a name containing one has to be
+// quoted there: `lea $$$(%rip), %rax` is `junk '(%rip)' after expression`, while
+// `lea "$$$"(%rip), %rax` assembles, links and reads the right address. Measured here
+// rather than assumed, because the failure is at assembly time and says nothing about
+// which of the two spellings was meant.
+//
+// A label definition and `.globl` take the bare name — both accept it — so quoting is
+// confined to the operand position where it is required.
+fn (g &AsmGen) sym_operand(name string) string {
+	if name.contains('$') {
+		return '"${name}"'
+	}
+	return name
+}
+
+// emit_bytes writes an object's byte image, one `.byte` per byte unless a relocation
+// falls in the range, and advances by the relocation's width rather than one byte.
 fn (mut g AsmGen) emit_bytes(obj &ast.Obj) {
 	mut pos := 0
 	mut rel_i := 0
@@ -657,7 +675,7 @@ fn (mut g AsmGen) emit_bytes(obj &ast.Obj) {
 	for pos < obj.ty.size {
 		if rel_i < rels.len && rels[rel_i].offset == pos {
 			rel := rels[rel_i]
-			g.line('  .quad ${rel.label}${if rel.addend < 0 { rel.addend.str() } else { '+' + rel.addend.str() }}')
+			g.line('  .quad ${g.sym_operand(rel.label)}${if rel.addend < 0 { rel.addend.str() } else { '+' + rel.addend.str() }}')
 			rel_i++
 			pos += 8
 			continue
