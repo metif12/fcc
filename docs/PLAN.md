@@ -160,9 +160,32 @@ everything that reaches it, and the front end stops reading.
    `--preprocess` shows `main`'s tokens in the stream. So the tokens are there and
    the parser is not reaching them.
 
-The next thing to do is put those two together: whether `parse_tokens` is handed
-the same stream `--preprocess` prints, and if it is, which construct in
-`test.h`'s declarations ends `translation_unit` without a diagnostic.
+**The cause is located, and it is one bug in the preprocessor.** A five-line
+reproduction:
+
+```
+inc/five.h      void d1(int a); ... void d5(int a);
+five.c          #include "five.h"
+                int main(void) { return 0; }
+```
+
+- `vcc -E five.c` prints the `#include` as a raw `preproc_any` token followed by
+  `main`'s tokens. **None of `d1`–`d5` appear.**
+- `vcc --dump-ast five.c` reports `d1`–`d5` and **not `main`.**
+- `vcc --dump-ast five.h` alone reports `d1`–`d5` correctly.
+- `vcc --dump-ast` of a file that is *only* `#include "h.h"` reports the header's
+  global, for the quoted and the angle-bracket form alike.
+
+So the expansion works and the tokens reach the parser — but the parser never sees
+the tokens that came **after** the include. `-E` has the mirror-image defect: it
+prints the main file and not the included one. Both consumers call
+`Preprocessor.run`, so the stream one of them returns is not the stream the other
+returns; the included file's tokens and the main file's tokens are ending up in
+different places.
+
+That is where to start: `directives` and `expand` in `src/vcc/preprocess.v`, and
+what `finish` is handed. A single five-line file separates the two halves, so this
+should not take long.
 
 Found while chasing that, and fixed: `-S` used to write a one-line stub when the
 front end reported errors. It assembled cleanly and then failed at link with
