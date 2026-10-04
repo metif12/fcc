@@ -206,156 +206,33 @@ Handled per-scanner instead, it means teaching the identifier, number, character
 punctuator scanners four variants of the same rule, and the fourth is the one that will
 be wrong.
 
-**The remaining thirteen are one bug, and it is the calling convention.** Every one of
-them fails the same way, at the first assertion, with a garbage pointer where `assert`'s
-third argument should be. `printf("noargs\n")` in a vcc program crashes with an access
-violation. The generated call sequence is SysV AMD64:
+**The calling convention was the whole of it, and it is fixed.** All fourteen were
+emitting psABI calls — `%rdi`, `%rsi`, no home area, a `%al` vector count — while mingw's
+C library follows the Microsoft ABI. `printf("noargs\n")` died with an access violation
+and every one of the fourteen printed a garbage pointer where `assert`'s third argument
+should have been.
 
-```
-  lea printf(%rip), %rax
-  pop %rdi
-  mov %rax, %r10
-  mov $0, %rax
-  call *%r10
-```
+It was invisible for the whole of phase 2 because every call in the 264 unit tests and the
+five working programs was between two vcc-compiled functions, which agree with each other
+on the wrong convention. **A calling convention is only observable across a boundary**,
+and nothing in the project crossed one until the suite did. The target ABI recorded
+earlier in this file — `long` 4, pointers 8 — was measured correctly; it is *data layout*,
+and the convention was never measured at all.
 
-Arguments in `%rdi`/`%rsi`, no shadow space, `mov $0, %rax` for the vector-register
-count. Windows x64 is the Microsoft ABI: integer arguments in `%rcx`/`%rdx`/`%r8`/`%r9`,
-floats in `%xmm0`–`%xmm3`, **32 bytes of shadow space the caller must allocate**, every
-vector argument mirrored into its GPR, and the fifth integer argument on the stack rather
-than in a fifth register. mingw's `printf` follows that, so every call vcc makes into the
-C library is wrong.
+Fixing it took the suite from none passing to five: `builtin`, `compat`, `enum`,
+`offsetof`, `union`. `function` assembles, links and runs for the first time. The nine
+that run and fail now print real assertion values, so they are computing wrong answers
+rather than failing to produce output at all — which is the next list, and it is ordinary
+code generation rather than an ABI question.
 
-**Why 264 tests and five working programs did not catch it.** Every call in those was
-between two vcc-compiled functions. Both sides use the same wrong convention, so the
-arguments land in the same wrong registers and the answer comes out right. The bug is
-invisible from inside the compiler and invisible from any test that does not cross the
-boundary to a library — which is to say invisible until a real program calls `printf`.
+**Still failing to compile, four of eighteen:**
 
-The recorded target ABI in this file — `long` 4, `long long` 8, pointers 8, `sizeof(void)`
-1 — was measured correctly, and it is *data layout*. The calling convention was never
-measured, because measuring it requires linking against something that was not compiled
-by vcc. That is the gap, and the suite exposed it by being the first thing in the project
-that crosses the boundary.
-
-**What this means for the phase.** No front-end work will move these thirteen. The next
-piece of work is the calling convention, and it is a single well-specified change:
-register assignment, the shadow space, the GPR mirrors, and the stack argument placement.
-`-m32` is not needed to find it — it is one convention to replace, in `classify_args`,
-`push_args` and `gen_funcall` — and doing it against tcc's own output is the check, since
-tcc on this host already uses the Microsoft ABI.
-
-Until then, the honest statement of where phase 2 stands is: **four files fail to compile,
-thirteen compile to code that cannot call anything.** The earlier framing — thirteen files
-"computing the wrong answer" — was wrong, and it was wrong because it credited the
-compiler with producing an answer at all.
-
-**One acceptance criterion has to be restated.** The suite's expected values are
-chibicc's, written for the Linux target it runs on, and two of them cannot both hold
-with tcc on this host:
-
-| | vcc | tcc here | chibicc's suite |
-|---|---|---|---|
-| `sizeof(L"ab")` | 8 | 6 | 8 |
-| `sizeof(long double)` | 8 | 8 | 16 |
-
-Both are `wchar_t` and x87 `long double`, and both are a Windows-versus-ELF ABI
-difference, not a defect in either compiler. A file that disagrees only on those is a
-**PASS with a recorded divergence**, not a failure. The comparison has to be against
-tcc on this host, per assertion, rather than against the suite's literals — which
-means the runner needs to compare answers rather than exit codes, and that is the next
-piece of work.
-
-**Acceptance for this phase is met when all 18 run, and every divergence from tcc
-here is either fixed or recorded as an ABI difference.**
-### Phase 3 — machine-code backend and COFF objects
-
-- Replace `Emit.text` with `Emit.bytes`: an x86-64 instruction encoder written from
-  the Intel manual, not from TCC.
-- **RIP-relative addressing throughout** (decision D16), so `-shared` needs no
-  second codegen path.
-- A PE/COFF object writer: `.text`/`.data`/`.rdata`/`.bss`, symbol table,
-  `IMAGE_REL_AMD64_*` relocations, and COMDAT selection groups. The last is not
-  optional — V's generated C is full of `static` and `inline`, and a naive
-  linker will either report duplicate symbols or silently pick the wrong one.
-
-**Acceptance:** `lld-link` links vcc objects into a `.exe` that runs.
-
-### Phase 4 — linker, imports, runtime
-
-- A static COFF linker that resolves externals and emits `.reloc`
-- Import libraries generated by parsing `thirdparty/tcc/lib/*.def` — the files are
-  already in the V repository
-- `-shared` producing a DLL with a real export directory
-- Runtime: the four libatomic symbols `libgc.a` needs — `__atomic_fetch_add_8`,
-  `__atomic_load_8`, `__atomic_or_fetch_8`, `__atomic_store_8` — each a single
-  `lock`-prefixed instruction, plus `memcpy`/`memset` from msvcrt
-- `tcc_backtrace` implemented in vcc (decision D17), walking frames with dbghelp
-
-**Acceptance:** `v run <program>` works end to end.
-
-### Phase 5 — wire into V
-
-Add `vcc` to `V3CCompilerSelection` and to the tcc-family name matching in
-`v3_is_tcc_compilation_failure`, and let it participate in the compiler-identity
-hash that keys the object cache.
-
-**Acceptance:** `./v -cc vcc -silent test vlib/v/` produces the same pass set as
-`-cc tcc`.
-
-### Phase 6 — Linux, then macOS
-
-ELF writer and linker, then Mach-O. Deferred because `driver.v:347` records that
-macOS TCC emits ELF objects that cannot link against clang's Mach-O — a real
-cross-format problem that should not be discovered while three platforms are
-already in play.
-
-## Size estimate
-
-| Component | Lines of V |
+| file | what it needs |
 |---|---|
-| front end | ~12,000 |
-| assembly-text backend | ~2,000 |
-| x86-64 machine-code encoder | ~6,000 |
-| COFF writer | ~2,500 |
-| COFF linker | ~3,500 |
-| runtime and import libraries | ~1,000 |
-| ELF writer and linker | ~3,000 |
-| Mach-O writer | ~2,000 |
-| **total** | **~32,000** |
-
-This is a multi-month project. Phases 0 to 2 are roughly 15% of the work and about
-90% of the validation, which is the argument for doing them first.
-
-## Open questions
-
-**None blocking.** The four questions raised before this phase were answered and
-recorded as D15–D17; two of them turned out to be answerable by measurement and are
-recorded as corrections C1 and C2. See `notes/DECISIONS.md`.
-
-The following are noted for later and are not needed yet:
-
-- **Bootstrap order.** `makev.bat` builds V with `-cc tcc.exe`, so the first `vcc`
-  is built by the existing V+tcc and `-cc vcc` only becomes selectable in phase 5.
-  No circularity; it merely fixes the order.
-- **`-prod` never selects tcc** (`driver.v:7766`), so `vcc` inherits that
-  limitation. Worth revisiting only if vcc turns out fast enough to change.
-- **macOS in-process linking.** Phase 6 must decide whether to provide a
-  `libvcc` with a `tcc_new`/`tcc_compile_file` API, or keep using the
-  executable-based linker there. On Windows this is settled: `link.v` invokes the
-  linker as a subprocess, so nothing extra is needed.
-
-## Risks, ranked
-
-1. Object writer and linker correctness (COMDAT, relocations) — no reference
-   implementation under a permissive licence, and the failure modes are subtle.
-2. `tcc_backtrace` correctness. A backtrace that faults while reporting a fault is
-   worse than none. It sits late in phase 4 for that reason.
-3. Bitfield layout, in both the type system and the object writer.
-4. The rest of the runtime helper set, beyond the four libatomic symbols now
-   measured. Still to be enumerated by linking V's output and reading the errors
-   rather than guessing.
-
+| `control:94` | `initializer element is not constant` — a constant-expression rule to widen |
+| `literal:94` | a line splice, which C deletes in translation phase 2 |
+| `macro:333` | `#include M13 >`, where the spelling comes from a macro |
+| `vla:22` | `sizeof(char[2][n])` — a VLA in a type name, whose size is a run-time value |
 
 ### The Windows x64 calling convention, measured
 
