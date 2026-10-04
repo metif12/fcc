@@ -95,6 +95,9 @@ pub mut:
 	is_local bool
 	// offset is the frame offset of a local, or -1 for something not yet placed.
 	offset int = -1
+	// stack_size is the frame size the backend reserved for a function, in bytes.
+	// It is always a multiple of 16 so that the stack stays aligned across a call.
+	stack_size int
 	// align is the object's required alignment. It can exceed the type's, because
 	// `_Alignas` and `__attribute__((aligned))` raise it.
 	align int = -1

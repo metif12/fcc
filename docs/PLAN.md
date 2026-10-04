@@ -93,13 +93,32 @@ the bundled tcc rather than an expectation derived from the algorithm being test
 object are reported rather than translated; both need a node kind the backend has to
 implement anyway.
 
-### Phase 2 — assembly-text backend
+### Phase 2 — assembly-text backend *(in progress)*
 
-Port chibicc's `codegen.c` (43,920 B of C) behind `backend.Backend`.
+Port chibicc's `codegen.c` (43,920 B of C, 1,595 lines) behind `backend.Emit`.
+
+**Done:** `src/backend/asm.v` — the text emitter behind `Emit`, and the half of
+chibicc's generator that does not need the expression and statement state
+machine. Addressing, loads and stores, the comparison and conversion tables, the
+psABI's register classification, frame layout, and the data section with its
+relocations. `vcc -S` writes it, and the output assembles: a global with an
+initializer, a tentative definition in `.bss`, a string literal as its own object,
+and a pointer into a table all round-trip through GNU `as` into a PE object.
+
+**Two of chibicc's data directives are wrong for this target and were replaced.**
+`.local` and `.type x, @object` are ELF spellings that GNU as rejects here, with
+`unknown pseudo-op` and `junk at end of line`. A symbol with no `.globl` is
+already local, and COFF takes an object's size from its symbol table.
+
+**Not done:** `gen_expr` and `gen_stmt`, the value-stack walk over the statement
+tree — roughly 1,100 of the 1,595 lines. A translation unit containing a function
+definition is *reported*, not emitted with an empty body: an object that links and
+does the wrong thing is the failure this project is least willing to accept.
 
 **Acceptance: the chibicc test suite passes**, adapted to invoke `vcc -S` then
 `gcc`. This is the strongest correctness signal available anywhere in this
-project — it compares runtime behaviour against gcc, not text.
+project — it compares runtime behaviour against gcc, not text. It cannot run
+until the expression and statement walk exists.
 
 ### Phase 3 — machine-code backend and COFF objects
 

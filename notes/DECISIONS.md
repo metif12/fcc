@@ -347,6 +347,54 @@ on `is_flonum(t1)` without ever looking at `t2`.
 
 ---
 
+---
+
+## D29. `Emit` is the seam; `Backend` is a description of phase 3
+
+**Decision.** `src/backend/asm.v` satisfies `Emit` and nothing else.
+`Backend`, `Context` and `Shared` in `backend.v` are left in place and are not
+implemented.
+
+**Why.** `Emit` is the part that has to be swapped: phase 3 replaces `text` with
+an instruction encoder and nothing above it changes. `Backend` was designed in
+phase 0, before there was a code generator, as a fine-grained interface the front
+end would drive operation by operation. chibicc's generator is not shaped that
+way — it walks the AST itself and keeps its own stack depth — so implementing
+`Backend` faithfully would mean writing a second generator behind an interface
+that describes neither.
+
+Leaving it as a record is honest in a way that deleting it is not: it is the
+phase 3 shape, and whoever writes the machine-code emitter needs to know it was
+designed. Replacing it is a two-line change once there is code on both sides of
+it.
+
+---
+
+## D30. The data directives are COFF's, not ELF's
+
+**Decision.** `emit_data` emits `.globl`, `.data`, `.bss`, `.align`, `.byte`,
+`.quad` and `.zero`, and nothing else. chibicc's `.local`, `.type x, @object`,
+`.size x, n` and the `.tdata`/`.tbss` section spellings are not used.
+
+**Why.** GNU as rejects two of them on this target. Measured on the output of
+`vcc -S`:
+
+```
+data.s:2: Error: unknown pseudo-op: `.local'
+data.s:4: Error: junk at end of line, first unrecognized character is `t'
+```
+
+The second points at the comma in `.type table, @object`. Those are ELF
+spellings, and this project's object format is PE/COFF, where a symbol with no
+`.globl` is already local and an object's size comes from its symbol table
+rather than from a directive. Carrying chibicc's ELF directives over would have
+produced a generator that passes every unit test here and fails at the assembler.
+
+`__thread_local` is reported rather than emitted, because a PE thread-local lives
+in `.tls$` and is reached through a two-byte index into the TLS directory, and
+that index is allocated by the object writer.
+
+---
 ## Open items for the end of the project
 
 Recorded rather than decided, because each of them is a question about the finished

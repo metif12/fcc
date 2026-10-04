@@ -1,6 +1,7 @@
 module driver
 
 import os
+import src.backend
 import src.vcc
 
 // Command line handling and the invocation contract.
@@ -67,6 +68,8 @@ pub mut:
 	// dump_ast runs the parser and prints what it produced. It is how phase 1 is
 	// signed off — see `dump_ast`.
 	dump_ast bool
+	// emit_asm is -S: write assembly text instead of an object.
+	emit_asm bool
 	// verbose prints the command it would run.
 	verbose bool
 	// options_not_yet_honoured maps an accepted-but-unimplemented option to the
@@ -145,7 +148,7 @@ pub fn parse_args(args []string) !Options {
 		} else if arg == '-shared' {
 			o.shared = true
 		} else if arg == '-S' {
-			return error('-S is not supported yet; phase 2 will emit assembly directly')
+			o.emit_asm = true
 		} else if arg.starts_with('-std=') {
 			o.std = arg[5..]
 		} else if arg == '-isystem' {
@@ -315,6 +318,10 @@ pub fn main(args []string) {
 		dump_ast(o)
 		return
 	}
+	if o.emit_asm {
+		emit_asm(o)
+		return
+	}
 	eprintln('vcc: phase 1 — the front end runs, but no code is generated yet')
 	exit(1)
 }
@@ -354,6 +361,58 @@ fn dump_ast(o &Options) {
 	}
 }
 
+// emit_asm implements -S: run the front end and write the assembly text.
+//
+// The output goes to `-o` when there is one and to standard output otherwise,
+// which is what tcc does and what lets it be piped straight into `as`.
+//
+// Every input is attempted even after one fails, so a file the front end rejects
+// does not hide the diagnostics of the file after it.
+fn emit_asm(o &Options) {
+	mut all := []string{}
+	mut failed := false
+	mut first := true
+
+	for path in o.inputs {
+		mut p := vcc.preprocessor(o.includes, o.sys_includes)
+		p.define_builtins()
+		pre := p.run(path)
+		for e in pre.errors {
+			eprintln('${path}: ${e}')
+			failed = true
+		}
+		parsed := vcc.parse_tokens(pre.tokens, path, p.packs)
+		for e in parsed.errors {
+			eprintln(e)
+			failed = true
+		}
+		if parsed.errors.len > 0 {
+			continue
+		}
+		mut g := backend.AsmGen{}
+		unit, errs := g.gen(mut parsed.globals)
+		for e in errs {
+			eprintln(e)
+			failed = true
+		}
+		if !first {
+			all << ''
+		}
+		first = false
+		all << unit
+	}
+
+	text := all.join('\n')
+	if o.output == '' {
+		print(text)
+	} else if os.write_file(o.output, text) or { -1 } != 0 {
+		eprintln('vcc: cannot write ${o.output}')
+		exit(1)
+	}
+	if failed {
+		exit(1)
+	}
+}
 // preprocess_only mirrors `-E`: run the preprocessor and print the resulting
 // tokens. It is how phase 1 is validated, since every phase-2 acceptance criterion
 // depends on the front end being right.
