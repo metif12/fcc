@@ -217,6 +217,10 @@ fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, line int) ([]ast
 	mut va_args := []ast.Token{}
 	if m.is_variadic {
 		// Everything at and beyond the named parameters is variadic.
+		//
+		// `...` is not one of `m.params` — `parse_params` records it as the variadic
+		// flag and leaves it out — so `params.len` is already the number of *required*
+		// arguments and a variadic macro may be called with none of its variadic ones.
 		want := m.params.len
 		if named < want {
 			p.errorf(line, 'macro ${m.name} requires ${want} arguments, but ${named} given')

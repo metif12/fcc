@@ -159,7 +159,6 @@ is the regression test and a table is not.
 
 | file | what it needs |
 |---|---|
-| `macro` | `include1.h`, which the suite generates; a fixture, not a defect |
 | `function` | the backend leaves three values on the stack in `main` |
 | `control:94` | `initializer element is not constant` — a constant-expression rule to widen |
 | `literal:94` | **a line splice is not applied outside a string literal** |
@@ -167,6 +166,29 @@ is the regression test and a table is not.
 | `unicode:9` | `int π = 3;` — a UTF-8 identifier |
 | `union:13` | an anonymous struct member inside a `union` |
 | `vla:22` | `sizeof(char[2][n])` — a VLA in a type name, whose size is a run-time value |
+
+
+**`macro.c` needed its fixtures before it could be read at all.** `include1.h` through
+`include4.h` are in the suite's directory on GitHub and were simply never fetched, so the
+file failed at its second `#include` and nothing past line 2 was being tested. With them
+present it reaches line 333.
+
+What line 333 needs is an include whose *spelling* comes from a macro:
+`#define M13 < include4.h` then `#include M13 >`. The directive's own tokens are `<`,
+`include4`, `.`, `h`, `>`, and the expansion has to happen before the spelling is read.
+
+The two errors after it — `M14()` at lines 347 and 350, a variadic macro called with no
+arguments — are **not** a variadic-argument bug, and I was wrong about that twice before
+measuring it. `#define NOTHING(...) 3` with `NOTHING()` expands to `3`, and so does the
+same call nested as another macro's argument: both give `assert(0, 3)`, which is what tcc
+gives. So either the `M14` errors are downstream of the failed include at 333 leaving the
+preprocessor mis-positioned, or they are a third thing; that is untested, and the honest
+entry is "one known defect and one unexplained pair".
+
+The tempting repair — treating `...` as one parameter less when checking the argument
+count — is wrong here, because `parse_params` deliberately leaves `...` out of `params`
+and records it as the variadic flag. Subtracting one made `want` negative for a
+pure-variadic macro and indexed `args[-1]`. That is why `want` is `params.len`.
 
 Ten compile, assemble, link and execute. None crashes the compiler any more, and the
 ten that run all exit non-zero, so their code computes the wrong answer rather than
