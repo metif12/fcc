@@ -139,10 +139,14 @@ pub fn parse_args(args []string) !Options {
 			o.output = arg[2..]
 		} else if arg == '-c' {
 			o.compile_only = true
-		} else if arg == '-E' || arg == '--dump-tokens' {
-			o.dump_tokens = true
-		} else if arg == '--preprocess' {
+		} else if arg == '-E' || arg == '--preprocess' {
+			// `-E` is tcc's and gcc's "preprocess and stop". It was aliased to the
+			// tokenizer dump, so it printed raw `#include` lines and never computed the
+			// expansion it exists to show. Every conclusion drawn from `-E` about the
+			// preprocessor was really a conclusion about the lexer.
 			o.preprocess_only = true
+		} else if arg == '--dump-tokens' {
+			o.dump_tokens = true
 		} else if arg == '--dump-ast' {
 			o.dump_ast = true
 		} else if arg == '-shared' {

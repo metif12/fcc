@@ -177,15 +177,28 @@ five.c          #include "five.h"
   global, for the quoted and the angle-bracket form alike.
 
 So the expansion works and the tokens reach the parser — but the parser never sees
-the tokens that came **after** the include. `-E` has the mirror-image defect: it
-prints the main file and not the included one. Both consumers call
-`Preprocessor.run`, so the stream one of them returns is not the stream the other
-returns; the included file's tokens and the main file's tokens are ending up in
-different places.
+the tokens that came **after** the include.
 
-That is where to start: `directives` and `expand` in `src/vcc/preprocess.v`, and
-what `finish` is handed. A single five-line file separates the two halves, so this
-should not take long.
+**Half of that was `-E` itself.** `-E` was aliased to `--dump-tokens`, so it ran
+the *lexer* and printed raw `#include` lines. It is now `preprocess_only`, and it
+prints what it claims to:
+
+```
+$ vcc -E -I inc five.c
+1: keyword "void"   1: ident "d1"   ...   5: punct ";"      <- five.h
+2: keyword "int"    2: ident "main"  ...   2: punct "}"      <- five.c
+```
+
+**The preprocessor is therefore exonerated** — it produces the correct stream, in
+the correct order, for both include forms. Every earlier conclusion drawn from `-E`
+about include handling was a conclusion about the lexer, which is why it pointed at
+the preprocessor for so long.
+
+What is left is on the parse side: `dump_ast` and `dump_preprocessed` are the same
+five lines of driver, they both take `pre.tokens` from the same `Preprocessor.run`,
+and yet one sees `main` and the other does not. Since `-E` now prints the whole
+stream, the next step is to compare what `parse_tokens` is handed against that
+stream — its length, and where its `eof` token sits.
 
 Found while chasing that, and fixed: `-S` used to write a one-line stub when the
 front end reported errors. It assembled cleanly and then failed at link with
