@@ -398,3 +398,32 @@ fn test_every_keyword_has_a_distinct_spelling() {
 		assert ast.keyword_from_spelling(n) != none, '${n} did not resolve'
 	}
 }
+
+// --- non-ASCII identifiers ---
+
+fn test_a_non_ascii_identifier_stays_one_token() {
+	// Every byte of a multi-byte UTF-8 sequence is 0x80 or above, so classifying those
+	// bytes as punctuators split `int π = 3;` into two punctuation tokens and then
+	// reported `variable name omitted` on the `=`.
+	toks := tokenize('int πx = 3;')
+	// The last token is the end-of-file sentinel.
+	assert toks.len == 6, 'got ${toks.len} tokens'
+	assert toks[1].kind == .ident, 'got ${toks[1].kind}'
+	// The spelling is kept as written, so a diagnostic quotes it back unchanged.
+	assert toks[1].text == 'πx', 'got ${toks[1].text}'
+}
+
+fn test_a_non_ascii_identifier_continues_over_ascii_letters_and_digits() {
+	toks := tokenize('int aπ9 = 1;')
+	assert toks[1].kind == .ident, 'got ${toks[1].kind}'
+	assert toks[1].text == 'aπ9', 'got ${toks[1].text}'
+}
+
+fn test_a_non_ascii_byte_continues_an_identifier_too() {
+	// The same rule as for the start, so  + U+00D7 +  is one identifier — which is
+	// what gcc, tcc and chibicc all make of it.
+	toks := tokenize('a×b')
+	assert toks.len == 2, 'got ${toks.len} tokens'
+	assert toks[0].kind == .ident, 'got ${toks[0].kind}'
+	assert toks[0].text == 'a×b', 'got ${toks[0].text}'
+}
