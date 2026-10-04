@@ -799,3 +799,26 @@ fn test_an_unsupported_expression_is_reported_rather_than_crashing_the_parser() 
 	r := parsed('int f(void) { return 1 @ 2; }')
 	assert r.errors.len > 0, 'expected a diagnostic'
 }
+
+// --- the comma operator ---
+
+fn test_a_parenthesised_expression_may_hold_a_comma_operator() {
+	// Parentheses hold a whole expression, not a conditional. Reading only a conditional
+	// stopped at the first comma, so `(1,2,3)` was a diagnostic on ordinary C.
+	r := parsed('int a = (1,2,3);')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert bytes_of(r.globals[0]) == '03000000', bytes_of(r.globals[0])
+}
+
+fn test_sizeof_of_a_parenthesised_comma_expression_is_the_size_of_its_type() {
+	// Four, not eight: a comma expression has the type of its last operand, which is an
+	// int, and the declared type of the object does not widen a sizeof.
+	r := parsed('unsigned long a = sizeof(1,2,3);')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert bytes_of(r.globals[0]) == '04000000', bytes_of(r.globals[0])
+}
+
+fn test_an_assignment_inside_parentheses_is_still_an_assignment() {
+	r := parsed('int f(void) { int a = 0; return (a = 5); }')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+}

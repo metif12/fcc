@@ -2949,7 +2949,11 @@ fn (mut p Parser) primary() &ast.Node {
 	}
 	if p.at('(') {
 		p.pos++
-		node := p.conditional()
+		// A parenthesised expression is a whole expression, so the comma operator is
+		// available inside it: `(1,2,3)` is 3, and `sizeof (1,2,3)` is the size of an
+		// `int`. Reading only a conditional here stopped at the first comma and reported
+		// `expected ")", found ","`, which is a diagnostic for perfectly ordinary C.
+		node := p.expr()
 		p.expect(')')
 		return node
 	}
