@@ -57,9 +57,23 @@ that phase 2 depends on for correctness.
   `#error`, `#line`, and macro expansion including `#`, `##` and the GNU variadic forms
 - `src/vcc/expand.v` — **done**: phase-2 expansion with the recursion guard
 - `src/vcc/cond_eval.v` — **done**: the `#if` expression evaluator
-- `src/vcc/parser.v` — **not started**
-- `src/vcc/types.v` — **not started**: struct, union, **bitfields**, enum, typedef,
-  function pointers, arrays, VLA, `const`/`volatile`/`restrict`
+- `src/vcc/parser.v` — **done**: declspec, declarators, struct, union, enum, typedef,
+  attributes, `typeof`, VLAs, initializers with designators, constant expressions,
+  globals, and function bodies
+- `src/vcc/stmt.v` — **done**: the statement and assignment grammar. `if`, `for`,
+  `while`, `do`, `switch`/`case`/`default`, `goto` and labels, `break`, `continue`,
+  blocks, local declarations, expression statements, `return`, the compound assignments
+  and `++`/`--` lowerings, function calls with per-argument conversion, `_Generic`, and
+  GNU statement expressions
+- `src/vcc/types.v` — **done**: the type system measured against tcc rather than
+  assumed — `long` is 4 bytes, `long long` and `long double` are 8, `size_t` is 8, and
+  `sizeof(void)` is 1. Struct, union, **bitfields**, enum, typedef, function pointers,
+  arrays, VLA, `const`/`volatile`/`restrict`, and the implicit conversions
+- `src/vcc/eval.v` — **done**: constant expression evaluation, including the float
+  forms `is_const_expr` has to fold, and the initializer byte writer
+- `src/vcc/dump.v` — **done**: `--dump-ast`, which is the acceptance signal for this
+  phase. It prints each global's layout, initial data and relocations, and each
+  function's frame and statement count
 
 `--preprocess` is the acceptance signal for the part that exists: it prints the token
 stream after phase 1, so the front end can be validated on its own before any code
@@ -70,6 +84,14 @@ optimise under `-prod`, and then only for gcc/clang.
 
 **Acceptance for the whole phase:** parse the whole corpus without crashing;
 `--dump-ast` completes.
+
+**Done:** the whole declaration and statement grammar, with 73 parser tests, 30
+statement tests and 20 type tests. Every layout assertion is a byte image produced by
+the bundled tcc rather than an expectation derived from the algorithm being tested.
+
+**Remaining in this phase:** `asm` statements and compound assignment to an `_Atomic`
+object are reported rather than translated; both need a node kind the backend has to
+implement anyway.
 
 ### Phase 2 — assembly-text backend
 

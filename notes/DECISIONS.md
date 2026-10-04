@@ -168,6 +168,204 @@ cannot block the earlier phases.
 
 ---
 
+## D20. The C ABI is measured against tcc, not assumed from chibicc
+
+**Decision.** Every size, alignment and `size_t` width in `src/vcc/types.v` comes
+from a probe compiled by the bundled tcc, and the measured values differ from
+chibicc's assumptions on x86-64:
+
+| Type | tcc | chibicc assumes |
+|---|---|---|
+| `long` | 4 | 8 |
+| `long long` | 8 | 8 |
+| `long double` | 8 | 16 |
+| pointer | 8 | 8 |
+| `size_t` | 8 (`unsigned long long`) | 8 |
+| `sizeof(void)` | 1 | 1 |
+
+**Why.** `vcc` has to be layout-compatible with the tcc it replaces, on the same
+headers and the same generated C. chibicc's layout is System V's, which differs from
+tcc's on Windows in three places that a struct layout test would catch and a
+type-system unit test would not.
+
+**Consequence.** The layout tests assert tcc's byte images, and the ones that would
+have caught this — `bits1` through `bits5`, `pack(1)`, `pack(2)` — are transcribed
+from tcc output rather than computed by the algorithm under test.
+
+---
+
+## D21. A declarator is read as a shape and turned into a type afterwards
+
+**Decision.** `parse_decl_shape` reads a declarator into a small tree of `*`
+counts, groups, names and `(`/`[` suffixes; `build_decl` then applies those parts to
+a base type. The nesting is resolved in the tree, not by re-parsing.
+
+**Why.** chibicc parses a nested declarator twice: once against a throwaway type to
+find where the group ends, then again against the real type. That requires saving and
+restoring the cursor around the first pass, and `int (*fp)(void)` made the two passes
+disagree about where the group ended — the parser recursed until the stack gave out.
+Reading the shape once removes the class of bug entirely rather than fixing one
+instance of it.
+
+**Consequence.** The order the parts are applied in is the whole of C's declarator
+syntax, so it is stated in one place: without a group the `*`s bind first
+(`int *a[10]` is an array of pointers); with a group the suffixes bind first
+(`int (*a)[10]` is a pointer to an array).
+
+---
+
+## D22. `Type.name` is the declarator's name and `Type.tag` is the tag
+
+**Decision.** A tagged type carries its tag in `Type.tag`. `Type.name` means only
+"the name this declarator introduced".
+
+**Why.** chibicc keeps both in one field and lets the last writer win, so
+`struct S s;` leaves the struct type named `s` and `--dump-ast` printed
+`struct s` — a wrong answer in exactly the output whose job is to be read by someone
+chasing down a wrong declaration. Keeping them apart also stops a variable's type
+from disagreeing with the tag it was declared with.
+
+---
+
+## D23. A missing `;` is reported as a missing `;`, at tcc's position
+
+**Decision.** A declaration list that ends without its `;` reports
+`';' expected (got 'int')` at the unexpected token, rather than the grammar-accurate
+`expected ","`.
+
+**Why.** `int x` followed by `int y;` really is a missing comma as far as the grammar
+is concerned, and saying so sends a corpus sweep after the wrong token. Measured
+against tcc for the same input:
+
+```
+tcc:  ms.c:2: error: ';' expected (got 'int')
+vcc:  tcc: ms.c:2: ';' expected (got 'int')
+```
+
+The line is the unexpected token's, not the line that lacks the semicolon. Reporting
+the earlier line would read better to a human and would not line up with tcc.
+
+---
+
+## D24. `VarScope.type_def` is an option, because V wraps a nil pointer as `some(nil)`
+
+**Decision.** `type_def` is `?&ast.Type`, and every function returning an option
+checks the pointer it is about to return.
+
+**Why.** In this V build, returning a bare nil pointer from a `?&T` function produces
+`some(nil)`, not `none`. Measured with a two-line probe:
+
+```v
+struct S { p &int = unsafe { nil } }
+fn f(s S) ?&int { return s.p }
+println(f(S{}) == none)   // false
+```
+
+`some(nil)` survives `or { default }`, so `find_typedef` reported every declared
+*variable* as a type name, `declspec` handed on a nil type, and `sizeof(a)`,
+`typeof(a)` and `int d[4]; typeof(d[0])` all died in `copy_type` or `array_of` with
+an invalid memory access. The nil guard added at the call site was treating the
+symptom; storing the option is what makes `none` and `some` distinguishable.
+
+**Consequence.** Any new `?T`-returning helper has to return the option itself, not a
+pointer that might be nil. This is the same shape as the `err.msg` and `$?` traps in
+`AGENTS.md`: it looks right, and it is the wrong type.
+
+---
+
+## D25. `[]*T` is not usable as a struct field in this V build
+
+**Decision.** Every slice of pointers in a struct is spelled `[]&T`, never `[]*T`.
+
+**Why.** This V build rejects `[]*T` in a struct field outright:
+
+```
+struct embedding must be declared at the beginning of the struct body
+   10 |     body []*N
+      |             ^
+```
+
+Measured with a two-struct probe; `[]&T` in the same position is accepted, and `[]*T`
+in a *local* declaration is accepted, so it is specifically the struct field. The
+message points at the star and talks about embedding, which is why it reads as a
+nonsense error rather than a missing type.
+
+---
+
+## D26. A compound assignment looks through the cast its own operator inserted
+
+**Decision.** `to_assign` strips `.cast` nodes before asking whether its target is a
+struct member.
+
+**Why.** `usual_arith_conv` wraps *both* operands of every arithmetic node in a cast,
+unconditionally. So `s.a += 1` reaches `to_assign` as `cast(s.a) + 1`, and chibicc's
+test `binary->lhs->kind == ND_MEMBER` never fires. The member path is skipped, the
+plain path runs, and it takes `&s.a` — which is not an lvalue C can assign through and
+is a hard error for a bitfield.
+
+chibicc has the same structure and the same hole. It was found here by a test that
+asserts the shape of the member lowering rather than by a crash, and it is the kind of
+defect that a differential harness would have found in phase 2 at much greater cost.
+
+---
+
+## D27. A static initializer is a number or an address, and anything else is reported
+
+**Decision.** `eval2`'s result decides. If the expression is a constant expression, or
+it denotes an address — a `&`, or the name of an array or of a function, which decays
+to its own address — it is written as a number or as a relocation. Otherwise
+`initializer element is not constant` is reported.
+
+**Why.** `eval2` returns zero for whatever it cannot fold, so an unevaluated
+initializer became a plausible and wrong byte image with no diagnostic at all. The
+address case is the subtlety: `eval2` labels a bare variable read the same way it
+labels `&x`, because a variable's name is what an address is built from, so the label
+alone cannot tell `int *p = &table[3];` from `int *q = p;`.
+
+Measured against tcc for all four:
+
+| initializer | tcc | vcc |
+|---|---|---|
+| `int *p = &table[3];` | accepted | accepted, `reloc at 0: table+12` |
+| `char *s = "abc";` | accepted | accepted, `reloc at 0: .L..1+0` |
+| `int z = y + 1;` | `initializer element is not constant` | same |
+| `int *q = p;` | `initializer element is not constant` | same |
+
+---
+
+## D28. `int` and `long` are distinct types even at the same width
+
+**Decision.** `is_compatible` compares the basic kind, not the size.
+
+**Why.** An earlier test in this project asserted the opposite — that two basics are
+compatible when they have the same size and signedness — on the reasoning that `long`
+and `int` are both 4 bytes here. That is true of the *representation* and irrelevant to
+the *type*: C's type identity does not depend on size, and `_Generic` depends on that
+identity. With the size-based rule, `_Generic(n, int: 1, double: 2)` with an `int`
+controlling expression selected the `double`, because `is_compatible` short-circuited
+on `is_flonum(t1)` without ever looking at `t2`.
+
+---
+
+## Open items for the end of the project
+
+Recorded rather than decided, because each of them is a question about the finished
+compiler rather than about the code in front of me:
+
+- **The PR.** `origin` is `https://github.com/metif12/vcc.git`. Whether the finished
+  work lands as one PR from a branch, or as a series, is not decided.
+- **The `tcc:` diagnostic prefix.** Every message is prefixed `tcc:` because V's
+  `v3_is_tcc_compilation_failure` recognises nothing else. Phase 5 adds `vcc` to that
+  check, and the prefix should change with it — one search, but it must not be done
+  before then or V falls back to `cc` and reports nothing.
+- **`asm` and `_Atomic` compound assignment.** Both are reported rather than
+  translated. Both need node kinds the phase 2 backend has to implement anyway, so
+  they belong with it rather than in the front end.
+- **The Phase 0 corpus.** Still not built. It was deferred at the user's request and is
+  the one outstanding item in phase 0's acceptance.
+
+---
+
 ## Corrections to earlier claims
 
 ### C1. The `libtcc.dll` requirement was wrong

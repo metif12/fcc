@@ -15,7 +15,21 @@ existing projects this one is built from.
 
 ## Status
 
-Phase 0 — contract capture. The C front end has not been written yet.
+Phases 0 and 1 are done: the tokenizer, preprocessor, macro expansion, `#if` evaluator,
+type system and the whole C declaration and statement grammar.
+
+- `vcc --preprocess` prints the token stream.
+- `vcc --dump-ast` prints every global and function with its layout, initial data,
+  relocations and frame, and every function body as parsed statements.
+
+Every layout assertion in the test suite is a byte image produced by the bundled tcc,
+not an expectation derived from the algorithm under test. Two constructs are reported
+rather than translated, and both need a node kind the backend must implement anyway:
+`asm` statements, and compound assignment to an `_Atomic` object.
+
+Not yet written: the code generator. `--dump-ast` is the front end's acceptance
+signal; phase 2 puts a text-assembly backend behind `backend.Backend` and validates it
+against the chibicc test suite.
 
 ## Layout
 
