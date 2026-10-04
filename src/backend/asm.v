@@ -14,17 +14,44 @@ import src.ast
 // What is here is the part that can be checked on its own: a data section is
 // either right or wrong, and `as` and the linker will say which.
 
-// gp_max and fp_max are the argument register counts of the x86-64 psABI: six
-// integer registers and eight SSE registers.
-pub const gp_max = 6
-pub const fp_max = 8
+// gp_max and fp_max are the argument register counts of the *Windows* x64 ABI: four
+// integer registers and four SSE registers.
+//
+// These are not the psABI's six and eight. The psABI is the System V convention, and it
+// is what a Linux target would use; on this target mingw's `printf` follows the Microsoft
+// ABI, so a call emitted for the psABI puts every argument in a register the callee does
+// not read. That is invisible from inside vcc, because two vcc-compiled functions agree
+// with each other, and it kills the first program that calls the C library.
+//
+// Measured from `gcc -S` on this host rather than recalled; see docs/PLAN.md.
+pub const gp_max = 4
+pub const fp_max = 4
 
-// arg_regs and its byte and word forms are the argument registers in psABI order.
-// A parameter is spilled from whichever form matches its width.
-const arg_regs = ['%rdi', '%rsi', '%rdx', '%rcx', '%r8', '%r9']
-const arg_regs8 = ['%dil', '%sil', '%dl', '%cl', '%r8b', '%r9b']
-const arg_regs16 = ['%di', '%si', '%dx', '%cx', '%r8w', '%r9w']
-const arg_regs32 = ['%edi', '%esi', '%edx', '%ecx', '%r8d', '%r9d']
+// shadow_space is the 32 bytes the caller must reserve before a `call` so the callee has
+// somewhere to spill its four argument registers.
+//
+// [MS x64 2.2.5] "space is reserved on the stack for arguments passed in registers"; the
+// first four eight-byte slots at the top of the callee's frame are the home area. gcc
+// takes it out of the prologue once rather than at each call site, which is why its `main`
+// has one `subq $56, %rsp` and no `sub` before any `call`.
+pub const shadow_space = 32
+
+// arg_regs and its byte and word forms are the argument registers in Windows x64 order:
+// `%rcx`, `%rdx`, `%r8`, `%r9`. A parameter is spilled from whichever form matches its
+// width.
+const arg_regs = ['%rcx', '%rdx', '%r8', '%r9']
+const arg_regs8 = ['%cl', '%dl', '%r8b', '%r9b']
+const arg_regs16 = ['%cx', '%dx', '%r8w', '%r9w']
+const arg_regs32 = ['%ecx', '%edx', '%r8d', '%r9d']
+
+// arg_regs_mirror is where a floating-point argument is *also* written when the callee is
+// variadic.
+//
+// [MS x64 3.2] the caller must store the first four floating-point arguments into the
+// integer registers, so that a callee that saves its register save area can find them
+// without a fixed-point instruction. `printf("%d", 1.0)` depends on it. There is no
+// counterpart for a non-variadic call, and gcc emits none for `dadd(1.0, 2.0)`.
+const arg_regs_mirror = arg_regs
 
 // TextEmitter writes AT&T assembly lines.
 //
@@ -520,7 +547,11 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 		if !fun.is_function {
 			continue
 		}
-		mut top := 16
+		// The first incoming stack parameter is above the return address *and* above the
+		// caller's home area: 8 bytes of return address plus the 32 bytes of shadow space
+		// the caller must reserve. [MS x64 2.2.5] — the psABI's 16 is the same number
+		// without the home area.
+		mut top := 8 + shadow_space
 		mut bottom := 0
 		mut gp := 0
 		mut fp := 0

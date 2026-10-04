@@ -787,6 +787,19 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 		if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_) {
 			if !c.by_stack && fp < fp_max {
 				g.popf(fp)
+				// [MS x64 3.2] A variadic callee saves its four floating-point
+				// arguments into the *integer* registers as well, so the Nth
+				// floating-point argument is mirrored into the Nth integer register —
+				// counted among the floating-point arguments, not among all of them.
+				//
+				// `movq`, not `movsd`: moving between an XMM and a general register
+				// with an SSE mnemonic is not an instruction, and the assembler says
+				// `operand type mismatch for movsd` rather than anything about the ABI.
+				// A `float` is mirrored whole; the callee reads only its low 32 bits,
+				// which is a subset of what is stored.
+				if node.func_ty.is_variadic && fp < gp_max {
+					g.line('  movq %xmm${fp}, ${arg_regs_mirror[fp]}')
+				}
 				fp++
 			}
 		} else if !c.by_stack && gp < gp_max {
@@ -796,13 +809,19 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 	}
 
 	g.line('  mov %rax, %r10')
-	// [psABI] A variadic callee reads %rax for how many vector registers were used,
-	// so it holds that count even when the callee is not variadic.
-	g.line('  mov $${fp}, %rax')
+	// [MS x64 2.2.5] The callee's home area is the last thing reserved, immediately
+	// before the `call`, because the argument values are still on the stack waiting to be
+	// popped into their registers and reserving below them would move `%rsp` out from
+	// under the `pop`s. gcc takes the same 32 bytes out of the prologue once instead;
+	// taking them out per call site costs one instruction and keeps the depth accounting
+	// local to the call.
+	//
+	// There is deliberately no `%al` here. The vector-register count is a psABI
+	// requirement for the callee's register save area and has no meaning in the Microsoft
+	// ABI, which has no such save area.
+	g.line('  sub $${shadow_space}, %rsp')
 	g.line('  call *%r10')
-	if stack_args > 0 {
-		g.line('  add $${stack_args * 8}, %rsp')
-	}
+	g.line('  add $${shadow_space + stack_args * 8}, %rsp')
 	g.depth -= stack_args
 
 	// A narrow return type leaves the upper bits of %rax undefined and the next
@@ -1215,8 +1234,17 @@ fn (mut g AsmGen) emit_text(globals []&ast.Obj) {
 // emit_va_area writes the register save area a variadic function reads through
 // `va_start`.
 //
-// The area is the six integer and eight SSE argument registers in a fixed order,
-// because `va_arg` indexes it by position rather than by name.
+// Every count and offset is derived from `gp_max` and `fp_max` rather than written down.
+// The hardcoded six and eight were the psABI's, so lowering `gp_max` to four left the
+// loops indexing a four-element table at six — a compiler crash, in a compiler that had
+// been crashing for unrelated reasons all afternoon, which is exactly the kind of thing
+// that gets misattributed.
+//
+// The layout is measured from `gcc -S` on this host. For
+// `int vsum(int n, ...)` it saves `%rcx`, `%rdx`, `%r8`, `%r9` — the four *argument*
+// registers, in argument order — at `24(%rbp)`, with `gp_offset` and `fp_offset` both
+// starting at zero. The psABI instead saves six registers including `%rdi` and `%rsi`,
+// which are not argument registers here at all, and starts `fp_offset` past them.
 fn (mut g AsmGen) emit_va_area(fun &ast.Obj) {
 	if fun.va_area == unsafe { nil } {
 		return
@@ -1232,21 +1260,24 @@ fn (mut g AsmGen) emit_va_area(fun &ast.Obj) {
 		}
 	}
 	off := fun.va_area.offset
+	// The floating-point part of the save area follows the integer part, so `fp_offset`
+	// counts from the end of the integer registers rather than from a fixed 48.
+	fp_base := gp_max * 8
 
 	g.line('  movl $${gp * 8}, ${off}(%rbp)')
-	g.line('  movl $${fp * 8 + 48}, ${off + 4}(%rbp)')
-	// The overflow area starts above the parameters the caller pushed, which is 16
-	// bytes into this frame.
+	g.line('  movl $${fp_base + fp * 8}, ${off + 4}(%rbp)')
+	// The overflow area starts above the parameters the caller pushed, which is the
+	// return address plus the caller's home area into this frame.
 	g.line('  movq %rbp, ${off + 8}(%rbp)')
-	g.line('  addq $16, ${off + 8}(%rbp)')
+	g.line('  addq $${8 + shadow_space}, ${off + 8}(%rbp)')
 	g.line('  movq %rbp, ${off + 16}(%rbp)')
 	g.line('  addq $${off + 24}, ${off + 16}(%rbp)')
 
-	for i in 0 .. 6 {
+	for i in 0 .. gp_max {
 		g.line('  movq ${arg_regs[i]}, ${off + 24 + i * 8}(%rbp)')
 	}
-	for i in 0 .. 8 {
-		g.line('  movsd %xmm${i}, ${off + 72 + i * 8}(%rbp)')
+	for i in 0 .. fp_max {
+		g.line('  movsd %xmm${i}, ${off + 24 + fp_base + i * 8}(%rbp)')
 	}
 }
 

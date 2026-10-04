@@ -104,9 +104,11 @@ fn test_a_function_definition_gets_a_prologue_and_one_epilogue() {
 	assert text.contains('  push %rbp')
 	assert text.contains('  mov %rsp, %rbp')
 	// Both parameters arrived in registers and are spilled into the frame, because
-	// the body addresses every parameter as a local.
-	assert text.contains('  mov %edi,')
-	assert text.contains('  mov %esi,')
+	// the body addresses every parameter as a local. `%ecx` and `%edx`, not `%edi` and
+	// `%esi`: this is the Windows x64 ABI, not the psABI.
+	assert text.contains('  mov %ecx,')
+	assert text.contains('  mov %edx,')
+	assert !text.contains('  mov %edi,'), 'the psABI register leaked back in'
 	// Every exit jumps to the one epilogue rather than carrying its own sequence,
 	// because the epilogue is what gives back a VLA's stack.
 	assert text.contains('  jmp .L.return.f')
@@ -152,16 +154,18 @@ fn test_the_generated_assembly_is_accepted_by_the_assembler() {
 fn test_a_parameter_that_arrives_on_the_stack_is_placed_above_the_return_address() {
 	// Seven integer parameters: the first six go in registers and the seventh
 	// arrives on the stack, where its offset is the caller's choice and has to be
-	// 16 — the first stack argument, just past the return address.
+	// 40 — the return address plus the caller's 32-byte home area.
 	mut globals := parsed_globals('int f(int a, int b, int c, int d, int e, int g, int h) { return a; }\n')
 	mut g := AsmGen{}
 	g.assign_lvar_offsets(mut globals)
 	f := globals[0]
-	// The first six arrived in registers, so they are placed in the frame like any
-	// other local and end up below the frame pointer; the seventh is at +16, which is
-	// the caller's choice and the callee has to agree with.
-	assert f.params[5].offset < 0
-	assert f.params[6].offset == 16
+	// Four integer arguments arrive in registers on this target, so the first four are
+	// placed in the frame like any other local and end up below the frame pointer. The
+	// fifth is the first on the stack, at +40: the psABI's +16 is the same number without
+	// the home area, and getting it wrong puts every stack parameter under the caller.
+	assert f.params[3].offset < 0
+	assert f.params[4].offset == 8 + shadow_space
+	assert f.params[5].offset == 16 + shadow_space
 	// The frame itself is a multiple of 16 so that a call from inside it keeps the
 	// stack aligned.
 	assert f.stack_size % 16 == 0
@@ -286,4 +290,58 @@ fn test_an_ordinary_stack_argument_is_still_one_slot() {
 	text, errs := generated('int f(int a, int b, int c); int h(void) { return f(1, 2, 3); }')
 	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
 	assert text.contains('sub $16, %rsp'), 'three eight-byte arguments should be padded to two slots'
+}
+
+// --- the calling convention ---
+
+fn test_a_call_reserves_the_callees_home_area_immediately_before_it() {
+	// [MS x64 2.2.5] The caller reserves 32 bytes so the callee can spill its four
+	// argument registers. gcc takes the same bytes out of the prologue once; taking them
+	// out here costs one instruction and keeps the depth accounting local to the call.
+	// It has to come *after* the argument values are popped into their registers, or
+	// `%rsp` moves out from under the pops.
+	text, errs := generated('int f(int); int g(void) { return f(1); }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	i_sub := text.index('  sub $32, %rsp') or { -1 }
+	i_call := text.index('  call *%r10') or { -1 }
+	assert i_sub >= 0, 'no home area was reserved'
+	assert i_call > i_sub, 'the home area must be reserved before the call'
+	// The value is materialised into %rax and popped into the register, because this is
+	// a stack machine; the pop target is what decides the ABI.
+	assert text.contains('  pop %rcx'), 'the argument did not go into the first register'
+}
+
+fn test_a_call_does_not_set_the_vector_register_count() {
+	// `mov $N, %al` is a psABI requirement for the callee's register save area. The
+	// Microsoft ABI has no such save area, and gcc emits no such instruction.
+	text, errs := generated('int f(double); int g(void) { return (int)f(1.0); }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert !text.contains(', %rax\n  call'), 'the vector register count was still being set'
+	assert text.contains('  movsd (%rsp), %xmm0'), 'the argument did not go into %xmm0'
+}
+
+fn test_a_variadic_call_mirrrors_its_floating_point_arguments() {
+	// [MS x64 3.2] The first four floating-point arguments are also written into the
+	// integer registers, so a variadic callee can find them. The Nth floating-point
+	// argument goes into the Nth *integer* register — counted among the floating-point
+	// arguments, not among all of them.
+	text, errs := generated('int p(char *, ...); int g(void) { return p("", 1.0); }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	// `movq`, not `movsd`: an SSE mnemonic cannot move between an XMM and a general
+	// register, and the assembler only says `operand type mismatch`.
+	assert text.contains('  movq %xmm0, %rcx'), 'the mirror instruction or its target is wrong'
+}
+
+fn test_a_non_variadic_call_does_not_mirror_its_floating_point_arguments() {
+	text, errs := generated('double f(double); double g(void) { return f(1.0); }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert !text.contains('movq %xmm0, %rcx'), 'a non-variadic callee was given a mirror'
+}
+
+fn test_the_fifth_integer_argument_goes_on_the_stack_and_the_fifth_fp_too() {
+	// Four of each on this target, so the fifth of either class spills.
+	text, errs := generated('int f(int,int,int,int,int); int g(void) { return f(1,2,3,4,5); }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert text.contains('  pop %r9'), 'the fourth register argument is missing'
+	assert !text.contains('pop %r10'), 'a fifth integer register was used, which does not exist on this ABI'
 }
