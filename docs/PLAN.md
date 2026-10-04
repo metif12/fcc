@@ -140,10 +140,29 @@ thing, and it is in the front end rather than the generator: every file's parse
 seven declarations from the header and nothing else.
 
 The two are therefore separable: the generator produces working code for
-everything that reaches it, and the front end stops reading. What to do next is
-find what in `test.h`'s include closure ends the translation unit silently;
-`translation_unit` has a path that returns without consuming the rest of the
-input and without reporting.
+everything that reaches it, and the front end stops reading.
+
+**Two measurements that narrow it, both reproducible in three lines.**
+
+1. `--preprocess` prints the raw `#include` directive instead of the stream the
+   parser gets. A file whose whole content is `#include "h.h"` prints one token:
+
+   ```
+   1: preproc_any "#include "h.h"" [bol]
+   ```
+
+   The expansion itself is fine — `--dump-ast` on the same file reports
+   `helper_one`, for the quoted form and for `<h2.h>` alike. So `-E` is wrong, and
+   it is wrong in a way that makes the parser's input invisible.
+
+2. `--dump-ast` on `arith.c` reports test.h's eight declarations and then stops,
+   with no diagnostic, and never reports the file's own `main` — even though
+   `--preprocess` shows `main`'s tokens in the stream. So the tokens are there and
+   the parser is not reaching them.
+
+The next thing to do is put those two together: whether `parse_tokens` is handed
+the same stream `--preprocess` prints, and if it is, which construct in
+`test.h`'s declarations ends `translation_unit` without a diagnostic.
 
 Found while chasing that, and fixed: `-S` used to write a one-line stub when the
 front end reported errors. It assembled cleanly and then failed at link with
