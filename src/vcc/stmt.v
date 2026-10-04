@@ -545,9 +545,13 @@ fn (mut p Parser) to_assign(binary &ast.Node) &ast.Node {
 		return comma
 	}
 
-	tmp := p.new_lvar('', pointer_to(lhs.ty), tok.line.disp_line)
-	mut take := p.new_binary(.assign, p.new_var_node(tmp, tok), p.new_unary(.addr, lhs,
-		tok), tok)
+	// `target` has had the conversion stripped off it, so it is what the address is
+	// taken of. Using `lhs` here instead is what produces a backend error for every
+	// `x += 1`: the conversion wraps the target in a `.cast`, and an address of a cast
+	// is not an lvalue.
+	tmp := p.new_lvar('', pointer_to(target.ty), tok.line.disp_line)
+	mut take := p.new_binary(.assign, p.new_var_node(tmp, tok), p.new_unary(.addr,
+		target, tok), tok)
 	add_type(mut take)
 
 	mut load := p.new_unary(.deref, p.new_var_node(tmp, tok), tok)

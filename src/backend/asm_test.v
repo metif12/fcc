@@ -96,13 +96,39 @@ fn test_an_array_of_at_least_sixteen_bytes_is_aligned_to_sixteen() {
 	assert small.contains('  .align 4')
 }
 
-fn test_a_function_without_a_body_is_reported() {
-	_, errs := generated('int f(int a) { return a; }\n')
-	// Emitting a prologue and a `ret` instead would produce an object that links and
-	// does the wrong thing, which is the failure this project is least willing to
-	// accept.
-	assert errs.len == 1
-	assert errs[0].contains('function "f" has no body')
+fn test_a_function_definition_gets_a_prologue_and_one_epilogue() {
+	text, errs := generated('int f(int a, int b) { return a + b; }\n')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert text.contains('.globl f')
+	assert text.contains('f:')
+	assert text.contains('  push %rbp')
+	assert text.contains('  mov %rsp, %rbp')
+	// Both parameters arrived in registers and are spilled into the frame, because
+	// the body addresses every parameter as a local.
+	assert text.contains('  mov %edi,')
+	assert text.contains('  mov %esi,')
+	// Every exit jumps to the one epilogue rather than carrying its own sequence,
+	// because the epilogue is what gives back a VLA's stack.
+	assert text.contains('  jmp .L.return.f')
+	assert text.contains('.L.return.f:')
+	assert text.contains('  ret')
+}
+
+fn test_a_loop_uses_its_own_break_and_continue_labels() {
+	text, errs := generated('int f(int n) { int t = 0; for (int i = 0; i < n; i++) { t += i; } return t; }\n')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	// A `for` is the only construct whose failure edge and whose `break` have to land
+	// in the same place, so the condition jumps to the loop's own break label.
+	assert text.contains('  je .L..')
+	assert text.contains('  jmp .L.begin.')
+}
+
+fn test_a_stack_depth_that_does_not_return_to_zero_is_reported() {
+	// Every push has a matching pop, so a body that leaves the depth non-zero means
+	// the generator lost track of the accumulator, which would corrupt every frame
+	// above it. It is reported rather than emitted.
+	_, errs := generated('int f(int n) { return n; }\n')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
 }
 
 fn test_a_thread_local_is_reported_rather_than_emitted_wrongly() {

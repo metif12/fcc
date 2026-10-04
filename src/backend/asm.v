@@ -19,6 +19,13 @@ import src.ast
 pub const gp_max = 6
 pub const fp_max = 8
 
+// arg_regs and its byte and word forms are the argument registers in psABI order.
+// A parameter is spilled from whichever form matches its width.
+const arg_regs = ['%rdi', '%rsi', '%rdx', '%rcx', '%r8', '%r9']
+const arg_regs8 = ['%dil', '%sil', '%dl', '%cl', '%r8b', '%r9b']
+const arg_regs16 = ['%di', '%si', '%dx', '%cx', '%r8w', '%r9w']
+const arg_regs32 = ['%edi', '%esi', '%edx', '%ecx', '%r8d', '%r9d']
+
 // TextEmitter writes AT&T assembly lines.
 //
 // It satisfies `Emit`, and that is the whole point of the interface: phase 3
@@ -82,18 +89,7 @@ pub fn (mut g AsmGen) gen(mut globals []&ast.Obj) (string, []string) {
 	g.assign_lvar_offsets(mut globals)
 	g.emit_data(globals)
 
-	g.line('  .text')
-	for obj in globals {
-		if !obj.is_function || !obj.is_definition {
-			continue
-		}
-		// A body is a walk over the statement tree with a value stack, and it is
-		// not written yet. Emitting a prologue and a `ret` would produce an
-		// object that links and does the wrong thing, which is the failure mode
-		// this project is least willing to accept.
-		g.errors << 'function "${obj.name}" has no body: code generation for ' +
-			'function bodies is not implemented yet'
-	}
+	g.emit_text(globals)
 
 	return g.emit.text_of(), g.errors
 }
@@ -222,7 +218,7 @@ fn (mut g AsmGen) gen_addr(node &ast.Node) {
 		}
 		else {}
 	}
-	g.errors << 'not an lvalue at ${node.tok.line.disp_line}'
+	g.errors << 'not an lvalue line ' + node.tok.line.disp_line.str() + ' kind ' + int(node.kind).str() + ' ty ' + (if node.ty == unsafe { nil } { -1 } else { int(node.ty.kind) }).str()
 }
 
 // load turns the address in %rax into the value it points at.
@@ -549,19 +545,23 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 				}
 			}
 
-			// A `long double` is excluded rather than handled: the psABI has no
-			// register class for the 80-bit format, so it is always passed on the
-			// stack.
-			if !passed && ty.kind == .basic && ty.basic != .ldouble_ {
-				if ty.basic == .float_ || ty.basic == .double_ {
-					if fp < fp_max {
-						fp++
-						passed = true
-					}
-				} else if gp < gp_max {
-					gp++
+			// A pointer is passed like any other integer, so the test for "goes in a
+			// general register" is "is not a floating or extended value" rather than
+			// "is a basic type". Getting that backwards puts every pointer parameter
+			// on the stack at +16, where the caller never put it.
+			is_float := ty.kind == .basic
+				&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_)
+			if !passed && is_float {
+				// The 80-bit format has no register class, so it is always passed on
+				// the stack.
+				if ty.basic != .ldouble_ && fp < fp_max {
+					fp++
 					passed = true
 				}
+			}
+			if !passed && !is_float && gp < gp_max {
+				gp++
+				passed = true
 			}
 
 			if passed {
@@ -667,12 +667,7 @@ fn (mut g AsmGen) emit_bytes(obj &ast.Obj) {
 	}
 }
 
-// gen_expr is not written yet. It is declared so that gen_addr's calls resolve,
-// and every one of them is currently unreachable because gen() refuses a
-// translation unit that has a function definition in it.
-fn (mut g AsmGen) gen_expr(node &ast.Node) {
-	g.errors << 'expression code generation is not implemented yet (line ${node.tok.line.disp_line})'
-}
+
 
 // b2i is bool to int, for counting how many registers a parameter consumes.
 fn b2i(b bool) int {
