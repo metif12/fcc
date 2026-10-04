@@ -444,6 +444,88 @@ The rule is now stated once in the frontend comment and obeyed in both places:
 an operator's conversion is not part of the expression's shape.
 
 ---
+## D33. One `.eof` sentinel per translation unit, not per file
+
+**Decision.** `strip_sentinels` removes the end-of-file token from anything the
+preprocessor splices into a larger stream: an included file, and a macro expansion.
+The single sentinel is added by `finish`, at the very end.
+
+**Why.** `tokenize` ends **every file it reads** with an `.eof` token, which is
+right for a standalone stream and catastrophic for a spliced one — and the parser
+treats the first `.eof` it meets as the end of the whole translation unit. So
+`#include "h.h"` ended the parse at the end of the header, and every declaration
+after it was dropped.
+
+**It was silent, which is what made it expensive.** A well-formed stream simply
+ended, so no diagnostic was possible, no test failed, and 264 green tests said
+nothing. `--dump-ast` on `arith.c` reported test.h's declarations and stopped. The
+symptom that finally located it was `-E` printing the raw `#include` line instead of
+the expansion — which turned out to be a *second* bug, an `-E` flag aliased to the
+tokenizer dump (D34). Once `-E` printed the real stream, the divergence between what
+it showed and what the parser saw was one comparison away.
+
+**Two splicing sites, not one.** Includes were the obvious one. Macro bodies were
+the same defect through `tokenize_fragment`, and fixing only includes moved the
+failure from "stops after the first include" to "stops at the first macro" —
+`ASSERT(0, 0);` at the top of every chibicc test file. A fix that finds one sentinel
+splice should assume there are others.
+
+---
+
+## D34. `-E` was the lexer, not the preprocessor
+
+**Decision.** `-E` and `--preprocess` set `preprocess_only`. `--dump-tokens` is the
+only spelling that runs the tokenizer.
+
+**Why.** `-E` was aliased to `--dump-tokens`, so it printed raw `#include` lines
+and never computed the expansion it exists to show. In tcc and gcc, `-E` is
+"preprocess and stop", and a compiler that is being compared against tcc has to
+agree on what its own flags mean.
+
+**The cost was not the wrong output, it was the wrong conclusions.** Every
+inference drawn from `-E` about include handling was an inference about the
+lexer, and they pointed confidently at the preprocessor for several rounds. A
+debugging flag that does not do what its name says is worse than no flag, because
+it produces evidence.
+
+---
+
+## D35. A wasm backend would never be selected by V
+
+**Decision.** Recorded as not planned. Phase 6 stays Windows → Linux → macOS.
+
+**Why.** V does not use a C compiler for wasm targets at all. In
+`vlib/v/driver/driver.v:369`, inside the predicate that decides whether the C
+compiler path is usable:
+
+```v
+if target_os in ['ios', 'wasm32', 'wasm32_emscripten', 'wasm32_wasi'] {
+    return false
+}
+```
+
+and `vlib/v/gen/wasm/gen.v` emits a binary module directly, as the arm64 backend
+does. So a `vcc -target wasm32_wasi` backend could never be invoked by V, never be
+exercised by the contract tests, and never be validated by the differential
+harness. It would be a second product attached to a project whose premise is
+being a drop-in tcc replacement for Windows.
+
+**What it would cost besides that.** There is no working seam: `Emit.bytes` is a
+stub and the fine-grained `Backend` interface from phase 0 was never implemented
+(D29), so a second backend means a second ~2000-line generator. The front end is in
+better shape than that suggests — zero x86 register references across 4208 lines of
+`parser.v`, `types.v` and `eval.v` — but `long double`/x87, VLA allocation, the
+varargs register save area, TLS, 4-byte pointers and the linear-memory struct ABI
+would all need answers that do not exist on wasm.
+
+**If a second target is wanted later**, the order that makes it cheap is: `--emit-c`
+to validate the front end, then make the layout table and pointer width parameters
+(`-m32` proves it), then a target-independent IR, and only then a backend. AArch64
+is the more useful of the two exotic targets, because it keeps every language
+semantic and phase 6 already wants macOS.
+
+---
+
 ## Open items for the end of the project
 
 Recorded rather than decided, because each of them is a question about the finished

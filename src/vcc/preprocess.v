@@ -225,7 +225,7 @@ pub fn (mut p Preprocessor) run(path string) Result {
 	}
 	phase1 := p.directives(tokenize(src), path)
 	return Result{
-		tokens: p.finish(p.expand(phase1, path))
+		tokens: p.finish(strip_sentinels(p.expand(phase1, path)))
 		errors: p.errors.clone()
 	}
 }
@@ -235,7 +235,7 @@ pub fn (mut p Preprocessor) run(path string) Result {
 pub fn (mut p Preprocessor) run_text(src string, path string) Result {
 	phase1 := p.directives(tokenize(src), path)
 	return Result{
-		tokens: p.finish(p.expand(phase1, path))
+		tokens: p.finish(strip_sentinels(p.expand(phase1, path)))
 		errors: p.errors.clone()
 	}
 }
@@ -694,7 +694,7 @@ fn (mut p Preprocessor) do_include(rest string, line int, path string, mut out [
 	} else {
 		// A macro may expand to the header name. The standard requires this, and glibc
 		// headers rely on it, so it is supported rather than diagnosed.
-		expanded := p.expand(tokenize(rest), path)
+		expanded := strip_sentinels(p.expand(tokenize(rest), path))
 		if expanded.len > 0 && (expanded[0].text.starts_with('"')
 			|| expanded[0].text.starts_with('<')) {
 			t := expanded[0].text
@@ -738,9 +738,27 @@ fn (mut p Preprocessor) do_include(rest string, line int, path string, mut out [
 	}
 	p.cond_stack = saved_cond
 	p.depth--
-	out << included
+	out << strip_sentinels(included)
 }
 
+// strip_sentinels removes the end-of-file tokens an included file brought with it.
+//
+// `tokenize` ends every file it reads with an `.eof` sentinel, and the parser treats
+// the first `.eof` it meets as the end of the translation unit. Splicing a header's
+// tokens in therefore used to end the parse at the end of the *first include*: every
+// declaration after it was dropped, silently, with no diagnostic.
+//
+// The invariant is one sentinel, at the very end, and `finish` is what adds it.
+fn strip_sentinels(toks []ast.Token) []ast.Token {
+	mut out := []ast.Token{cap: toks.len}
+	for t in toks {
+		if t.kind == .eof {
+			continue
+		}
+		out << t
+	}
+	return out
+}
 // resolve_include searches for a header.
 //
 // A quoted include searches the including file's directory first, which is what

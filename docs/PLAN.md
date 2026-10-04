@@ -131,81 +131,32 @@ information yet.
 `gcc`. This is the strongest correctness signal available anywhere in this
 project — it compares runtime behaviour against gcc, not text.
 
-**The suite is fetched and wired up; the criterion is not met.** All 18 test files
-are read from `rui314/chibicc` at `test/`, run through `vcc -S`, assembled by GNU
-`as`, and linked by gcc against the suite's own `common`. The blocker is one
-thing, and it is in the front end rather than the generator: every file's parse
-**stops after the declarations in `test.h`** and never reaches the file's own
-`main`, with no diagnostic. `--dump-ast` shows it directly — `arith.c` reports
-seven declarations from the header and nothing else.
+**The suite is wired up and running. 7 of 18 files now compile, assemble, link and
+execute; 11 fail, each on a real defect.** The runner reads the 18 test files from
+`rui314/chibicc` at `test/`, runs `vcc -S`, assembles with GNU `as`, links with gcc
+against the suite's own `common`, and executes. Every outcome is PASS, FAIL or
+BLOCKED and nothing is aggregated across them.
 
-The two are therefore separable: the generator produces working code for
-everything that reaches it, and the front end stops reading.
+The blocker that stopped everything was a `.eof` sentinel: `tokenize` ends every
+file it reads with one, and the parser treats the first as the end of the whole
+translation unit, so an include ended the parse (D33). It was silent — a
+well-formed stream simply ends — which is why 264 green tests said nothing about
+it. Fixed at both splicing sites, includes and macro bodies, with two regression
+tests that assert there is exactly one sentinel and that it is last.
 
-**Two measurements that narrow it, both reproducible in three lines.**
+**Failing now, and all of them real.** Front end: `alignof` and `literal` mis-read
+an expression; `unicode` loses a declaration; `union` mis-reads a member access;
+`offsetof` truncates an argument list; `macro` needs `include1.h`, which the suite
+generates. Back end: `arith` faults in `add_type`, `vla` faults in `gen_funcall`,
+`function` leaves three values on the stack, and `control`/`string`/`struct` exhaust
+the heap. The seven that run all exit non-zero, so their generated code computes
+the wrong answer rather than crashing.
 
-1. `--preprocess` prints the raw `#include` directive instead of the stream the
-   parser gets. A file whose whole content is `#include "h.h"` prints one token:
+**Next.** Take them one at a time, largest blast radius first: the two invalid
+memory accesses, then the stack-depth and heap-exhaustion failures, then the
+parse defects, then whatever the seven running files get wrong.
 
-   ```
-   1: preproc_any "#include "h.h"" [bol]
-   ```
-
-   The expansion itself is fine — `--dump-ast` on the same file reports
-   `helper_one`, for the quoted form and for `<h2.h>` alike. So `-E` is wrong, and
-   it is wrong in a way that makes the parser's input invisible.
-
-2. `--dump-ast` on `arith.c` reports test.h's eight declarations and then stops,
-   with no diagnostic, and never reports the file's own `main` — even though
-   `--preprocess` shows `main`'s tokens in the stream. So the tokens are there and
-   the parser is not reaching them.
-
-**The cause is located, and it is one bug in the preprocessor.** A five-line
-reproduction:
-
-```
-inc/five.h      void d1(int a); ... void d5(int a);
-five.c          #include "five.h"
-                int main(void) { return 0; }
-```
-
-- `vcc -E five.c` prints the `#include` as a raw `preproc_any` token followed by
-  `main`'s tokens. **None of `d1`–`d5` appear.**
-- `vcc --dump-ast five.c` reports `d1`–`d5` and **not `main`.**
-- `vcc --dump-ast five.h` alone reports `d1`–`d5` correctly.
-- `vcc --dump-ast` of a file that is *only* `#include "h.h"` reports the header's
-  global, for the quoted and the angle-bracket form alike.
-
-So the expansion works and the tokens reach the parser — but the parser never sees
-the tokens that came **after** the include.
-
-**Half of that was `-E` itself.** `-E` was aliased to `--dump-tokens`, so it ran
-the *lexer* and printed raw `#include` lines. It is now `preprocess_only`, and it
-prints what it claims to:
-
-```
-$ vcc -E -I inc five.c
-1: keyword "void"   1: ident "d1"   ...   5: punct ";"      <- five.h
-2: keyword "int"    2: ident "main"  ...   2: punct "}"      <- five.c
-```
-
-**The preprocessor is therefore exonerated** — it produces the correct stream, in
-the correct order, for both include forms. Every earlier conclusion drawn from `-E`
-about include handling was a conclusion about the lexer, which is why it pointed at
-the preprocessor for so long.
-
-What is left is on the parse side: `dump_ast` and `dump_preprocessed` are the same
-five lines of driver, they both take `pre.tokens` from the same `Preprocessor.run`,
-and yet one sees `main` and the other does not. Since `-E` now prints the whole
-stream, the next step is to compare what `parse_tokens` is handed against that
-stream — its length, and where its `eof` token sits.
-
-Found while chasing that, and fixed: `-S` used to write a one-line stub when the
-front end reported errors. It assembled cleanly and then failed at link with
-`undefined reference to WinMain` — a message about the link stage that was really
-about the parse, and one that cost a whole suite run to read past. It now writes
-no file at all and exits 1.
-
+**Acceptance for this phase is met when all 18 run and compute tcc's answers.**
 ### Phase 3 — machine-code backend and COFF objects
 
 - Replace `Emit.text` with `Emit.bytes`: an x86-64 instruction encoder written from

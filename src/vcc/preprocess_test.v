@@ -1,5 +1,7 @@
 module vcc
 
+import os
+
 // Preprocessor tests.
 //
 // The cases that matter most are the ones that would hang or recurse forever if the
@@ -30,6 +32,7 @@ struct PPResult {
 fn errs(src string) []string {
 	return pp(src).errors
 }
+
 
 // --- object-like macros ---
 
@@ -290,4 +293,69 @@ fn test_directives_inside_a_block_comment_are_not_directives() {
 
 fn test_line_spliced_directive() {
 	assert preprocessed('#def\\\nine A 1\nA') == '1'
+}
+
+// --- includes and sentinels ---
+
+fn test_an_included_file_does_not_end_the_translation_unit() {
+	// The tokenizer ends every file it reads with an `.eof` sentinel, and the parser
+	// treats the first `.eof` as the end of the whole unit. Splicing a header's tokens
+	// in therefore used to end the parse at the end of the first include, dropping every
+	// declaration after it — silently, because a well-formed stream simply ended.
+	dir := os.temp_dir()
+	header := dir + os.path_separator + 'vcc_sentinel_probe.h'
+	after := dir + os.path_separator + 'vcc_sentinel_probe.c'
+	os.write_file(header, 'void included_one(int a);\nvoid included_two(int a);\n') or {
+		assert false, 'cannot write the probe header'
+		return
+	}
+	os.write_file(after, '#include "vcc_sentinel_probe.h"\nvoid after_the_include(int a);\n') or {
+		assert false, 'cannot write the probe source'
+		return
+	}
+	defer {
+		os.rm(header) or {}
+		os.rm(after) or {}
+	}
+
+	mut p := preprocessor([dir], [])
+	p.define_builtins()
+	r := p.run(after)
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+
+	// One sentinel, at the very end.
+	mut sentinels := 0
+	for i, tok in r.tokens {
+		if tok.kind == .eof {
+			sentinels++
+			assert i == r.tokens.len - 1, 'the only eof token must be the last one'
+		}
+	}
+	assert sentinels == 1, 'expected exactly one eof token, got ${sentinels}'
+
+	parsed := parse_tokens(r.tokens, after, p.packs)
+	assert parsed.errors.len == 0, 'unexpected diagnostics: ${parsed.errors}'
+	assert parsed.globals.len == 3, 'got ${parsed.globals.len} declarations'
+	assert parsed.globals[2].name == 'after_the_include'
+}
+
+fn test_a_macro_expansion_does_not_end_the_translation_unit() {
+	// The same sentinel arrives with a macro body, so a translation unit whose first
+	// declaration used a macro parsed as that declaration and stopped.
+	//
+	// The helper is spelled out rather than shared with `parser_test.v`, because each
+	// `_test.v` file is its own compilation unit and does not see the others.
+	mut p := preprocessor([], [])
+	p.define_builtins()
+	r := p.run_text('#define NOTE "n"\nconst char *a = NOTE;\nint b;\nint c;\n',
+		'test.c')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	parsed := parse_tokens(r.tokens, 'test.c', p.packs)
+	assert parsed.errors.len == 0, 'unexpected diagnostics: ${parsed.errors}'
+	mut names := []string{}
+	for obj in parsed.globals {
+		names << obj.name
+	}
+	assert names.contains('b'), 'got ${names}'
+	assert names.contains('c'), 'got ${names}'
 }

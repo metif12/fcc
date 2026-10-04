@@ -27,6 +27,10 @@ not an expectation derived from the algorithm under test. Two constructs are rep
 rather than translated, and both need a node kind the backend must implement anyway:
 `asm` statements, and compound assignment to an `_Atomic` object.
 
+The chibicc test suite is wired up and running against it: 7 of its 18 files compile,
+assemble, link and execute, and the 11 that fail each fail on a defect that is recorded
+in docs/PLAN.md.
+
 `vcc -S` writes AT&T assembly for whole translation units: the data section,
 the expression and statement walk, the frame layout and the psABI's argument passing.
 The output assembles into a PE object with GNU `as` and links with gcc, and five
