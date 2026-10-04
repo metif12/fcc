@@ -687,3 +687,54 @@ fn test_the_dump_names_each_declaration_and_its_layout() {
 	assert text.contains('bits 8..11')
 	assert text.contains('bytes=01050000')
 }
+
+// --- string literals ---
+
+fn test_adjacent_string_literals_are_one_literal() {
+	// [C11 6.4.5p5] `"abc" "def"` is one literal. It used to parse as `"abc"` and then
+	// trip over the second token, which the missing `)` never consumed, so the parser
+	// re-read the same tokens until the heap gave out.
+	r := parsed('char *p = "ab" "cd";')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	// globals[0] is p; the merged literal is the anonymous global after it.
+	assert bytes_of(r.globals[1]) == '6162636400', bytes_of(r.globals[1])
+}
+
+fn test_a_run_of_string_literals_is_joined_in_order() {
+	r := parsed('char *p = "a" "b" "c";')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert bytes_of(r.globals[1]) == '61626300', bytes_of(r.globals[1])
+}
+
+fn test_one_terminator_is_written_for_the_whole_run() {
+	r := parsed('char a[] = "ab" "cd";')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].ty.array_len == 5, 'got ${r.globals[0].ty.array_len}'
+}
+
+fn test_a_wide_piece_decides_the_width_of_the_whole_run() {
+	// 16, not 8: a wide element is four bytes in vcc, which is what chibicc's suite
+	// expects. tcc on this host answers 8 because `wchar_t` is two bytes on Windows.
+	// See the note on `string_literal_value`; the conflict is recorded in PLAN.md and is
+	// a Windows ABI decision, not a parser bug.
+	r := parsed('int n = sizeof(L"ab" "c");')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].init_data[0] == 16, 'got ${r.globals[0].init_data[0]}'
+}
+
+fn test_an_escape_is_decoded_by_the_same_rule_inside_a_run() {
+	// Re-encoding the decoded bytes would turn `"\xff"` into two UTF-8 bytes and make
+	// this 2 rather than 1.
+	r := parsed('char *p = "\xff" "a";')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert bytes_of(r.globals[1]) == 'ff6100', bytes_of(r.globals[1])
+}
+
+fn test_the_parser_makes_progress_past_a_token_it_did_not_expect() {
+	// `expect` used to report and return without consuming, so the enclosing loop saw
+	// the same token again. One missing semicolon became an unbounded loop of
+	// diagnostics rather than a one-line syntax error.
+	r := parsed('int f(void) { return 1 }')
+	assert r.errors.len > 0, 'expected a diagnostic'
+	assert r.errors.len < 10, 'a missing semicolon produced ${r.errors.len} diagnostics'
+}

@@ -358,7 +358,12 @@ pub fn add_type(mut node &ast.Node) {
 		.funcall { node.ty = node.func_ty.ret_type }
 		.not, .log_or, .log_and { node.ty = ty_int }
 		.bit_not, .shl, .shr { node.ty = node.lhs.ty }
-		.var_ref, .vla_ptr { node.ty = node.var.ty }
+		.var_ref { node.ty = node.var.ty }
+		// A `.vla_ptr` reads as the *pointer* the array was allocated into, not as the
+		// array: its frame slot holds a `T *`, and that pointer is the value an
+		// expression using the array decays to. Giving it the `.vla` type would make
+		// `load` treat it as an aggregate and hand back the slot's own address.
+		.vla_ptr { node.ty = pointer_to(node.var.ty.base) }
 		.cond_expr {
 			if node.then.ty.basic == .void_ || node.els.ty.basic == .void_ {
 				node.ty = ty_void

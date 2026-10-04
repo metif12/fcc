@@ -177,7 +177,15 @@ pub fn parse_tokens(toks []ast.Token, path string, packs []PackEvent) ParseResul
 // --- token access ---
 
 // tok is the token at the cursor.
+// tok is the token at the cursor.
+//
+// Clamped to the last token, because `expect` advances even on a token it did not
+// expect, and at the end of a file that walks the cursor one past the `.eof` sentinel.
+// Reading there has to give the sentinel rather than run off the array.
 fn (p &Parser) tok() ast.Token {
+	if p.pos >= p.toks.len {
+		return p.toks[p.toks.len - 1]
+	}
 	return p.toks[p.pos]
 }
 
@@ -233,11 +241,17 @@ fn (mut p Parser) consume(text string) bool {
 // A mismatch is reported and the cursor is left where it was, rather than consuming
 // something that is probably the start of the next declaration. That choice is what
 // keeps a malformed declaration from eating the rest of the file.
+// expect consumes the token the cursor must be on.
+//
+// It advances even when the token is wrong, which is what guarantees the parser makes
+// progress through a malformed input. Reporting without consuming lets an enclosing
+// loop see the same token again, parse it again, and report again: `sizeof("a" "b")`
+// did exactly that, appending diagnostics until the heap gave out, which surfaced as a
+// garbage-collection abort rather than as the one-line syntax error it was.
 fn (mut p Parser) expect(text string) ast.Token {
 	tok := p.tok()
 	if tok.text != text {
 		p.error_at(tok, 'expected "${text}", found "${tok.str()}"')
-		return tok
 	}
 	p.pos++
 	return tok
@@ -473,6 +487,10 @@ fn (p &Parser) new_var_node(obj &ast.Obj, tok ast.Token) &ast.Node {
 // It is built in vcc rather than emitted as a call to `alloca` because that keeps
 // the runtime helper out of the phase 2 backend's way; the backend decides how to
 // allocate.
+//
+// `ty` is deliberately left unset: `add_type` returns immediately on a node that
+// already has one, so setting it here would leave the size argument with no type and
+// the backend would read a null `Type` when it loaded it.
 fn (mut p Parser) new_alloca(sz &ast.Node, tok ast.Token) &ast.Node {
 	ty := func_type(pointer_to(ty_void))
 	return &ast.Node{
@@ -480,7 +498,6 @@ fn (mut p Parser) new_alloca(sz &ast.Node, tok ast.Token) &ast.Node {
 		tok:     tok
 		lhs:     p.new_var_node(p.builtin_alloca, tok)
 		func_ty: ty
-		ty:      ty.ret_type
 		args:    [&sz]
 	}
 }
@@ -1454,7 +1471,12 @@ fn (p &Parser) get_struct_member(ty &ast.Type, name string) ?int {
 fn (mut p Parser) declare_builtin_functions() {
 	mut ty := func_type(pointer_to(ty_void))
 	ty.params = [ty_int]
-	mut obj := p.new_gvar('alloca', ty, 0)
+	// `new_obj` rather than `new_gvar`, because `alloca` is not part of the translation
+	// unit: it is never declared in the C source and never referred to by name there,
+	// only reached through `p.builtin_alloca`. Putting it in `globals` would make every
+	// `globals[0]` in the parser's own tests an `alloca` that no C program declares.
+	mut obj := p.new_obj('alloca', ty, 0)
+	obj.is_function = true
 	obj.is_definition = false
 	obj.is_static = false
 	p.builtin_alloca = obj
@@ -1464,6 +1486,12 @@ fn (mut p Parser) declare_builtin_functions() {
 //
 //	program = (typedef | function-definition | global-variable)*
 fn (mut p Parser) translation_unit() {
+	// `alloca` is the one function the front end invents rather than reads from the C
+	// source, and it has to exist before any variable-length array is parsed. The guard
+	// keeps a second file in the same Parser from creating a second `alloca` global.
+	if p.builtin_alloca == unsafe { nil } {
+		p.declare_builtin_functions()
+	}
 	for p.tok().kind != .eof {
 		before := p.pos
 		mut attr := VarAttr{}
@@ -1999,14 +2027,73 @@ fn (mut p Parser) initializer2(mut init &Initializer) {
 	init.expr = p.const_expr_node()
 }
 
+// string_run consumes the run of adjacent string literals at the cursor and returns it,
+// leaving the cursor after the last one.
+//
+// [C11 6.4.5p5] Adjacent string literals are one literal, so `sizeof("abc" "def")` is 8
+// and not 4. It used to parse as `"abc"` and then trip over the second token, which the
+// missing `)` never consumed, so the parser re-read the same tokens until the heap gave
+// out. Both places a literal can appear go through here, because a run that works in an
+// expression and not in an initializer is not a feature.
+fn (mut p Parser) string_run() []ast.Token {
+	mut run := [p.tok()]
+	p.pos++
+	for p.tok().kind == .str_ {
+		run << p.tok()
+		p.pos++
+	}
+	return run
+}
+
+// string_literal_value lays a run of literals end to end into one array of the first
+// piece's element type.
+//
+// The run has one width, which the first piece decides. [C11 6.4.5p5] makes a mismatched
+// prefix undefined rather than an error, and both tcc and chibicc take the first piece's
+// width and say nothing. Rejecting the mix would be a third answer and the least useful
+// one: it is not the behaviour being replaced.
+//
+// Each piece is decoded by the same `string_unit` a lone literal uses — re-encoding the
+// decoded bytes would turn `"\xff"` into two UTF-8 bytes and change what `"\xff"[0]` is
+// — and one terminator is written for the whole run, not one per piece.
+fn string_literal_value(pieces []ast.Token) (&ast.Type, []u8) {
+	elem := string_element_type(&pieces[0])
+	mut count := 0
+	for piece in pieces {
+		count += code_point_count(piece.str_data)
+	}
+	sz := elem.size
+	ty := array_of(elem, count + 1)
+	// Zero-initialised, so the single terminating NUL at the end is already written.
+	mut buf := []u8{len: sz * ty.array_len, init: 0}
+	mut at := 0
+	for piece in pieces {
+		for i in 0 .. code_point_count(piece.str_data) {
+			write_int(mut buf, at * sz, u64(string_unit(piece, i, sz)), sz)
+			at++
+		}
+	}
+	return ty, buf
+}
+
+// string_literal_expr is a string literal, together with every literal written next to
+// it, as the anonymous global its value needs to live in.
+fn (mut p Parser) string_literal_expr() &ast.Node {
+	pieces := p.string_run()
+	ty, buf := string_literal_value(pieces)
+	mut obj := p.new_anon_gvar(ty, pieces[0].line.disp_line)
+	obj.init_data = buf
+	return p.new_var_node(obj, pieces[0])
+}
+
 // string_initializer initializes an array from a string literal.
 //
 // The literal's own element type decides the target's: `char x[] = "abc"` is four
 // bytes, `int x[] = L"abc"` is sixteen. The terminating NUL is included, and a
 // shorter literal in a longer array leaves the rest zero.
 fn (mut p Parser) string_initializer(mut init &Initializer) {
-	tok := p.next()
-	lit := string_literal_type(&tok)
+	run := p.string_run()
+	lit, _ := string_literal_value(run)
 
 	if init.is_flexible {
 		// The array's length is the literal's, including the NUL.
@@ -2023,8 +2110,22 @@ fn (mut p Parser) string_initializer(mut init &Initializer) {
 	} else {
 		lit.array_len
 	}
+	// The run's elements laid end to end, so element k of the merged literal is element
+	// k of the run however many pieces it was written as.
+	mut units := []i64{}
+	for piece in run {
+		for i in 0 .. code_point_count(piece.str_data) {
+			units << string_unit(piece, i, elem.size)
+		}
+	}
+	tok := run[0]
 	for i in 0 .. n {
-		init.children[i].expr = p.new_num(string_unit(&tok, i, elem.size), tok)
+		// Past the end of the literal the array's own zero-initializer supplies the NUL
+		// and any remaining elements, which is what a shorter literal in a longer array
+		// is specified to leave behind.
+		if i < units.len {
+			init.children[i].expr = p.new_num(units[i], tok)
+		}
 	}
 }
 
@@ -2923,13 +3024,8 @@ fn (mut p Parser) primary() &ast.Node {
 	}
 
 	if tok.kind == .str_ {
-		p.pos++
-		ty := string_literal_type(&tok)
-		mut obj := p.new_anon_gvar(ty, tok.line.disp_line)
-		obj.init_data = string_bytes(&tok, ty)
-		return p.new_var_node(obj, tok)
+		return p.string_literal_expr()
 	}
-
 	if tok.kind == .num_ {
 		p.pos++
 		ty := numeric_type(&tok)

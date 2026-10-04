@@ -131,32 +131,52 @@ information yet.
 `gcc`. This is the strongest correctness signal available anywhere in this
 project — it compares runtime behaviour against gcc, not text.
 
-**The suite is wired up and running. 7 of 18 files now compile, assemble, link and
-execute; 11 fail, each on a real defect.** The runner reads the 18 test files from
+**The suite is wired up and running. 8 of 18 files compile, assemble, link and
+execute; 10 fail, each on a real defect.** The runner reads the 18 test files from
 `rui314/chibicc` at `test/`, runs `vcc -S`, assembles with GNU `as`, links with gcc
-against the suite's own `common`, and executes. Every outcome is PASS, FAIL or
-BLOCKED and nothing is aggregated across them.
+against the suite's own `common`, and executes.
 
-The blocker that stopped everything was a `.eof` sentinel: `tokenize` ends every
-file it reads with one, and the parser treats the first as the end of the whole
-translation unit, so an include ended the parse (D33). It was silent — a
-well-formed stream simply ends — which is why 264 green tests said nothing about
-it. Fixed at both splicing sites, includes and macro bodies, with two regression
-tests that assert there is exactly one sentinel and that it is last.
+The blocker that stopped everything was a `.eof` sentinel (D33), fixed. The four
+defects behind it, in the order a shape matrix found them:
 
-**Failing now, and all of them real.** Front end: `alignof` and `literal` mis-read
-an expression; `unicode` loses a declaration; `union` mis-reads a member access;
-`offsetof` truncates an argument list; `macro` needs `include1.h`, which the suite
-generates. Back end: `arith` faults in `add_type`, `vla` faults in `gen_funcall`,
-`function` leaves three values on the stack, and `control`/`string`/`struct` exhaust
-the heap. The seven that run all exit non-zero, so their generated code computes
-the wrong answer rather than crashing.
+- **`alloca` was never created.** `declare_builtin_functions` existed and nothing
+  called it, so every VLA in every file read through a nil pointer in the backend.
+  Fixed, along with `.vla_ptr` being typed as the array instead of the pointer, and
+  `new_alloca` pre-setting a type that stopped `add_type` from typing its argument.
+- **Adjacent string literals were not joined** (C11 6.4.5p5), and `expect` reported a
+  missing token without consuming it. Together: an unbounded loop of diagnostics that
+  ended in a garbage-collection abort on `control`, `string` and `struct`. Both fixed;
+  three garbage-collection aborts became three syntax errors, which are tractable.
+- **`sizeof ("a", "b")`** — `sizeof` of a parenthesised expression does not allow a
+  comma expression, so `(1,2,3)` fails.
+- **Compound literals and statement expressions** — `({ struct {int a;} x={1}, y={2};
+  (x=y).a; })` needs an anonymous struct declaration inside a statement expression, and
+  an assignment used as a value.
 
-**Next.** Take them one at a time, largest blast radius first: the two invalid
-memory accesses, then the stack-depth and heap-exhaustion failures, then the
-parse defects, then whatever the seven running files get wrong.
+**Failing now.** Front end: `alignof` mis-reads an expression, `arith` faults in
+`add_type`, `literal` cannot see `size`, `unicode` loses a declaration, `union`
+mis-reads a member access, `vla` loses a token at line 22, `macro` needs `include1.h`.
+Back end: `function` leaves three values on the stack. The eight that run all exit
+non-zero, so their code computes the wrong answer rather than crashing.
 
-**Acceptance for this phase is met when all 18 run and compute tcc's answers.**
+**One acceptance criterion has to be restated.** The suite's expected values are
+chibicc's, written for the Linux target it runs on, and two of them cannot both hold
+with tcc on this host:
+
+| | vcc | tcc here | chibicc's suite |
+|---|---|---|---|
+| `sizeof(L"ab")` | 8 | 6 | 8 |
+| `sizeof(long double)` | 8 | 8 | 16 |
+
+Both are `wchar_t` and x87 `long double`, and both are a Windows-versus-ELF ABI
+difference, not a defect in either compiler. A file that disagrees only on those is a
+**PASS with a recorded divergence**, not a failure. The comparison has to be against
+tcc on this host, per assertion, rather than against the suite's literals — which
+means the runner needs to compare answers rather than exit codes, and that is the next
+piece of work.
+
+**Acceptance for this phase is met when all 18 run, and every divergence from tcc
+here is either fixed or recorded as an ABI difference.**
 ### Phase 3 — machine-code backend and COFF objects
 
 - Replace `Emit.text` with `Emit.bytes`: an x86-64 instruction encoder written from

@@ -385,6 +385,11 @@ fn (mut g AsmGen) gen_expr(node &ast.Node) {
 			g.load(node.ty)
 			return
 		}
+		.vla_ptr {
+			g.gen_addr(node)
+			g.load(node.ty)
+			return
+		}
 		.member {
 			g.gen_addr(node)
 			g.load(node.ty)
