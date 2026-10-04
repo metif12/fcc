@@ -355,3 +355,81 @@ The following are noted for later and are not needed yet:
 4. The rest of the runtime helper set, beyond the four libatomic symbols now
    measured. Still to be enumerated by linking V's output and reading the errors
    rather than guessing.
+
+
+### The Windows x64 calling convention, measured
+
+Recorded from mingw gcc 15.2 `-S -O0` on this host, because the implementation should be
+written against these instructions rather than against a recollection of the ABI. Three
+points differ from what the code generator currently does, and the third corrects
+something committed earlier in this phase.
+
+**Integer and pointer arguments go in `%rcx`, `%rdx`, `%r8`, `%r9`** — not `%rdi`, `%rsi`,
+`%rdx`, `%rcx`, `%r8`, `%r9`. Measured for `add3(1,2,3)`:
+
+```
+	movl	$3, %r8d
+	movl	$2, %edx
+	movl	$1, %ecx
+	call	add3
+```
+
+**Floating-point arguments go in `%xmm0`–`%xmm3`**, with no GPR mirror for a
+non-variadic call. Measured for `dadd(1.0, 2.0)`:
+
+```
+	movapd	%xmm0, %xmm1
+	call	dadd
+```
+
+**There is no `%al` vector-register count, and no per-call `sub` for the shadow space.**
+gcc allocates the 32 bytes once in the prologue (`subq $56, %rsp` — 32 of shadow, 24 of
+locals), so the shadow area is part of the frame rather than something each call site
+re-establishes. Measured for a variadic `printf("%d %s\n", 42, "hi")`:
+
+```
+	leaq	.LC1(%rip), %rax
+	movq	%rdx, %r8
+	movl	$42, %edx
+	movq	%rax, %rcx
+	call	printf
+```
+
+No `mov $2, %al`. That instruction is a SysV requirement for the callee's register save
+area and has no meaning here, so emitting it costs nothing but expecting it does.
+
+**A `long double` variadic argument is passed by address, not in two stack slots.** This
+corrects the earlier fix in this phase, which sized the outgoing argument area from the
+number of stack *arguments* and let a `long double` occupy two of them — which is the
+SysV shape and the reason `function.c` reported a value left on the stack. On this target
+there is no x87 stack argument at all:
+
+```
+	fldt	.LC2(%rip)
+	fstpt	-16(%rbp)
+	leaq	-16(%rbp), %rax
+	leaq	.LC3(%rip), %rcx
+	movq	%rax, %rdx
+	call	printf
+```
+
+The value is spilled to the frame, its *address* goes in the next GPR, and there is no
+`%al`. So the slot-counting fix is not wrong arithmetic — it is arithmetic for the wrong
+convention, and it will be replaced rather than kept. The diagnostic it produced was real
+and the depth accounting it rested on will have to be redone against these rules.
+
+**`%rdi` and `%rsi` are caller-saved on Windows**, where SysV makes them callee-saved. The
+code generator uses both across argument setup, so the prologue has to save them if a
+call can happen between their definition and their use.
+
+**What this replaces.** `classify_args` decides the register class, `push_args` lays out
+the argument area and `gen_funcall` loads the registers, and the callee side is
+`create_param_lvars`' frame offsets plus `store_gp`/`store_fp`. All four read from the
+SysV tables at the top of `gen.v`. The register lists are the whole change for the common
+case; the shadow space, the `%al` removal and the by-address `long double` are the rest.
+
+**The check is differential against tcc, which already uses this ABI on this host**, and
+the first acceptance test is the smallest one that crosses the boundary: a vcc program
+that calls `printf` and prints one line. It currently dies with an access violation, and
+that program is the test.
+
