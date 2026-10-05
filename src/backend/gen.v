@@ -187,7 +187,16 @@ fn (mut g AsmGen) push_args_pass(node &ast.Node, classes []ArgClass, first_pass 
 	// exists to prevent.
 	mut i := node.args.len - 1
 	for i >= 0 {
-		if classes[i].by_stack == first_pass {
+		// Push the arguments this pass is for, and skip the rest.
+		//
+		// The condition used to *skip* `by_stack == first_pass`, which meant the pass
+		// named `true` pushed the arguments that were **not** on the stack. So the
+		// register arguments went on first and the stack arguments last — and since a
+		// `push` decrements `%rsp`, "last" is the *lowest* address, which put the first
+		// stack argument at the bottom of the argument area, underneath the home area,
+		// instead of at the top of it. The callee then read whatever was eight bytes
+		// higher: `f5(1,2,3,4,5)` returned 4, the fourth register argument.
+		if classes[i].by_stack != first_pass {
 			i--
 			continue
 		}
