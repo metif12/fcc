@@ -176,36 +176,48 @@ fn (mut g AsmGen) push_args(node &ast.Node, classes []ArgClass) int {
 }
 
 fn (mut g AsmGen) push_args_pass(node &ast.Node, classes []ArgClass, first_pass bool) {
-	// Right to left, so the first stack argument ends up lowest in the frame, which
-	// is where the callee expects to find it.
+	// A `push` decrements `%rsp`, so the last thing pushed is at the lowest address, and
+	// the first stack argument has to be at the lowest address — that is where the callee
+	// reads it from. So *both* kinds of argument are pushed right to left, and the
+	// register arguments go last so that they end up on top, in the reverse order the
+	// pops need.
+	//
+	// Reversing only the stack arguments looks tempting and is wrong: a six-argument call
+	// then reads `x=1=2=3=5=4` instead of `x=1=2=3=4=5`, which is the swap this comment
+	// exists to prevent.
 	mut i := node.args.len - 1
 	for i >= 0 {
 		if classes[i].by_stack == first_pass {
 			i--
 			continue
 		}
-		arg := node.args[i]
-		g.gen_expr(arg)
-		ty := arg.ty
-		if ty.kind == .struct_ || ty.kind == .union_ {
-			g.push_struct(ty)
-		} else if ty.kind == .basic
-			&& (ty.basic == .float_ || ty.basic == .double_) {
-			g.pushf()
-		} else if ty.kind == .basic && ty.basic == .ldouble_ {
-			// Spill the value where it will survive the call, then push its *address* so
-			// the rest of the machinery treats it as the pointer-sized argument it now is.
-			// The 16 bytes stay on the stack until the call returns, which is exactly the
-			// window the callee has to read them.
-			g.line('  sub $16, %rsp')
-			g.line('  fstpt (%rsp)')
-			g.depth += 2
-			g.line('  mov %rsp, %rax')
-			g.push()
-		} else {
-			g.push()
-		}
+		g.push_one(node.args[i])
 		i--
+	}
+}
+
+// push_one puts one argument's value onto the stack in the form the callee expects to
+// find it: an aggregate copied out of `%rax`, an SSE value in `%xmm0`, a `long double`
+// spilled with its address left on top, and everything else as a word in `%rax`.
+fn (mut g AsmGen) push_one(arg &ast.Node) {
+	g.gen_expr(arg)
+	ty := arg.ty
+	if ty.kind == .struct_ || ty.kind == .union_ {
+		g.push_struct(ty)
+	} else if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_) {
+		g.pushf()
+	} else if ty.kind == .basic && ty.basic == .ldouble_ {
+		// Spill the value where it will survive the call, then push its *address* so
+		// the rest of the machinery treats it as the pointer-sized argument it now is.
+		// The 16 bytes stay on the stack until the call returns, which is exactly the
+		// window the callee has to read them.
+		g.line('  sub $16, %rsp')
+		g.line('  fstpt (%rsp)')
+		g.depth += 2
+		g.line('  mov %rsp, %rax')
+		g.push()
+	} else {
+		g.push()
 	}
 }
 

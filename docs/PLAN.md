@@ -225,6 +225,48 @@ that run and fail now print real assertion values, so they are computing wrong a
 rather than failing to produce output at all — which is the next list, and it is ordinary
 code generation rather than an ABI question.
 
+**Open, and narrowed but not solved: stack arguments.** A call with one stack argument —
+`printf(fmt, 1, 2, 3, 4)` — dies with an access violation, and `sum6(1,2,3,4,5,6)`
+called from vcc to vcc returns the wrong answer. That second one matters: it means the
+caller and the callee disagree *inside* vcc, so this is not an ABI question.
+
+What is measured, so the next attempt does not repeat it:
+
+| | first stack parameter | second |
+|---|---|---|
+| gcc's callee reads | `40(%rbp)` | `48(%rbp)` |
+| vcc's callee reads | `40(%rbp)` — matches | `48(%rbp)` |
+
+So `assign_lvar_offsets`'s `8 + shadow_space` is right, and the callee side is not the
+fault. gcc's *caller* writes the arguments straight into their final slots —
+`movl $5, 32(%rsp)` and `movl $6, 40(%rsp)` — without pushing anything, which is the
+other structural difference: vcc builds the whole argument area on the stack and pops the
+register arguments back out.
+
+Pushing the stack arguments **left to right** makes a six-argument call read
+`x=1=2=3=5=4` instead of `x=1=2=3=4=5` — a swap, so right-to-left is right and that
+"fix" was a regression, reverted. Right-to-left still crashes with a single stack
+argument, so the remaining suspect is the **alignment padding**: `push_args` emits its
+`sub $8` *before* the pushes, which places the padding above the argument area where the
+callee reads the first stack argument from. The next experiment is to place the padding
+below the home area instead and see whether a one-stack-argument call survives; if it
+does, the fix is to take the padding out of the frame rather than out of each call site,
+which is what gcc does.
+
+**Three of the nine running files are not defects at all.** `alignof`, `bitfield` and
+`struct` fail on `_Alignof(long)` = 8 against 4, `sizeof(struct { long x : 1; })` = 8
+against 4, and `sizeof(struct { char a; long b; })` = 16 against 8. All three are the
+recorded Linux-versus-Windows difference: chibicc's `long` is eight bytes, tcc's on this
+host is four, and vcc agrees with tcc. So the real count is **five** files computing a
+wrong answer, not nine, and three of them are a divergence to record rather than to fix.
+
+The other five wrong answers are ordinary code generation: `arith` on `++*p` through an
+array pointer, `generic` on a `_Generic` selection of a `double`, `pointer` on `*(&x + 1)`
+— which reads a neighbour the test happens to have placed there, so it is a test that
+depends on the stack layout rather than on the language — `string` on the `\a` escape, and
+`unicode` on stringizing a non-ASCII token, which is a consequence of this phase's own
+decision to let 0x80-and-above bytes be identifier characters.
+
 **Still failing to compile, four of eighteen:**
 
 | file | what it needs |
