@@ -363,6 +363,51 @@ shadows the builtin one. `vsprintf` then receives a pointer to twenty-four bytes
 reads eight, and reads `gp_offset` and `fp_offset` as an address. Nothing vcc emits changes
 that, because the inconsistency is between the suite's declaration and mingw's library.
 
+**The escape table: isolated to one line, and the table itself is exonerated.** The
+minimal case needs no preprocessor, no macro, no `#`:
+
+```c
+int main(void) { return "\a"[0] == 7 ? 0 : 1; }
+```
+
+`tcc` exits 0. vcc exits 1. And the table is *not* the problem — the same declaration,
+looked up the same way, in a standalone V program:
+
+```v
+const simple_escapes = { 'a': 7  'b': 8 }
+c := `a`
+println(c.str())                    // a
+println(simple_escapes[c.str()])    // 7
+println(simple_escapes[`q`.str()])  // 0
+```
+
+So `simple_escapes[c.str()]` works, the keys are one-character strings, and a missing key
+gives 0 — which is exactly the "unknown escape yields the character itself" fall-through
+that produces 97.
+
+What has been ruled out, in order:
+
+- **Not the `match` arms.** `\n`, `\t`, `\r`, `\\`, `\'`, `\"`, `\?` and every numeric form
+  all decode correctly, and every one of them has an explicit arm in the `match` that runs
+  *after* the table lookup. So the branch is reached and `decode_escape` is called.
+- **Not the map key type.** Both spellings were tried; `simple_escapes[c]` is rejected by V
+  with `expected string, not u8`, which says the map is keyed by string and `c` is what
+  does not fit, while `simple_escapes[c.str()]` compiles.
+- **Not the preprocessor, the stringize operator, or macro expansion.** The reproducer above
+  has none of them.
+
+That leaves the value the literal is given, not the escape: `read_quoted` builds `data`
+correctly and assigns it to `str_data`, so the next thing to check is whether anything
+between the tokenizer and the code generator **rewrites `str_data`** — `expand` copies
+tokens, and `stringify` is the one place that is known to build a `.str_` token with its
+value computed by a *different* routine (`string_body`, which strips quotes and undoes
+escaping rather than decoding them).
+
+An attempted fix for exactly that was made and **reverted**: replacing `string_body` with a
+real decode made `\n`, `\"` and `\\` correct and left `\a` broken, and it made
+`unicode.c`'s stringize render as an empty string. No verified improvement, one new symptom
+— so it went back out rather than staying in on a plausible story.
+
 **Still failing to compile, four of eighteen:**
 
 | file | what it needs |
