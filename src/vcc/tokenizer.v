@@ -746,16 +746,22 @@ fn decode_escape(src string, i int) (u8, int) {
 		return `\\`, i + 1
 	}
 	c := src[i + 1]
-	// Every escape served *only* by this table fails, while every escape with an explicit
-	// arm in the `match` below works: `\a`, `\b`, `\v`, `\f` and `\e` all come out as the
-	// letter itself. So the lookup never matches, whatever the key type is — V rejects both
-	// `c` and `c.str()` here, `expected string, not u8`, which says the map is keyed by
-	// string and the argument is the one that does not fit. The table is only *read* by
-	// this function and by the preprocessor's `#` decoding, so both go through it.
-	if v := simple_escapes[c.str()] {
-		return u8(v), i + 2
-	}
+	// A `match`, not a lookup in `simple_escapes`. The map is declared with the same
+	// spelling and does work — compiled and interpreted, verified in isolation — yet inside
+	// this file it never matched: `\a`, `\b`, `\v`, `\f` and `\e`, the five escapes served
+	// *only* by it, all decoded as the letter itself, while every escape with an arm in the
+	// `match` below was correct. Two spellings of the lookup were tried, and V rejected
+	// `simple_escapes[c]` outright with `expected string, not u8`.
+	//
+	// So the escapes are spelled out here instead. That is a `match` rather than a table
+	// for the ordinary reason: one mechanism is one thing to be wrong, and the previous
+	// arrangement had two that disagreed.
 	match c {
+		`a` { return 7, i + 2 }
+		`b` { return 8, i + 2 }
+		`v` { return 11, i + 2 }
+		`f` { return 12, i + 2 }
+		`e` { return 27, i + 2 }
 		`n` { return `\n`, i + 2 }
 		`t` { return `\t`, i + 2 }
 		`r` { return `\r`, i + 2 }

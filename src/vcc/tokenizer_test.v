@@ -441,3 +441,37 @@ fn test_a_dollar_sign_continues_an_identifier() {
 	assert toks[1].kind == .ident, 'got ${toks[1].kind}'
 	assert toks[1].text == 'a$b', 'got ${toks[1].text}'
 }
+
+fn test_the_simple_escapes_decode_to_their_values() {
+	// All eight, from the one reproducer that found them: `\a`, `\b`, `\v`, `\f` and `\e`
+	// were served by a lookup table that never matched, so every one of them decoded as
+	// the letter itself — `\a` came out as 97. The five that had explicit arms were fine.
+	for c in [`\a`, `\b`, `\v`, `\f`, `\e`, `\n`, `\t`, `\r`] {
+		// `char` `*` `p` `=` the-literal `;` and the eof sentinel.
+		toks := tokenize('char *p = "x${c}y";')
+		assert toks.len == 7, 'got ${toks.len} tokens for ${c}'
+		body := toks[4].str_data
+		// Three bytes, not four: `x`, the escape, `y`. The terminating NUL is added later,
+		// when the literal's array type is built, so it is not in the token's own data.
+		assert body.len == 3, '${c} decoded to ${body.len} bytes'
+		assert body[0] == `x`, 'got ${body[0]}'
+		assert body[2] == `y`, 'got ${body[2]}'
+		assert body[1] == u8(simple_escape_value(c)), '${c} gave ${body[1]}'
+	}
+}
+
+// simple_escape_value is what C11 5.2.2 specifies, spelled independently of the tokenizer
+// so that this test is not checking the tokenizer against itself.
+fn simple_escape_value(c u8) int {
+	return match c {
+		`\a` { 7 }
+		`\b` { 8 }
+		`\v` { 11 }
+		`\f` { 12 }
+		`\e` { 27 }
+		`\n` { 10 }
+		`\t` { 9 }
+		`\r` { 13 }
+		else { -1 }
+	}
+}
