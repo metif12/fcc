@@ -314,6 +314,55 @@ Recorded here rather than decided alone.
 where before the call-sequence fix it failed at line 4 with a garbage pointer. So this is
 where the variadic *callee* side first became reachable.
 
+**The `stdarg.h` on this target is tcc's, and it changes what has to be built.** Measured
+on this host:
+
+```c
+typedef __builtin_va_list va_list;
+#define va_start __builtin_va_start
+#define va_arg   __builtin_va_arg
+#define va_copy  __builtin_va_copy
+#define va_end   __builtin_va_end
+```
+
+No `__va_list_tag`, no `gp_offset` arithmetic in a macro — the whole convention is five
+**compiler builtins**, which is why `sizeof(va_list)` is 8 and why nothing in it is a
+struct. So the layout committed in `051812b` is right, but it is only half the answer: the
+header is the one vcc will be asked to satisfy, because `-I` points at tcc's include
+directory, and it delegates the entire mechanism to the compiler.
+
+**What is therefore missing is five builtins**, and it is one piece of work rather than
+five:
+
+- `__builtin_va_start(ap, last)` — assign the address of the tag, which is already what
+  `__va_area__` holds.
+- `__builtin_va_arg(ap, type)` — the substantial one. It takes the address of `ap`, and
+  the choice between the register save area and the overflow area depends on the *type*:
+  a floating-point type compares `fp_offset` against the end of the SSE slots and steps by
+  16, an integer type compares `gp_offset` and steps by 8, and either falls through to the
+  overflow area once its register class is exhausted. Both the read and the update of `ap`
+  happen in place, because `ap` is memory the caller keeps.
+- `__builtin_va_copy(dst, src)` — a 24-byte structure copy, since the tag is that size.
+- `__builtin_va_end(ap)` — nothing.
+
+chibicc implements these in the front end for the same reason: the type argument is a
+compile-time type, so the whole offset computation is constant folding, and doing it in the
+backend would mean an instruction-encoder-visible special case for a construct that has
+none at run time. **Partial implementations are worse than none** — a variadic callee that
+reads integers correctly and floats wrongly is far harder to diagnose than one that refuses
+— so all four go in together.
+
+**Until they exist, no end-to-end `vprintf` test can be written, and the layout in
+`051812b` is a belief rather than a verified thing.** The differential test to write once
+they do: a program using `vprintf`, compiled by vcc and by tcc, compared line by line. tcc
+is on this host, uses this ABI, and is the better oracle for this subsystem than the suite.
+
+**`function.c` lines 261 and 265 stay unfixable**, and the reason is now exact rather than
+probable: `test.h` defines its own `va_list` as `__va_elem[1]`, twenty-four bytes, which
+shadows the builtin one. `vsprintf` then receives a pointer to twenty-four bytes where it
+reads eight, and reads `gp_offset` and `fp_offset` as an address. Nothing vcc emits changes
+that, because the inconsistency is between the suite's declaration and mingw's library.
+
 **Still failing to compile, four of eighteen:**
 
 | file | what it needs |
