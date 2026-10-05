@@ -1285,20 +1285,14 @@ fn (mut g AsmGen) emit_text(globals []&ast.Obj) {
 	}
 }
 
-// emit_va_area writes the register save area a variadic function reads through
-// `va_start`.
+
+
+// emit_va_area writes the `va_list` a variadic function reads through `va_start`.
 //
-// Every count and offset is derived from `gp_max` and `fp_max` rather than written down.
-// The hardcoded six and eight were the psABI's, so lowering `gp_max` to four left the
-// loops indexing a four-element table at six — a compiler crash, in a compiler that had
-// been crashing for unrelated reasons all afternoon, which is exactly the kind of thing
-// that gets misattributed.
-//
-// The layout is measured from `gcc -S` on this host. For
-// `int vsum(int n, ...)` it saves `%rcx`, `%rdx`, `%r8`, `%r9` — the four *argument*
-// registers, in argument order — at `24(%rbp)`, with `gp_offset` and `fp_offset` both
-// starting at zero. The psABI instead saves six registers including `%rdi` and `%rsi`,
-// which are not argument registers here at all, and starts `fp_offset` past them.
+// The layout is measured from `gcc -S` on this host: for `int vsum(int n, ...)` it saves
+// `%rcx`, `%rdx`, `%r8`, `%r9` — the four *argument* registers, in argument order — and
+// starts `gp_offset` and `fp_offset` at zero. The psABI instead saves six registers
+// including `%rdi` and `%rsi`, which are not argument registers here at all.
 fn (mut g AsmGen) emit_va_area(fun &ast.Obj) {
 	if fun.va_area == unsafe { nil } {
 		return
@@ -1314,28 +1308,34 @@ fn (mut g AsmGen) emit_va_area(fun &ast.Obj) {
 		}
 	}
 	off := fun.va_area.offset
-	// The floating-point part of the save area follows the integer part, so `fp_offset`
-	// counts from the end of the integer registers rather than from a fixed 48.
+	tag := off + 8
+	// The floating-point slots follow the integer ones, and each is 16 bytes because that
+	// is the width an XMM register is saved and restored at, so `fp_offset` counts from the
+	// end of the integer slots rather than from a fixed 48 as the psABI does.
 	fp_base := gp_max * 8
 
-	g.line('  movl $${gp * 8}, ${off}(%rbp)')
-	g.line('  movl $${fp_base + fp * 8}, ${off + 4}(%rbp)')
+	// The save area, filled before the tag so the tag can point at it.
+	for i in 0 .. gp_max {
+		g.line('  movq ${arg_regs[i]}, ${off + 32 + i * 8}(%rbp)')
+	}
+	// `movups` rather than `movaps`: the frame slot's alignment is the frame's, and a
+	// 16-byte-aligned store would fault whenever it happened not to be.
+	for i in 0 .. fp_max {
+		g.line('  movups %xmm${i}, ${off + 32 + fp_base + i * 16}(%rbp)')
+	}
+
+	g.line('  movl $${gp * 8}, ${tag}(%rbp)')
+	g.line('  movl $${fp_base + fp * 16}, ${tag + 4}(%rbp)')
 	// The overflow area starts at the first incoming *stack* argument, which is the same
 	// address `assign_lvar_offsets` uses: the return address, the saved `%rbp`, and the
-	// caller's home area. It was `8 + shadow_space` — the same eight-bytes-low mistake,
-	// in the second place it appeared, which is why `va_arg` on a call that spilled would
-	// have read a register parameter's slot.
-	g.line('  movq %rbp, ${off + 8}(%rbp)')
-	g.line('  addq $${16 + shadow_space}, ${off + 8}(%rbp)')
-	g.line('  movq %rbp, ${off + 16}(%rbp)')
-	g.line('  addq $${off + 24}, ${off + 16}(%rbp)')
-
-	for i in 0 .. gp_max {
-		g.line('  movq ${arg_regs[i]}, ${off + 24 + i * 8}(%rbp)')
-	}
-	for i in 0 .. fp_max {
-		g.line('  movsd %xmm${i}, ${off + 24 + fp_base + i * 8}(%rbp)')
-	}
+	// caller's home area.
+	g.line('  movq %rbp, ${tag + 8}(%rbp)')
+	g.line('  addq $${16 + shadow_space}, ${tag + 8}(%rbp)')
+	g.line('  movq %rbp, ${tag + 16}(%rbp)')
+	g.line('  addq $${off + 32}, ${tag + 16}(%rbp)')
+	// And the `va_list` is the address of the tag.
+	g.line('  movq %rbp, ${off}(%rbp)')
+	g.line('  addq $${tag}, ${off}(%rbp)')
 }
 
 // spill_params moves the parameters that arrived in registers into their frame

@@ -14,27 +14,18 @@ import src.ast
 // What is here is the part that can be checked on its own: a data section is
 // either right or wrong, and `as` and the linker will say which.
 
-// gp_max and fp_max are the argument register counts of the *Windows* x64 ABI: four
-// integer registers and four SSE registers.
-//
-// These are not the psABI's six and eight. The psABI is the System V convention, and it
-// is what a Linux target would use; on this target mingw's `printf` follows the Microsoft
-// ABI, so a call emitted for the psABI puts every argument in a register the callee does
-// not read. That is invisible from inside vcc, because two vcc-compiled functions agree
-// with each other, and it kills the first program that calls the C library.
-//
-// Measured from `gcc -S` on this host rather than recalled; see docs/PLAN.md.
-pub const gp_max = 4
-pub const fp_max = 4
-
-// shadow_space is the 32 bytes the caller must reserve before a `call` so the callee has
-// somewhere to spill its four argument registers.
-//
-// [MS x64 2.2.5] "space is reserved on the stack for arguments passed in registers"; the
-// first four eight-byte slots at the top of the callee's frame are the home area. gcc
-// takes it out of the prologue once rather than at each call site, which is why its `main`
-// has one `subq $56, %rsp` and no `sub` before any `call`.
-pub const shadow_space = 32
+// gp_max, fp_max, shadow_space, incoming_base, va_area_size and xmm_slot live in
+// src/ast/abi.v, and are used from there: the front end needs `va_area_size` too and cannot
+// import the backend without a cycle. Reading them rather than declaring them here is what
+// makes the register counts the backend emits for and the frame sizes the front end lays
+// out the same numbers by construction. These aliases exist so the rest of the backend reads
+// as one name rather than `ast.` everywhere.
+const gp_max = ast.gp_max
+const fp_max = ast.fp_max
+const shadow_space = ast.shadow_space
+const incoming_base = ast.incoming_base
+const xmm_slot = ast.xmm_slot
+const va_area_size = ast.va_area_size
 
 // arg_regs and its byte and word forms are the argument registers in Windows x64 order:
 // `%rcx`, `%rdx`, `%r8`, `%r9`. A parameter is spilled from whichever form matches its
@@ -52,6 +43,7 @@ const arg_regs32 = ['%ecx', '%edx', '%r8d', '%r9d']
 // without a fixed-point instruction. `printf("%d", 1.0)` depends on it. There is no
 // counterpart for a non-variadic call, and gcc emits none for `dadd(1.0, 2.0)`.
 const arg_regs_mirror = arg_regs
+
 
 // TextEmitter writes AT&T assembly lines.
 //
@@ -557,7 +549,7 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 		// the listing and means two different things. Reading it as one thing put every
 		// stack argument eight bytes low, which is why `f5(1,2,3,4,5)` returned 3: it
 		// read the slot holding the third *register* argument.
-		mut top := 16 + shadow_space
+		mut top := incoming_base
 		mut bottom := 0
 		mut gp := 0
 		mut fp := 0

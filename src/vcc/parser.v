@@ -1609,7 +1609,12 @@ fn (mut p Parser) function(basety &ast.Type, attr VarAttr) {
 	fn_obj.params = p.locals
 
 	if fn_obj.ty.is_variadic {
-		fn_obj.va_area = p.new_lvar('__va_area__', array_of(ty_char, 136), line)
+		// `va_list` is eight bytes on this target — a pointer, not the psABI's 24-byte
+		// struct — so the local holds three things: the pointer, the tag it points at, and
+		// the register save area the tag points at. `ast.va_area_size` is the authority on
+		// the number, and it is derived from `gp_max` and `fp_max` so it cannot drift from
+		// the register counts.
+		fn_obj.va_area = p.new_lvar('__va_area__', array_of(ty_char, ast.va_area_size), line)
 	}
 	// The high-water mark of the stack a VLA has claimed, which the backend restores on
 	// every return and every `goto` out of a block.
