@@ -408,6 +408,42 @@ real decode made `\n`, `\"` and `\\` correct and left `\a` broken, and it made
 `unicode.c`'s stringize render as an empty string. No verified improvement, one new symptom
 — so it went back out rather than staying in on a plausible story.
 
+**The wide-string prefixes carry Linux's widths.** Measured on this host, both compilers
+agree:
+
+```
+$ tcc -o t.exe v.c && ./t.exe
+sizeof(wchar_t)=2
+sizeof(L'ab')=6        # three elements of two bytes
+```
+
+and chibicc's own suite expects `sizeof(u"abc" "def") == 14` — seven elements of two bytes
+— which is the *same* number, so `string.c` and tcc agree here and **vcc is the outlier**:
+`string_element_type` returns `ty_int` for `L`, `u` and `U`, four bytes each, so
+`sizeof(u"abc" "def")` comes out 28.
+
+So the widths to use on this target, from the measurements rather than from the Linux
+convention:
+
+| prefix | vcc now | this target | note |
+|---|---|---|---|
+| `L"…"` | 4 | **2** | `wchar_t` is 2 here, so `L` is 2 |
+| `u"…"` | 4 | **2** | `char16_t` |
+| `U"…"` | 4 | 4 | `char32_t`, the one that was already right |
+| `u8"…"` | 1 | 1 | |
+
+**One test encodes the wrong assumption and has to change with it:**
+`test_a_wide_piece_decides_the_width_of_the_whole_run` asserts 16 for
+`sizeof(L"ab" "c")`, which is four elements of four bytes. tcc answers 8. The test's own
+comment already points at this, and it was written when the only oracle in hand was
+chibicc's Linux-shaped expectations.
+
+This is recorded rather than changed here because it is **data layout**, and the blast
+radius of a prefix width is every `L`/`u`/`U` literal and every `wchar_t`/`char16_t` in the
+program. The same care that went into `long` = 4 has to go in: change it, then check
+`string`, `unicode` and the layout tests, and treat a `long`/`wchar_t`/`long double`
+disagreement with the suite as a divergence to record rather than a defect to fix.
+
 **Still failing to compile, four of eighteen:**
 
 | file | what it needs |
