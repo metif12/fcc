@@ -345,16 +345,24 @@ fn test_a_call_does_not_set_the_vector_register_count() {
 	assert text.contains('  movsd (%rsp), %xmm0'), 'the argument did not go into %xmm0'
 }
 
-fn test_a_variadic_call_mirrrors_its_floating_point_arguments() {
-	// [MS x64 3.2] The first four floating-point arguments are also written into the
-	// integer registers, so a variadic callee can find them. The Nth floating-point
-	// argument goes into the Nth *integer* register — counted among the floating-point
-	// arguments, not among all of them.
+fn test_a_variadic_call_mirrors_its_floating_point_arguments_into_the_position_they_occupy() {
+	// [MS x64 3.2] A variadic callee walks only the integer-register copies, so every
+	// floating-point argument is *also* written into a general register — the one its
+	// position among **all** the arguments selects, not the one its position among the
+	// floating-point arguments selects.
+	//
+	// That distinction is the whole test. `p("", 1.0)` has one integer argument ahead of
+	// the double, so the mirror belongs in `%rdx`: `%rcx` already holds the first
+	// argument. Measured against gcc, which leaves the format string in `%rcx`, the
+	// double in `%xmm0` and `%rdx`, and the third argument in `%r8`.
 	text, errs := generated('int p(char *, ...); int g(void) { return p("", 1.0); }')
 	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
 	// `movq`, not `movsd`: an SSE mnemonic cannot move between an XMM and a general
 	// register, and the assembler only says `operand type mismatch`.
-	assert text.contains('  movq %xmm0, %rcx'), 'the mirror instruction or its target is wrong'
+	assert text.contains('  movq %xmm0, %rdx'), 'the mirror went to the wrong register: ' + text
+	assert !text.contains('  movq %xmm0, %rcx'), 'the mirror overwrote the first argument'
+	// The format string is the first argument, so it is still loaded into `%rcx`.
+	assert text.contains('  pop %rcx')
 }
 
 fn test_a_non_variadic_call_does_not_mirror_its_floating_point_arguments() {

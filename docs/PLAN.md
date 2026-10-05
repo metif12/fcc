@@ -444,6 +444,34 @@ program. The same care that went into `long` = 4 has to go in: change it, then c
 `string`, `unicode` and the layout tests, and treat a `long`/`wchar_t`/`long double`
 disagreement with the suite as a divergence to record rather than a defect to fix.
 
+**A variadic call's floating-point mirror is indexed by argument position, not by
+floating-point position.** [MS x64 3.2] passes a floating-point argument to a
+variadic function in an SSE register *and* in the general register that its position
+selects, because a variadic callee reads only the general-register copy. The
+generator indexed the mirror by `fp` — the argument's position among the
+floating-point ones — and a unit test asserted exactly that, so the two agreed.
+
+It is wrong, and only a program that crosses into the C library can see it.
+Measured on `printf("a=%g b=%s c=%d", 3.5, "hi", 7)`:
+
+| | `%rcx` | `%rdx` | `%r8` | `%r9` |
+|---|---|---|---|---|
+| gcc | format string | 3.5 (mirror of `%xmm0`) | `"hi"` | 7 |
+| vcc, before | **3.5** | `"hi"` | 7 | — |
+| vcc, after | format string | 3.5 | `"hi"` | 7 |
+
+vcc put the mirror in `%rcx`, overwriting the format string, so the program died
+with `0xC0000005` and printed nothing at all. The boundary test is
+`tools/suite`-style: one `printf` with a `double` in it, built by vcc, linked by
+gcc, run, and compared with tcc. The unit test that "covered" the mirror asserted
+a register that provably destroys its neighbour.
+
+The same rule fixes a second, silent half: on a variadic call a floating-point
+argument also consumes a general-register position, so it goes on the stack once
+those are gone even though `%xmm` registers remain. Measured for
+`printf("d=%g s=%s i=%d f=%g\n", 1.5, "hi", 7, 2.5)`, where 2.5 is the fifth
+argument: gcc puts it in `%xmm0` *and* at `32(%rsp)`.
+
 **Still failing to compile, four of eighteen:**
 
 | file | what it needs |

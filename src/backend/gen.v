@@ -17,7 +17,7 @@ import src.ast
 // same tree would inherit the first one's decisions.
 struct ArgClass {
 mut:
-	by_stack bool
+	by_stack     bool
 	is_aggregate bool
 	// fp1 and fp2 are whether the first and second eight bytes of an aggregate are
 	// all floating-point, which decides XMM versus a general register.
@@ -67,6 +67,23 @@ fn (mut g AsmGen) classify_args(node &ast.Node) (int, []ArgClass) {
 			}
 		} else if ty.kind == .basic {
 			if ty.basic == .float_ || ty.basic == .double_ {
+				// [MS x64 3.2] A floating-point argument to a *variadic* function is
+				// passed in an SSE register **and** in the general register that its
+				// position among all the arguments selects, because the callee's variadic
+				// walk only ever reads the general-register copy. So it consumes a general
+				// position as well, and once those are gone it goes on the stack even
+				// though `%xmm` registers are still free.
+				//
+				// This is measured: for `printf("d=%g s=%s i=%d f=%g\n", 1.5, "hi", 7, 2.5)`
+				// gcc puts the format string in `%rcx`, 1.5 in `%xmm1` *and* `%rdx`,
+				// `"hi"` in `%r8`, 7 in `%r9`, and 2.5 in `%xmm0` *and* `32(%rsp)`.
+				if node.func_ty != unsafe { nil } && node.func_ty.is_variadic {
+					if gp >= gp_max {
+						c.by_stack = true
+						stack++
+					}
+					gp++
+				}
 				if fp >= fp_max {
 					c.by_stack = true
 					stack++
@@ -402,6 +419,7 @@ fn (g &AsmGen) return_type() &ast.Type {
 	}
 	return g.current_fn.ty.ret_type
 }
+
 // imin is the integer minimum, which C spells as a macro.
 fn imin(a int, b int) int {
 	return if a < b { a } else { b }
@@ -829,23 +847,39 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 			continue
 		}
 		if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_) {
+			is_variadic := node.func_ty != unsafe { nil } && node.func_ty.is_variadic
 			if !c.by_stack && fp < fp_max {
 				g.popf(fp)
-				// [MS x64 3.2] A variadic callee saves its four floating-point
-				// arguments into the *integer* registers as well, so the Nth
-				// floating-point argument is mirrored into the Nth integer register —
-				// counted among the floating-point arguments, not among all of them.
-				//
-				// `movq`, not `movsd`: moving between an XMM and a general register
-				// with an SSE mnemonic is not an instruction, and the assembler says
-				// `operand type mismatch for movsd` rather than anything about the ABI.
-				// A `float` is mirrored whole; the callee reads only its low 32 bits,
-				// which is a subset of what is stored.
-				if node.func_ty.is_variadic && fp < gp_max {
-					g.line('  movq %xmm${fp}, ${arg_regs_mirror[fp]}')
-				}
-				fp++
 			}
+			// [MS x64 3.2] A variadic callee walks only the integer register copies, so
+			// the value is also written into the general register that this argument's
+			// position selects.
+			//
+			// The register is `arg_regs[gp]`, the *position among all the arguments*, and
+			// not `arg_regs[fp]`, the position among the floating-point ones. Measured:
+			// for `printf("a=%g b=%s c=%d", 3.5, "hi", 7)` gcc leaves the format string in
+			// `%rcx`, 3.5 in `%xmm0` *and* `%rdx`, `"hi"` in `%r8` and 7 in `%r9`.
+			//
+			// Indexing by `fp` put the mirror in `%rcx` and overwrote the format string,
+			// so the call died with an access violation and printed nothing at all — while
+			// every unit test stayed green, because nothing they generated ever reached
+			// the C library.
+			//
+			// `movq`, not `movsd`: moving between an XMM and a general register with an
+			// SSE mnemonic is not an instruction, and the assembler says
+			// `operand type mismatch for movsd` rather than anything about the ABI.
+			// A `float` is mirrored whole; the callee reads only its low 32 bits.
+			//
+			// `gp < gp_max` also covers the case where the argument went on the stack:
+			// on a variadic call every argument advances `gp`, the integer ones in
+			// `classify_args` and the floating-point ones just above, so `gp` can never
+			// fall back below `gp_max` once it has passed it. An argument with no
+			// general register left has no mirror to write, which is the same fact.
+			if is_variadic && gp < gp_max {
+				g.line('  movq %xmm${fp}, ${arg_regs_mirror[gp]}')
+				gp++
+			}
+			fp++
 		} else if !c.by_stack && gp < gp_max {
 			g.pop(arg_regs[gp])
 			gp++
@@ -1284,8 +1318,6 @@ fn (mut g AsmGen) emit_text(globals []&ast.Obj) {
 		g.current_fn = unsafe { nil }
 	}
 }
-
-
 
 // emit_va_area writes the `va_list` a variadic function reads through `va_start`.
 //
