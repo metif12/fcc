@@ -446,7 +446,11 @@ fn test_the_simple_escapes_decode_to_their_values() {
 	// All eight, from the one reproducer that found them: `\a`, `\b`, `\v`, `\f` and `\e`
 	// were served by a lookup table that never matched, so every one of them decoded as
 	// the letter itself — `\a` came out as 97. The five that had explicit arms were fine.
-	for c in [`\a`, `\b`, `\v`, `\f`, `\e`, `\n`, `\t`, `\r`] {
+	// The five that were broken, plus `\t`, which is the one non-breaking escape the old
+	// `match` also served. `\n` and `\r` are left out on purpose: interpolating them puts a
+	// real line break inside the literal, and a string literal ends at one — so this would
+	// be testing the file I wrote rather than the escape.
+	for c in [`\a`, `\b`, `\v`, `\f`, `\e`, `\t`] {
 		// `char` `*` `p` `=` the-literal `;` and the eof sentinel.
 		toks := tokenize('char *p = "x${c}y";')
 		assert toks.len == 7, 'got ${toks.len} tokens for ${c}'
@@ -469,8 +473,8 @@ fn simple_escape_value(c u8) int {
 		`\v` { 11 }
 		`\f` { 12 }
 		`\e` { 27 }
-		`\n` { 10 }
 		`\t` { 9 }
+		`\n` { 10 }
 		`\r` { 13 }
 		else { -1 }
 	}
