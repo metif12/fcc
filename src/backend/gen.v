@@ -163,19 +163,31 @@ fn (mut g AsmGen) push_args(node &ast.Node, classes []ArgClass) int {
 			continue
 		}
 		// The argument area is counted in eight-byte slots, not in arguments: a
-		// `long double` is pushed as two of them (`sub $16, %rsp; fstpt (%rsp)`).
-		// Counting one slot per argument made the caller's own cleanup a slot short, so
-		// `main` finished with one value still on the stack — and `sprintf(buf, "%Lf", x)`
-		// is ordinary C.
+		// `long double` is pushed as two of them (`sub $16, %rsp; fstpt (%rsp)`), and an
+		// aggregate larger than two eightbytes is pushed by `push_struct`, which reserves
+		// its whole size. Counting one slot for either made the caller's own cleanup short
+		// by the difference — `sprintf(buf, "%Lf", x)` left one value on the stack, and
+		// passing a 32-byte struct left three.
 		ty := node.args[i].ty
 		if ty.kind == .basic && ty.basic == .ldouble_ {
 			total += 2
+		} else if ty.kind == .struct_ || ty.kind == .union_ {
+			total += align_to(ty.size, 8) / 8
 		} else {
 			total++
 		}
 	}
-	// [psABI] The end of the argument area must be 16-byte aligned, so an odd number
-	// of eight-byte slots gets a padding slot.
+	// [psABI] The argument area must end 16-byte aligned, so an odd number of
+	// eight-byte slots gets a padding slot.
+	//
+	// It goes *below* the argument area, which for a sequence of `push`es means
+	// emitted first: a `push` decrements `%rsp`, so whatever is reserved first ends up
+	// at the lowest address, and the callee reads the first stack argument from the
+	// lowest address of the area. Measured from gcc's own `probe(6, 1, 2, 3, 4, 5, 6)`:
+	// it pads with `subq $64` and writes the three stack arguments at 32, 40 and
+	// 48(%rsp) — padding above the arguments, above 48 — which is the same slot from
+	// the other side, because gcc reserves downward and pushes upward while this
+	// generator does the reverse.
 	if (g.depth + total) % 2 == 1 {
 		g.line('  sub $8, %rsp')
 		g.depth++
@@ -455,6 +467,17 @@ fn (mut g AsmGen) gen_expr(node &ast.Node) {
 		.vla_ptr {
 			g.gen_addr(node)
 			g.load(node.ty)
+			return
+		}
+		.va_arg_ {
+			g.gen_va_arg(node)
+			return
+		}
+		.va_start_ {
+			// Unreachable from `gen_expr`: `va_start` is parsed as a statement, so
+			// `gen_stmt` handles it. It is here so that reaching it is a diagnostic about
+			// the node's kind rather than a silently missing store.
+			g.errors << 'va_start is a statement; it was reached as an expression'
 			return
 		}
 		.member {
@@ -1240,6 +1263,19 @@ fn (mut g AsmGen) gen_stmt(node &ast.Node) {
 			return
 		}
 		.expr_stmt {
+			// `va_start(ap, last);` and `va_end(ap);` are the statements the parser
+			// produces for the two variadic builtins that have no value. They are
+			// handled here rather than in `gen_expr` because an expression's contract is
+			// that it leaves one value on the stack, and these leave none: emitting them
+			// as expressions made `depth` grow by one per call and the function failed its
+			// own end-of-body check with `left 1 values on the stack`.
+			if node.lhs.kind == .va_start_ {
+				g.gen_va_start(node.lhs)
+				return
+			}
+			if node.lhs.kind == .null_stmt {
+				return
+			}
 			g.gen_expr(node.lhs)
 			return
 		}
@@ -1295,7 +1331,15 @@ fn (mut g AsmGen) emit_text(globals []&ast.Obj) {
 			g.line('  mov %rsp, ${fun.alloca_bottom.offset}(%rbp)')
 		}
 
-		g.emit_va_area(fun)
+		// The variadic spill comes first because it writes the *home* slots, which is
+		// where `spill_params` puts a named register parameter too. The two write the
+		// same bytes with the same values — the argument registers hold the named
+		// parameters as well as the variadic ones — so the order between them does not
+		// change the result, and `spill_params` alone would leave the registers past the
+		// last named parameter unwritten.
+		if fun.ty.is_variadic {
+			g.spill_va_regs()
+		}
 		g.spill_params(fun)
 
 		for s in fun.body {
@@ -1319,55 +1363,121 @@ fn (mut g AsmGen) emit_text(globals []&ast.Obj) {
 	}
 }
 
-// emit_va_area writes the `va_list` a variadic function reads through `va_start`.
+// gen_va_start emits `__builtin_va_start(ap, last)`.
 //
-// The layout is measured from `gcc -S` on this host: for `int vsum(int n, ...)` it saves
-// `%rcx`, `%rdx`, `%r8`, `%r9` — the four *argument* registers, in argument order — and
-// starts `gp_offset` and `fp_offset` at zero. The psABI instead saves six registers
-// including `%rdi` and `%rsi`, which are not argument registers here at all.
-fn (mut g AsmGen) emit_va_area(fun &ast.Obj) {
-	if fun.va_area == unsafe { nil } {
+// It is one store of a frame-relative constant: the `va_list` is a pointer and the
+// first variadic argument's address is decided by `assign_lvar_offsets`, which counts
+// the slots the named parameters occupy. Measured against gcc, which for
+// `int vsum(int n, ...)` emits `leaq 24(%rbp), %rax` — the same value, since `n` is
+// the only named parameter and takes one slot.
+//
+// The frame offset rather than the offset of the last named parameter matters. The
+// two agree whenever `last` arrived in a register, and disagree whenever it did not:
+// for `void f(int n, struct Big b, ...)` the by-address struct `b` lives above
+// `incoming_base`, so `&b + 8` is past the end of the arguments, while the home area
+// says slot two. gcc agrees with the second, measured as `ap - &a == 16`.
+fn (mut g AsmGen) gen_va_start(node &ast.Node) {
+	g.gen_addr(node.lhs) // %rax = &ap
+	g.line('  lea ${g.current_fn.va_start_offset}(%rbp), %r10')
+	g.line('  mov %r10, (%rax)')
+}
+
+// gen_va_arg emits `__builtin_va_arg(ap, T)`.
+//
+// On this target the whole of it is "read the value at `*ap`, then advance `ap`",
+// and the stride is fixed by the type at compile time:
+//
+//	size <= 8   the value is in the slot             stride 8
+//	size <= 16  the value is in the slot             stride 16
+//	size > 16   the slot holds the object's address  stride 8
+//
+// All three measured, against gcc and tcc, which agree on every shape: a
+// 16-byte struct occupies two slots and both halves read back; a 32-byte struct's
+// slot holds an address and reading it yields `movq (%rax), %rax` twice; six ints
+// come out as 1..6 with a stride of eight each.
+//
+// A `long double` takes the third path even though it is eight bytes here, because
+// `classify_args` passes it by reference — [MS x64 2.2.5] passes anything wider
+// than one eightbyte that is not a two-eightbyte aggregate by reference — so its
+// slot holds an address too.
+//
+// The read has to come before the advance, and the value has to survive it, so the
+// address of the `va_list` object is held aside for the whole sequence.
+//
+// It pushes nothing, which is the whole of what the `depth` accounting is about. An
+// expression in this generator leaves its value in `%rax` or `%xmm0` and does *not*
+// push; `depth` counts only the explicit `push()` calls that spill an intermediate. An
+// earlier version of this function pushed its result, and every variadic function
+// failed its end-of-body check with `left N values on the stack` — one per `va_arg`,
+// so `mixed` reported three. The count was right and the code was wrong.
+fn (mut g AsmGen) gen_va_arg(node &ast.Node) {
+	ty := node.ty
+	sz := ty.size
+	is_ldouble := ty.kind == .basic && ty.basic == .ldouble_
+	by_ref := sz > 16 || is_ldouble
+
+	// `%r11` holds the address of the `va_list` object and `%rax` walks the slots.
+	// They have to be kept apart: the advance writes *through the object's address*
+	// while the read dereferences the pointer the object holds, and using one register
+	// for both overwrites an argument slot instead of the pointer. With one register,
+	// `addq $8, (%r10)` wrote to the slot `ap` addresses — the register save area — so
+	// each read saw the previous advance as its own value: a probe asking for six
+	// integers got `11 19 27 35 43 51`, eight bytes of drift per step.
+	//
+	// `%r11` is chosen because nothing else in this generator names it: `%rax` and
+	// `%rdx` carry operands, `%rdi` the argument-setup address, and `%r8`/`%r10` the
+	// two scratch registers used elsewhere.
+	g.gen_addr(node.lhs) // %rax = &ap
+	g.line('  mov %rax, %r11') // %r11 = &ap, kept across the load
+	g.line('  mov (%r11), %rax') // %rax = ap
+
+	if by_ref {
+		g.line('  mov (%rax), %rax') // the slot holds the address of the object
+		if is_ldouble {
+			g.line('  fldt (%rax)')
+		}
+		g.line('  addq $8, (%r11)')
 		return
 	}
-	mut gp := 0
-	mut fp := 0
-	for param in fun.params {
-		if param.ty.kind == .basic
-			&& (param.ty.basic == .float_ || param.ty.basic == .double_) {
-			fp++
-		} else {
-			gp++
-		}
-	}
-	off := fun.va_area.offset
-	tag := off + 8
-	// The floating-point slots follow the integer ones, and each is 16 bytes because that
-	// is the width an XMM register is saved and restored at, so `fp_offset` counts from the
-	// end of the integer slots rather than from a fixed 48 as the psABI does.
-	fp_base := gp_max * 8
 
-	// The save area, filled before the tag so the tag can point at it.
+	if sz > 8 {
+		// Two eightbytes passed by value in a pair of registers, so two consecutive
+		// slots and a stride of sixteen. The result is the address of the pair, which
+		// is what an aggregate's value is here, so `%rax` already holds it.
+		g.line('  addq $16, (%r11)')
+		return
+	}
+
+	// The ordinary case: a scalar, or a one-slot aggregate, in one slot.
+	g.load(ty)
+	g.line('  addq $8, (%r11)')
+}
+
+// spill_va_regs writes the four argument registers into the home slots a variadic
+// callee's `va_list` walks.
+//
+// These four stores are the whole of the variadic callee on this target. There is
+// no register save area and no `gp_offset`/`fp_offset` pair: the home slots at
+// 16/24/32/40(`%rbp`) already are the caller's shadow area, so writing the
+// registers there makes them contiguous with the stack arguments that follow at
+// `incoming_base`, and a `va_list` is a plain pointer into that run.
+//
+// Measured from `gcc -S` for `int vsum(int n, ...)`:
+//
+//	movq	%rcx, 16(%rbp)
+//	movq	%rdx, 24(%rbp)
+//	movq	%r8, 32(%rbp)
+//	movq	%r9, 40(%rbp)
+//	leaq	24(%rbp), %rax        # what va_start puts in ap
+//
+// All four are written unconditionally, including registers no named parameter
+// reached: that is the difference between a variadic prologue and an ordinary
+// parameter spill, and it is why `spill_params` cannot be reused for it — that one
+// walks `fun.params` and stops at the last one.
+fn (mut g AsmGen) spill_va_regs() {
 	for i in 0 .. gp_max {
-		g.line('  movq ${arg_regs[i]}, ${off + 32 + i * 8}(%rbp)')
+		g.line('  movq ${arg_regs[i]}, ${va_start_offset + i * 8}(%rbp)')
 	}
-	// `movups` rather than `movaps`: the frame slot's alignment is the frame's, and a
-	// 16-byte-aligned store would fault whenever it happened not to be.
-	for i in 0 .. fp_max {
-		g.line('  movups %xmm${i}, ${off + 32 + fp_base + i * 16}(%rbp)')
-	}
-
-	g.line('  movl $${gp * 8}, ${tag}(%rbp)')
-	g.line('  movl $${fp_base + fp * 16}, ${tag + 4}(%rbp)')
-	// The overflow area starts at the first incoming *stack* argument, which is the same
-	// address `assign_lvar_offsets` uses: the return address, the saved `%rbp`, and the
-	// caller's home area.
-	g.line('  movq %rbp, ${tag + 8}(%rbp)')
-	g.line('  addq $${16 + shadow_space}, ${tag + 8}(%rbp)')
-	g.line('  movq %rbp, ${tag + 16}(%rbp)')
-	g.line('  addq $${off + 32}, ${tag + 16}(%rbp)')
-	// And the `va_list` is the address of the tag.
-	g.line('  movq %rbp, ${off}(%rbp)')
-	g.line('  addq $${tag}, ${off}(%rbp)')
 }
 
 // spill_params moves the parameters that arrived in registers into their frame

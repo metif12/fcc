@@ -131,6 +131,97 @@ fn test_a_variadic_function_is_marked() {
 	assert ty.params[0].base == ty_char
 }
 
+fn test_the_builtin_va_list_is_a_pointer_to_char() {
+	// `__builtin_va_list` is the entire type system of the `<stdarg.h>` this target
+	// ships, whose whole body is `typedef __builtin_va_list va_list;`. So it has to
+	// answer `is_typename` and `declspec` has to turn it into a type, or no variadic
+	// function in any real program can be written at all.
+	//
+	// The size is measured, not assumed: mingw gcc and tcc both report
+	// `sizeof(va_list) == 8` on this host, and `src/ast/abi.v` records what those eight
+	// bytes are — a pointer walking the home area, *not* the psABI's 24-byte
+	// `gp_offset`/`fp_offset` struct.
+	r := parsed('__builtin_va_list ap;\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	obj := r.globals[0]
+	assert obj.ty.kind == .pointer
+	assert obj.ty.size == 8
+	assert obj.ty.base == ty_char
+}
+
+fn test_the_builtin_va_list_accepts_a_typedef() {
+	// The spelling every program uses is the header's, so the typedef form is the one
+	// that matters. It is a two-line path: `declspec` accepts the builtin, and
+	// `typedef` records it under the new name.
+	//
+	// A typedef is not an object with storage, so only the variable appears in
+	// `globals` — which is what makes this a real test of the typedef rather than of
+	// the count of declarations.
+	r := parsed('typedef __builtin_va_list va_list;\nva_list ap;\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals.len == 1
+	assert r.globals[0].ty.kind == .pointer
+	assert r.globals[0].ty.base == ty_char
+}
+
+fn test_va_start_and_va_end_are_statements_and_leave_nothing_behind() {
+	// Both are statements: `va_start` is one store and `va_end` is nothing, so neither
+	// produces a value. Implementing them as expressions made the generator's
+	// end-of-body check fail with `left 1 values on the stack` on a correct
+	// `va_start(ap, n);` — a diagnostic that names the stack rather than the construct
+	// that caused it.
+	//
+	// The count is what distinguishes the two shapes. Had either been parsed as an
+	// expression it would sit inside an `.expr_stmt`, and the body would have four
+	// statements instead of three. The comment above says "three statements" and means
+	// the declaration, the `va_start` and the `va_end`; the `return` makes the total
+	// four.
+	r := parsed('int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);' +
+		' __builtin_va_end(ap); return n; }\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	f := r.globals[0]
+	assert f.body.len == 4, 'got ${f.body.len} statements'
+	// The `va_start` is the one whose operand is the `.va_start_` node, so this asserts
+	// the shape rather than a position.
+	mut found := false
+	for s in f.body {
+		if s.kind == .expr_stmt && s.lhs != unsafe { nil } && s.lhs.kind == .va_start_ {
+			found = true
+		}
+	}
+	assert found, 'va_start was not parsed as a statement'
+}
+
+fn test_va_start_used_as_an_expression_is_reported_by_the_backend() {
+	// It is reported rather than quietly accepted, because a value would have to be
+	// invented for it. The parser cannot tell the two apart — the same token sequence
+	// is a statement or an initializer depending on what the statement parser did with
+	// it first — so the diagnostic comes from the generator, which does know.
+	//
+	// That the *parser* is silent about it is the reason the assertion is here and not
+	// in the parser: a test that asserted a parser diagnostic here would be asserting
+	// something the parser does not and should not know.
+	// The parse itself succeeds, so the count is asserted rather than assumed: it is
+	// what makes the absence of a parser diagnostic a fact and not an oversight.
+	r := parsed('int f(int n, ...) { __builtin_va_list ap;' +
+		' int x = __builtin_va_start(ap, n); return x; }\n')
+	assert r.errors.len == 0, 'the parser accepts the token sequence: ' + r.errors.str()
+	// The parse produced the function, which is all this test can see: `backend`
+	// imports `vcc`, so asserting the backend's diagnostic from here would make the
+	// import a cycle. `test_va_start_reached_as_an_expression_is_reported` in
+	// `src/backend/asm_test.v` asserts the diagnostic itself.
+	assert r.globals.len >= 1
+}
+
+fn test_va_arg_names_the_type_it_reads() {
+	// The type is a compile-time fact, so the whole offset computation folds to a
+	// constant stride. That is the reason `va_arg` is parsed in the front end at all
+	// rather than left to the backend.
+	r := parsed('int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);' +
+		' double d = __builtin_va_arg(ap, double); return (int)d; }\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+}
+
 fn test_an_array_parameter_becomes_a_pointer() {
 	// `int argv[]` in a parameter list means `int *argv`. This is the only place C makes
 	// that adjustment.

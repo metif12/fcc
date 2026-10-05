@@ -70,6 +70,22 @@ pub enum NodeKind {
 	// vla_ptr reads the pointer a variable-length array was allocated into, which
 	// is what addressing such an array goes through.
 	vla_ptr
+	// va_arg_ reads one variadic argument of the type its `ty` names, and advances
+	// the `va_list` in `lhs` past it. It exists as its own kind rather than being
+	// built out of a comma expression because the read has to happen *before* the
+	// advance and the result has to be the read; a comma expression yields its last
+	// operand, and the only way to invert that would be to read the value twice
+	// through a temporary the generator would have to invent.
+	//
+	// `lhs` is the `va_list` object itself, not its value: the caller owns the
+	// pointer, and `va_copy` and a `va_list` handed to `vprintf` both depend on the
+	// advance being visible in memory.
+	va_arg_
+	// va_start_ points a `va_list` at the first variadic argument. Its operand is the
+	// `va_list` object; the second operand of `va_start` is consumed and discarded by
+	// the parser, because [C11 7.16.1.4] only requires it to be nameable and where the
+	// walk begins follows from the function's named parameters rather than from it.
+	va_start_
 	// goto_ jumps to a label by name, goto_expr to a computed address, and label is
 	// the definition a goto resolves to. They are three kinds rather than one with a
 	// flag because the backend emits none, one and two instructions respectively, and
@@ -137,10 +153,14 @@ pub mut:
 	// written after the object was appended.
 	params []&Obj
 	locals []&Obj
-	// va_area is the register save area backing `va_start`, for a variadic
-	// function. V calls variadic functions (`printf`), so this cannot be
-	// deferred past phase 2.
-	va_area &Obj = unsafe { nil }
+	// va_start_offset is the frame offset of the first variadic argument, which is
+	// what `__builtin_va_start` puts in the `va_list`. It is only meaningful when
+	// `ty.is_variadic`, and it is computed in `assign_lvar_offsets` because counting
+	// the slots the named parameters occupy is the same arithmetic as deciding which
+	// of them arrive in registers — so computing it anywhere else would be a second
+	// copy of the calling convention, and a second copy is what this project has
+	// already been bitten by twice.
+	va_start_offset int
 	// alloca_bottom is the local holding the high-water mark of the stack a VLA has
 	// claimed. The backend restores it on every return and on every `goto` out of a
 	// block, which is the only way a VLA's storage ends when control leaves its scope.
@@ -179,16 +199,16 @@ pub mut:
 	lhs &Node = unsafe { nil }
 	rhs &Node = unsafe { nil }
 
-// cond, then and els form a three-way conditional.
-cond &Node = unsafe { nil }
-then &Node = unsafe { nil }
-els  &Node = unsafe { nil }
-// then_is_cond says the middle operand was left out, so this is the GNU `a ?: b` and
-// `then` is the very node `cond` is. It is a fact about the source rather than a
-// decision about code generation, which is why it belongs here and not in the backend's
-// own state — and it has to survive the cast `add_type` puts on each branch, so the
-// backend cannot discover it by comparing the two pointers.
-then_is_cond bool
+	// cond, then and els form a three-way conditional.
+	cond &Node = unsafe { nil }
+	then &Node = unsafe { nil }
+	els  &Node = unsafe { nil }
+	// then_is_cond says the middle operand was left out, so this is the GNU `a ?: b` and
+	// `then` is the very node `cond` is. It is a fact about the source rather than a
+	// decision about code generation, which is why it belongs here and not in the backend's
+	// own state — and it has to survive the cast `add_type` puts on each branch, so the
+	// backend cannot discover it by comparing the two pointers.
+	then_is_cond bool
 
 	// body, init, inc and brk_label make up a loop: `for (init; cond; inc) body`.
 	// brk_label and cont_label are already-unique names, resolved by the parser,

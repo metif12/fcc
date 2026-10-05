@@ -367,6 +367,10 @@ fn lookup_keyword(text string) ?ast.Keyword {
 		'__auto_type' { return ast.Keyword.auto_ }
 		'__builtin_offsetof' { return ast.Keyword.offsetof }
 		'__builtin_va_arg' { return ast.Keyword.va_arg }
+		'__builtin_va_start' { return ast.Keyword.va_start }
+		'__builtin_va_copy' { return ast.Keyword.va_copy }
+		'__builtin_va_end' { return ast.Keyword.va_end }
+		'__builtin_va_list' { return ast.Keyword.va_list_ }
 		'__builtin_types_compatible_p' { return ast.Keyword.types_compatible_p }
 		'__builtin_constant_p', '__builtin_bswap16' { return ast.Keyword.constant_p }
 		else {

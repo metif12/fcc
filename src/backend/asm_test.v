@@ -317,6 +317,23 @@ fn test_an_ordinary_stack_argument_is_still_one_slot() {
 	assert text.contains('sub $16, %rsp'), 'three eight-byte arguments should be padded to two slots'
 }
 
+fn test_an_aggregate_argument_reserves_a_slot_for_each_of_its_eight_bytes() {
+	// A 32-byte struct is pushed by `push_struct`, which takes out its whole size, so the
+	// caller's cleanup has to account for four slots and not one. Counting one left the
+	// function three values short and it was refused with
+	// `function "main" left 3 values on the stack` — a diagnostic about the stack rather
+	// than about the argument that unbalanced it.
+	//
+	// `long long`, not `long`: `long` is four bytes on this target, so a struct of four of
+	// them is sixteen bytes wide and goes in registers like any other two-eightbyte
+	// aggregate, which is not what this is about.
+	text, errs := generated('struct B { long long a, b, c, d; }; void f(struct B); void g(struct B b) { f(b); }')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert text.contains('sub $32, %rsp'), 'the aggregate was not pushed whole: ' + text
+	// The home area the call reserves, plus the four slots the aggregate took.
+	assert text.contains('add $64, %rsp'), 'the cleanup did not cover the aggregate: ' + text
+}
+
 // --- the calling convention ---
 
 fn test_a_call_reserves_the_callees_home_area_immediately_before_it() {
@@ -343,6 +360,105 @@ fn test_a_call_does_not_set_the_vector_register_count() {
 	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
 	assert !text.contains(', %rax\n  call'), 'the vector register count was still being set'
 	assert text.contains('  movsd (%rsp), %xmm0'), 'the argument did not go into %xmm0'
+}
+
+fn test_a_variadic_function_spills_all_four_argument_registers() {
+	// [MS x64 3.2] A variadic callee's `va_list` walks the home area, so all four
+	// argument registers have to be written there — including the ones no named
+	// parameter reached. This is the whole of the variadic prologue on this target:
+	// no register save area, no `gp_offset`.
+	text, errs := generated('int f(int n, ...);\nint g(int n, ...) { return f(n); }\n')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert text.contains('  movq %rcx, 16(%rbp)')
+	assert text.contains('  movq %rdx, 24(%rbp)')
+	assert text.contains('  movq %r8, 32(%rbp)')
+	assert text.contains('  movq %r9, 40(%rbp)')
+}
+
+fn test_a_non_variadic_function_does_not_spill_them() {
+	// The other half of the test above: four stores for every function would be
+	// harmless-looking noise, and it would make a parameter's own home slot
+	// indistinguishable from the area a `va_list` walks.
+	text, errs := generated('int f(int a, int b) { return a + b; }\n')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert !text.contains('  movq %r9, 40(%rbp)')
+}
+
+fn test_va_start_points_past_the_named_parameters() {
+	// [MS x64] `va_start` puts the address of the first *variadic* argument in the
+	// `va_list`. With one named integer parameter that is the second home slot, at
+	// 24(%rbp) — measured against gcc, whose `leaq 24(%rbp), %rax` is the same value.
+	//
+	// The one-slot-low version of this was a real defect and the arithmetic of it is
+	// worth stating: pointing at `va_start_offset` itself re-reads the argument that
+	// `va_start(ap, n)` had already named, and every later read is one slot late. A
+	// probe asking for six integers answered `1 9 17 25 33 41` instead of
+	// `1 2 3 4 5 6` — eight bytes of drift per step, because the walk was moving
+	// through addresses rather than values.
+	mut globals := parsed_globals('int f(int n, ...) { return 0; }\n')
+	mut g := AsmGen{}
+	g.assign_lvar_offsets(mut globals)
+	assert globals[0].va_start_offset == 24, 'got ${globals[0].va_start_offset}'
+
+	text, errs := generated('int f(int n, ...) { __builtin_va_list ap;' +
+		' __builtin_va_start(ap, n); return 0; }\n')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert text.contains('  lea 24(%rbp), %r10')
+}
+
+fn test_va_arg_advances_the_va_list_object_and_not_the_slot_it_points_at() {
+	// The distinction is the whole of this node kind. The read dereferences the
+	// pointer the `va_list` holds; the advance writes through the *address of the
+	// object*. Doing both through one register writes the advance over an argument
+	// slot, so the next read sees the previous advance as its own value — the same
+	// `11 19 27 35 43 51` as above, from a different mistake.
+	text, errs := generated('int f(int n, ...) { __builtin_va_list ap;' +
+		' __builtin_va_start(ap, n); return __builtin_va_arg(ap, int); }\n')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	// `%r11` holds `&ap` and `%rax` walks; the advance is through `%r11`.
+	assert text.contains('  mov %rax, %r11')
+	assert text.contains('  addq $8, (%r11)')
+	assert !text.contains('  addq $8, (%r10)')
+}
+
+fn test_va_arg_takes_its_stride_from_the_type_it_was_asked_for() {
+	// The three strides, measured against gcc and tcc, which agree on all of them:
+	// anything up to eight bytes is in the slot; nine to sixteen is two slots; wider
+	// is passed by reference and so occupies one slot holding an address.
+	scalar, errs := generated('int f(int n, ...) { __builtin_va_list ap;' +
+		' __builtin_va_start(ap, n); return __builtin_va_arg(ap, int); }\n')
+	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
+	assert scalar.contains('  addq $8, (%r11)')
+
+	// Two eightbytes. `long long` is the type that is eight bytes here — `long` is four,
+	// measured — so `struct { long long a; long long b; }` is the sixteen-byte struct and
+	// `struct { long a; long b; }` is only eight, which is one slot and no stride at all.
+	pair, pair_errs := generated('struct S16 { long long a; long long b; };\nint f(int n, ...) {' +
+		' __builtin_va_list ap; __builtin_va_start(ap, n);' +
+		' struct S16 s = __builtin_va_arg(ap, struct S16); return (int)s.a; }\n')
+	assert pair_errs.len == 0, 'unexpected diagnostics: ${pair_errs}'
+	assert pair.contains('  addq $16, (%r11)')
+
+	// Wider than two eightbytes: [MS x64 2.2.5] passes anything larger by reference, so
+	// the slot holds an address, it is dereferenced, and the stride is one slot.
+	wide, wide_errs := generated('struct S32 { long long a, b, c, d; };\nint f(int n, ...) {' +
+		' __builtin_va_list ap; __builtin_va_start(ap, n);' +
+		' struct S32 s = __builtin_va_arg(ap, struct S32); return (int)s.a; }\n')
+	assert wide_errs.len == 0, 'unexpected diagnostics: ${wide_errs}'
+	assert wide.contains('  mov (%rax), %rax')
+	assert wide.contains('  addq $8, (%r11)')
+}
+
+fn test_va_start_reached_as_an_expression_is_reported() {
+	// A correct `va_start(ap, n);` is a statement, and the parser leaves that
+	// distinction to this stage. Reaching `.va_start_` here therefore means it was
+	// used as a value, where it would have to invent one.
+	mut globals := parsed_globals('int f(int n, ...) { __builtin_va_list ap;' +
+		' int x = __builtin_va_start(ap, n); return x; }\n')
+	mut g := AsmGen{}
+	_, errs := g.gen(mut globals)
+	assert errs.len > 0, 'using va_start as a value should be reported'
+	assert errs[0].contains('va_start is a statement')
 }
 
 fn test_a_variadic_call_mirrors_its_floating_point_arguments_into_the_position_they_occupy() {

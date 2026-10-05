@@ -43,21 +43,46 @@ pub const shadow_space = 32
 // numbers and they mean different things in the same six lines.
 pub const incoming_base = 16 + shadow_space
 
-// va_area_size is the size of the frame slot a variadic function builds its `va_list` in.
+// va_list is `char *`, eight bytes: a pointer, not the psABI's 24-byte
+// `gp_offset`/`fp_offset`/`overflow_arg_area`/`reg_save_area` struct.
 //
-//	 0..8    the `va_list`: the address of the tag
-//	 8..32   the tag: gp_offset, fp_offset, overflow_arg_area, reg_save_area
-//	32..    the register save area: gp_max integer slots, then fp_max SSE slots of 16
+// **The 24-byte struct is wrong for this target, and this file asserted it for
+// the whole of phase 2.** The size was measured and is right; the *shape* was
+// assumed from the psABI. Measured, by reading the `va_list` a callee built and
+// walking it slot by slot:
 //
-// `va_list` is eight bytes on this target, measured: mingw gcc and tcc both report
-// `sizeof(va_list) == 8`, and it is a *pointer* rather than the psABI's 24-byte
-// `gp_offset`/`fp_offset`/`overflow`/`reg_save` struct. That is what makes a callee's
-// `va_list` passable to the C library's `vprintf`; with the struct there, a library that
-// reads eight bytes reads `gp_offset` and `fp_offset` as a pointer instead.
+//	$ tcc -o t.exe walk.c && ./t.exe
+//	before va_list bytes: 01 00 00 00 00 00 00 00 02 ... 03 ... 04 ...
+//	                        ^ the argument values themselves
 //
-// Derived from the constants above rather than written down, so it cannot drift from them.
-pub const va_area_size = 8 + 24 + gp_max * 8 + fp_max * 16
+// Those are the values of the variadic arguments, not four header words. mingw
+// gcc 15.2 produces the same bytes, and both compilers read the same arguments
+// out of them.
+//
+// The mechanism is the Microsoft one, and it is three instructions rather than a
+// structure:
+//
+//	- the callee spills `%rcx`, `%rdx`, `%r8`, `%r9` to the home slots at
+//	  16/24/32/40(`%rbp`) — which is where `incoming_base - 32` already is, so
+//	  the register area and the caller's stack area are **contiguous**;
+//	- `va_start(ap, last)` sets `ap` to the first slot past the named parameters;
+//	- `va_arg(ap, T)` reads `T` at `*ap` and adds 8 to `ap`.
+//
+// There is no tag, no `gp_offset`, and no separate register save area. A variadic
+// callee never reads `%xmm` through `va_list` at all, because the caller mirrors
+// every floating-point argument into a general register — see `gen_funcall`.
+pub const va_slot = 8
 
-// xmm_slot is the width an SSE register is saved and restored at in the register save area,
-// and therefore the step `fp_offset` takes per consumed floating-point argument.
-pub const xmm_slot = 16
+// va_start_offset is where a variadic function's arguments begin, and it is the
+// first thing `va_start` puts in the `va_list`.
+//
+// It is `incoming_base - shadow_space`, which is 16: the return address and the
+// saved `%rbp` are above it, and the four home slots are below it. Measured from
+// gcc for `int vsum(int n, ...)`, whose one named parameter is in `%ecx`:
+//
+//	leaq	24(%rbp), %rax    # ap = &home[1]
+//
+// and the home slots themselves are written by the same four stores a normal
+// parameter spill needs, because a variadic function spills all four argument
+// registers whether it has that many named parameters or not.
+pub const va_start_offset = incoming_base - shadow_space

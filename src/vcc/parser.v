@@ -2,7 +2,6 @@ module vcc
 
 import ast
 
-
 // The declaration half of the parser.
 //
 // It is chibicc's `parse.c` restricted to declarations: declspec, declarators,
@@ -28,7 +27,7 @@ import ast
 struct VarScope {
 mut:
 	name string
-	obj &ast.Obj = unsafe { nil }
+	obj  &ast.Obj = unsafe { nil }
 	// type_def is an option, not a bare pointer. Returning a bare nil pointer from a
 	// `?&T` function yields `some(nil)` rather than `none` in this V build — measured
 	// with a two-line probe, where `f(s) == none` printed false — and `some(nil)`
@@ -38,7 +37,7 @@ mut:
 	type_def ?&ast.Type = none
 	// enum_ty is non-nil when the name is an enumeration constant, and is the
 	// enum the constant belongs to. `enum_val` is only then meaningful.
-	enum_ty &ast.Type = unsafe { nil }
+	enum_ty  &ast.Type = unsafe { nil }
 	enum_val i64
 }
 
@@ -55,11 +54,11 @@ mut:
 struct VarAttr {
 mut:
 	is_typedef bool
-	is_static bool
-	is_extern bool
-	is_inline bool
-	is_tls    bool
-	align     int
+	is_static  bool
+	is_extern  bool
+	is_inline  bool
+	is_tls     bool
+	align      int
 }
 
 // Initializer is one node of the initializer tree. An initializer nests because an
@@ -100,7 +99,7 @@ mut:
 pub struct ParseResult {
 pub mut:
 	globals []&ast.Obj
-	errors []string
+	errors  []string
 }
 
 // Parser holds the state of one parse.
@@ -116,13 +115,13 @@ pub mut:
 	// path names the file the tokens came from, for diagnostics.
 	path string
 	// scopes is a stack; the last entry is the innermost block.
-	scopes []Scope
+	scopes  []Scope
 	globals []&ast.Obj
 	locals  []&ast.Obj
 	// builtin_alloca is the object the VLA translation refers to. It is declared by
 	// the parser rather than by any C source.
 	builtin_alloca &ast.Obj = unsafe { nil }
-	errors []string
+	errors         []string
 	// quiet suppresses diagnostics while the parser speculates — looking ahead to
 	// decide whether a declaration is a function, for instance. Speculation must
 	// not report, or every lookahead would double every error.
@@ -137,11 +136,11 @@ pub mut:
 	// brk_label and cont_label are the labels `break` and `continue` jump to. They
 	// are resolved while parsing because a one-pass backend cannot invent them later,
 	// and a `break` outside any loop is an error rather than a label to nowhere.
-	brk_label string
+	brk_label  string
 	cont_label string
 	// gotos and labels collect the two halves of a goto so that a forward reference
 	// can be resolved once the whole body has been read.
-	gotos []&ast.Node
+	gotos  []&ast.Node
 	labels []&ast.Node
 	// packs are the `#pragma pack` events the preprocessor saw, in order.
 	packs []PackEvent
@@ -153,10 +152,10 @@ pub mut:
 // layout code needs; see `Parser.pack_at`.
 pub fn parse_tokens(toks []ast.Token, path string, packs []PackEvent) ParseResult {
 	mut p := Parser{
-		toks:   toks
-		path:   path
-		packs:  packs
-		scopes: [
+		toks:    toks
+		path:    path
+		packs:   packs
+		scopes:  [
 			Scope{
 				vars: map[string]&VarScope{}
 				tags: map[string]&ast.Type{}
@@ -169,9 +168,9 @@ pub fn parse_tokens(toks []ast.Token, path string, packs []PackEvent) ParseResul
 	p.translation_unit()
 	p.scan_globals()
 	return ParseResult{
-		globals:         p.globals
-		errors:          p.errors
-		}
+		globals: p.globals
+		errors:  p.errors
+	}
 }
 
 // --- token access ---
@@ -321,7 +320,7 @@ fn (mut p Parser) leave_scope() {
 
 // push_scope binds a name in the current block.
 fn (mut p Parser) push_scope(name string) &VarScope {
-	sc := &VarScope{name: name}
+	sc := &VarScope{ name: name }
 	p.scopes[p.scopes.len - 1].vars[name] = sc
 	return sc
 }
@@ -649,8 +648,8 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 				} else {
 					a.is_tls = true
 				}
-				if a.is_typedef && (int(a.is_static) + int(a.is_extern)
-					+ int(a.is_inline) + int(a.is_tls)) > 1 {
+				if a.is_typedef && (int(a.is_static) + int(a.is_extern) +
+					int(a.is_inline) + int(a.is_tls)) > 1 {
 					p.error_at(tok, 'typedef may not be used together with static, extern, inline, __thread or _Thread_local')
 				}
 			} else {
@@ -675,6 +674,19 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 				ty = p.typename()
 				p.expect(')')
 			}
+			continue
+		}
+
+		// [C11 7.16] `va_list` is `char *` on this target — measured, not assumed:
+		// mingw gcc and tcc both report `sizeof(va_list) == 8`, and `src/ast/abi.v`
+		// records what the eight bytes are. It is the type every `<stdarg.h>` here
+		// reduces to, so it is a type specifier rather than a typedef registered per
+		// translation unit: a program that includes no header and spells the builtin
+		// directly gets the same type.
+		if tok.text == '__builtin_va_list' {
+			p.pos++
+			ty = ty_va_list()
+			counter++
 			continue
 		}
 
@@ -767,7 +779,8 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 			// `long long` is a distinct type from `long` on this target: 8 bytes
 			// against 4. Collapsing the two would mis-size every `long long` in
 			// V's generated C and every 64-bit constant.
-			ts_long + ts_long, ts_long + ts_long + ts_int, ts_signed + ts_long + ts_long, ts_signed + ts_long + ts_long + ts_int {
+			ts_long + ts_long, ts_long + ts_long + ts_int, ts_signed + ts_long + ts_long,
+			ts_signed + ts_long + ts_long + ts_int {
 				ty_llong
 			}
 			ts_unsigned + ts_long, ts_unsigned + ts_long + ts_int { ty_ulong }
@@ -844,6 +857,10 @@ const type_specifier_keywords = [
 	'__thread'
 	'_Atomic'
 	'__extension__'
+	// `__builtin_va_list` is the whole of the type system this target's `<stdarg.h>`
+	// has: `typedef __builtin_va_list va_list;`. It has to answer `is_typename` or the
+	// typedef never parses, and `declspec` turns it into a pointer to char.
+	'__builtin_va_list',
 ]
 
 // --- declarators ---
@@ -870,8 +887,8 @@ mut:
 	ptrs int
 	// nested is a declarator inside parentheses, as in `(*fp)`.
 	nested ?&Decl
-	name string
-	line int
+	name   string
+	line   int
 	// suffixes are the `(` and `[` groups that follow, in source order.
 	suffixes []Suffix
 }
@@ -1133,7 +1150,6 @@ fn (mut p Parser) parse_func_params() &ast.Type {
 	ft.is_variadic = variadic
 	return ft
 }
-
 
 // --- enum ---
 
@@ -1608,14 +1624,13 @@ fn (mut p Parser) function(basety &ast.Type, attr VarAttr) {
 	}
 	fn_obj.params = p.locals
 
-	if fn_obj.ty.is_variadic {
-		// `va_list` is eight bytes on this target — a pointer, not the psABI's 24-byte
-		// struct — so the local holds three things: the pointer, the tag it points at, and
-		// the register save area the tag points at. `ast.va_area_size` is the authority on
-		// the number, and it is derived from `gp_max` and `fp_max` so it cannot drift from
-		// the register counts.
-		fn_obj.va_area = p.new_lvar('__va_area__', array_of(ty_char, ast.va_area_size), line)
-	}
+	// A variadic function needs no local for its `va_list`. On this target the
+	// `va_list` is a pointer the caller keeps, and the slots it walks are the home
+	// area and the caller's stack area — both already addressed from `%rbp`. The
+	// previous phase of this project gave it a 128-byte `__va_area__` holding the
+	// psABI's 24-byte tag plus a register save area, which is the System V mechanism
+	// and is not what this target uses; `src/ast/abi.v` records the measurement.
+
 	// The high-water mark of the stack a VLA has claimed, which the backend restores on
 	// every return and every `goto` out of a block.
 	fn_obj.alloca_bottom = p.new_lvar('__alloca_size__', pointer_to(ty_char), line)
@@ -2191,11 +2206,11 @@ fn decode_utf8_one(data []u8, pos int) (int, int) {
 	}
 	mut n := 0
 	mut c := 0
-	if b&0xe0 == 0xc0 {
+	if b & 0xe0 == 0xc0 {
 		n, c = 1, b & 0x1f
-	} else if b&0xf0 == 0xe0 {
+	} else if b & 0xf0 == 0xe0 {
 		n, c = 2, b & 0x0f
-	} else if b&0xf8 == 0xf0 {
+	} else if b & 0xf8 == 0xf0 {
 		n, c = 3, b & 0x07
 	} else {
 		return 0xfffd, 1
@@ -2205,7 +2220,7 @@ fn decode_utf8_one(data []u8, pos int) (int, int) {
 	}
 	for i in 1 .. n + 1 {
 		nb := int(data[pos + i])
-		if nb&0xc0 != 0x80 {
+		if nb & 0xc0 != 0x80 {
 			return 0xfffd, 1
 		}
 		c = (c << 6) | (nb & 0x3f)
@@ -3013,6 +3028,23 @@ fn (mut p Parser) primary() &ast.Node {
 		p.expect(')')
 		return p.new_num(i64(int(is_const_expr(mut node))), tok)
 	}
+	// `va_start` and `va_end` are statements in practice: C spells them as macros, and
+	// every use of them is one. Emitting them as expressions that leave a value on the
+	// stack is not a technicality — the generator counts the values a function leaves
+	// behind and reports `left N values on the stack` when it is not zero, so a
+	// perfectly correct `va_start(ap, n);` would fail to compile for being in the
+	// wrong syntactic form.
+	//
+	// `p.tok_at(1)` is the `(`: without it these are identifiers, and `identifier;`
+	// is an ordinary expression statement, which is exactly what must not happen here.
+	if p.at('__builtin_va_start') || p.at('__builtin_va_end') {
+		if p.tok_at(1).text == '(' {
+			return p.builtin_va_stmt()
+		}
+	}
+	if va := p.builtin_va(tok) {
+		return va
+	}
 
 	if tok.text == '_Generic' {
 		p.pos++
@@ -3086,6 +3118,118 @@ fn (mut p Parser) primary() &ast.Node {
 
 	p.error_at(tok, 'expected an expression')
 	return p.unsupported_expression()
+}
+
+// builtin_va_stmt parses `va_start(ap, last)` and `va_end(ap)` as the statements they
+// are, and returns a `.null_stmt` so the generator emits nothing for them.
+//
+// They are statements rather than expressions because of what they *do*, not how they
+// are spelled. `va_start` is a single store and `va_end` is nothing at all: neither
+// produces a value, and this generator's contract is that every expression leaves
+// exactly one eight-byte slot on the stack, checked at the end of every function.
+// Implementing them as expressions made `vcc` refuse to compile a correct
+// `va_start(ap, n);` with `function "sum6" left 1 values on the stack` — a diagnostic
+// that names the stack rather than the construct that caused it.
+//
+// `va_arg` and `va_copy` are the opposite: `va_arg` is an rvalue and `va_copy` is
+// conventionally written as a statement but is an assignment, so both stay in
+// `builtin_va`.
+fn (mut p Parser) builtin_va_stmt() &ast.Node {
+	tok := p.tok()
+	p.pos += 2 // the builtin and the `(`
+
+	if tok.text == '__builtin_va_start' {
+		ap := p.assign()
+		p.expect(',')
+		// [C11 7.16.1.4] `va_start(ap, last)`, and the second operand is unused: it
+		// exists so a macro can name the parameter before `...`. Where the walk begins
+		// follows from the *named* parameters, which is a frame-layout question, and
+		// `assign_lvar_offsets` answers it. The operand is still parsed, because leaving
+		// its tokens unconsumed puts the *next* statement's diagnostic in the wrong place.
+		p.assign()
+		p.expect(')')
+		return p.new_unary(.va_start_, ap, tok)
+	}
+
+	// `va_end`
+	p.assign()
+	p.expect(')')
+	return p.new_node(.null_stmt, tok)
+}
+
+// builtin_va parses the four `__builtin_va_*` operations and returns none for anything
+// else.
+//
+// The `<stdarg.h>` on this target is the whole of the mechanism:
+//
+//	typedef __builtin_va_list va_list;
+//	#define va_start __builtin_va_start
+//	#define va_arg   __builtin_va_arg
+//	#define va_copy  __builtin_va_copy
+//	#define va_end   __builtin_va_end
+//
+// so these four names are what a vcc program actually has to support to read a
+// variadic argument at all, and `<stdarg.h>` is on the include path V passes.
+//
+// They are parsed here rather than in the backend because `va_arg`'s second operand
+// is a *type*, which is known at compile time, so the whole offset computation folds
+// to a constant stride. A backend would need an instruction-encoder-visible special
+// case for a construct that has no run-time shape of its own.
+//
+// All four go in together. A variadic callee that reads integers correctly and
+// floats wrongly is much harder to diagnose than one that refuses, because the
+// failure is a wrong number rather than an error.
+fn (mut p Parser) builtin_va(tok ast.Token) ?&ast.Node {
+	match tok.text {
+		'__builtin_va_start' {
+			// As a *value* rather than a statement. Nothing in C needs this and the
+			// generator would reject it for leaving a value behind, so it is reported
+			// rather than quietly accepted — see `builtin_va_stmt`, which is the path
+			// every real use takes.
+			p.pos += 2
+			p.assign()
+			p.expect(',')
+			p.assign()
+			p.expect(')')
+			p.error_at(tok, 'va_start is a statement and has no value')
+			return p.new_node(.null_expr, tok)
+		}
+		'__builtin_va_arg' {
+			p.pos += 2
+			ap := p.assign()
+			p.expect(',')
+			ty := p.typename()
+			p.expect(')')
+			mut node := p.new_binary(.va_arg_, ap, p.new_size_t(0, tok), tok)
+			node.ty = ty
+			return node
+		}
+		'__builtin_va_copy' {
+			p.pos += 2
+			dst := p.assign()
+			p.expect(',')
+			src := p.assign()
+			p.expect(')')
+			// The two are pointers, so this is an ordinary eight-byte copy. That is the
+			// whole of `va_copy` on this target, and it is why the tag is not a struct:
+			// see `src/ast/abi.v`.
+			mut node := p.new_binary(.assign, dst, src, tok)
+			add_type(mut node)
+			return node
+		}
+		'__builtin_va_end' {
+			p.pos += 2
+			p.assign()
+			p.expect(')')
+			// [C11 7.16.1.4] `va_end` makes the `va_list` unusable and says nothing about
+			// how. On this target there is nothing to release: the pointer is the caller's
+			// own storage and the register area is the frame. So this is a `void` no-op.
+			return p.new_node(.null_expr, tok)
+		}
+		else {
+			return none
+		}
+	}
 }
 
 // unsupported_expression consumes tokens up to something that can end an expression

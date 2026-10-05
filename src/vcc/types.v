@@ -33,24 +33,24 @@ const max_int32 = 0x7fffffff
 
 // ty_void has size 1 rather than 0 because GNU C defines `sizeof(void)` as 1, and
 // both tcc and the headers rely on that for `void *` arithmetic.
-pub const ty_void = &ast.Type{kind: .basic, basic: .void_, size: 1, align: 1}
-pub const ty_bool = &ast.Type{kind: .basic, basic: .bool_, size: 1, align: 1}
-pub const ty_char = &ast.Type{kind: .basic, basic: .char_, size: 1, align: 1}
-pub const ty_short = &ast.Type{kind: .basic, basic: .short_, size: 2, align: 2}
-pub const ty_int = &ast.Type{kind: .basic, basic: .int_, size: 4, align: 4}
+pub const ty_void = &ast.Type{ kind: .basic, basic: .void_, size: 1, align: 1 }
+pub const ty_bool = &ast.Type{ kind: .basic, basic: .bool_, size: 1, align: 1 }
+pub const ty_char = &ast.Type{ kind: .basic, basic: .char_, size: 1, align: 1 }
+pub const ty_short = &ast.Type{ kind: .basic, basic: .short_, size: 2, align: 2 }
+pub const ty_int = &ast.Type{ kind: .basic, basic: .int_, size: 4, align: 4 }
 // ty_long is 4 bytes here, so `long` and `int` are the same width. They are still
 // different types: `long long` is 8 bytes and the usual arithmetic conversions
 // distinguish them.
-pub const ty_long = &ast.Type{kind: .basic, basic: .long_, size: 4, align: 4}
-pub const ty_llong = &ast.Type{kind: .basic, basic: .llong_, size: 8, align: 8}
-pub const ty_uchar = &ast.Type{kind: .basic, basic: .char_, size: 1, align: 1, is_unsigned: true}
-pub const ty_ushort = &ast.Type{kind: .basic, basic: .short_, size: 2, align: 2, is_unsigned: true}
-pub const ty_uint = &ast.Type{kind: .basic, basic: .int_, size: 4, align: 4, is_unsigned: true}
-pub const ty_ulong = &ast.Type{kind: .basic, basic: .long_, size: 4, align: 4, is_unsigned: true}
-pub const ty_ullong = &ast.Type{kind: .basic, basic: .llong_, size: 8, align: 8, is_unsigned: true}
-pub const ty_float = &ast.Type{kind: .basic, basic: .float_, size: 4, align: 4}
-pub const ty_double = &ast.Type{kind: .basic, basic: .double_, size: 8, align: 8}
-pub const ty_ldouble = &ast.Type{kind: .basic, basic: .ldouble_, size: 8, align: 8}
+pub const ty_long = &ast.Type{ kind: .basic, basic: .long_, size: 4, align: 4 }
+pub const ty_llong = &ast.Type{ kind: .basic, basic: .llong_, size: 8, align: 8 }
+pub const ty_uchar = &ast.Type{ kind: .basic, basic: .char_, size: 1, align: 1, is_unsigned: true }
+pub const ty_ushort = &ast.Type{ kind: .basic, basic: .short_, size: 2, align: 2, is_unsigned: true }
+pub const ty_uint = &ast.Type{ kind: .basic, basic: .int_, size: 4, align: 4, is_unsigned: true }
+pub const ty_ulong = &ast.Type{ kind: .basic, basic: .long_, size: 4, align: 4, is_unsigned: true }
+pub const ty_ullong = &ast.Type{ kind: .basic, basic: .llong_, size: 8, align: 8, is_unsigned: true }
+pub const ty_float = &ast.Type{ kind: .basic, basic: .float_, size: 4, align: 4 }
+pub const ty_double = &ast.Type{ kind: .basic, basic: .double_, size: 8, align: 8 }
+pub const ty_ldouble = &ast.Type{ kind: .basic, basic: .ldouble_, size: 8, align: 8 }
 
 // ty_size_t is what `sizeof` and `_Alignof` evaluate to.
 //
@@ -59,6 +59,20 @@ pub const ty_ldouble = &ast.Type{kind: .basic, basic: .ldouble_, size: 8, align:
 // then be a 32-bit value that silently truncates for any type over 4GB, and every
 // comparison against a real `size_t` would be a comparison of two different widths.
 pub const ty_size_t = ty_ullong
+
+// ty_va_list is what `__builtin_va_list` names, and it is `char *`.
+//
+// Measured on this host rather than assumed: both compilers report
+// `sizeof(va_list) == 8`, and dumping the bytes a callee's `va_list` points at
+// shows the argument values themselves, not a `gp_offset`/`fp_offset` header. So
+// it is a pointer, and `src/ast/abi.v` records the layout it walks.
+//
+// `char *` rather than `void *` because the pointer is dereferenced by `va_arg`
+// through a cast to whatever type is asked for, and `char` is what makes the
+// arithmetic on it well defined in C.
+pub fn ty_va_list() &ast.Type {
+	return pointer_to(ty_char)
+}
 
 // align_to rounds n up to a multiple of align. It divides rather than masking, so
 // it works for negative n as well, which align_down depends on.
@@ -350,7 +364,39 @@ pub fn add_type(mut node &ast.Node) {
 			node.lhs = new_cast(node.lhs, ty)
 			node.ty = ty
 		}
-		.assign { node.ty = node.lhs.ty }
+		.assign {
+			// [C11 6.5.16.1] The value stored is "the value of the right operand
+			// converted to the type of the assignment expression", which is the type of
+			// the left operand. The conversion is not optional: it is the difference
+			// between storing a number and storing the *representation* the left type
+			// calls for.
+			//
+			// Without it, `double s = 0;` stored an integer zero through an SSE store.
+			// `gen_num` left the value in `%rax` — an integer register — and `store`
+			// wrote `%xmm0`, which nothing had loaded, so the slot kept whatever the
+			// frame held. Measured: a program doing only
+			//
+			//	double s = 0; s += 1.5; s += 2.5; s += 3.0; return s;
+			//
+			// returned 3.7756e+150 under vcc and 7 under both gcc and tcc. It is
+			// pre-existing rather than anything to do with variadic arguments: the same
+			// program has no `va_arg` in it, and it fails identically on a build of the
+			// commit before this work.
+			//
+			// `usual_arith_conv` is the wrong thing to reach for here: it picks *one*
+			// common type for both operands, and the left operand's type is fixed — it
+			// is the object being stored into. So the right operand is cast to the left
+			// operand's type, not to a common type.
+			mut target := node.lhs
+			add_type(mut target)
+			mut rhs := node.rhs
+			add_type(mut rhs)
+			if target.ty != unsafe { nil } && rhs.ty != unsafe { nil }
+				&& !is_compatible(target.ty, rhs.ty) {
+				node.rhs = new_cast(node.rhs, target.ty)
+			}
+			node.ty = target.ty
+		}
 		.eq, .ne, .lt, .le {
 			usual_arith_conv(mut node)
 			node.ty = ty_int

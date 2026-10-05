@@ -73,8 +73,7 @@ fn find_kind(node &ast.Node, kind ast.NodeKind) &ast.Node {
 	if node.kind == kind {
 		return node
 	}
-	for child in [node.lhs, node.rhs, node.cond, node.then, node.els, node.init,
-		node.inc] {
+	for child in [node.lhs, node.rhs, node.cond, node.then, node.els, node.init, node.inc] {
 		found := find_kind(child, kind)
 		if found != unsafe { nil } {
 			return found
@@ -226,7 +225,11 @@ fn test_a_compound_assignment_takes_the_address_of_its_target_once() {
 	// `x` is not read twice: with a side-effecting target that would be a real bug.
 	assert assign.kind == .comma
 	assert assign.lhs.kind == .assign
-	assert assign.lhs.rhs.kind == .addr
+	// The address is taken of the *target*, and `add_type` has wrapped it in a
+	// conversion — `x` is an `int` and so is the temporary holding its address, but
+	// the two are distinct types, so the cast is not elided. `uncast` is what says
+	// "the cast is not the shape", which is the whole claim this test makes.
+	assert uncast(assign.lhs.rhs).kind == .addr
 	assert assign.rhs.kind == .assign
 	assert uncast(assign.rhs.lhs).kind == .deref
 	assert uncast(assign.rhs.rhs).kind == .add
@@ -240,7 +243,7 @@ fn test_a_compound_assignment_to_a_member_takes_the_address_of_the_struct() {
 	stmt := find_stmt(f.body, .expr_stmt)
 	assign := uncast(stmt.lhs)
 	assert assign.kind == .comma
-	assert assign.lhs.rhs.kind == .addr
+	assert uncast(assign.lhs.rhs).kind == .addr
 	// The store goes through a member of the temporary, which is what makes
 	// `&s.a` — not an lvalue C can assign to — unnecessary.
 	store := assign.rhs

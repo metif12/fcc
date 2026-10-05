@@ -267,7 +267,9 @@ depends on the stack layout rather than on the language — `string` on the `\a`
 `unicode` on stringizing a non-ASCII token, which is a consequence of this phase's own
 decision to let 0x80-and-above bytes be identifier characters.
 
-**`va_list` is 8 bytes on this target, and that is a decision, not a bug.** Measured on
+**`va_list` is 8 bytes on this target, and that is a decision, not a bug.** *(Superseded
+by `docs/VARARGS.md`: the size was measured correctly but the *shape* was assumed from
+the psABI and is wrong. It is a pointer, not the 24-byte tag below.)* Measured on
 this host, both compilers agree:
 
 ```
@@ -332,7 +334,10 @@ header is the one vcc will be asked to satisfy, because `-I` points at tcc's inc
 directory, and it delegates the entire mechanism to the compiler.
 
 **What is therefore missing is five builtins**, and it is one piece of work rather than
-five:
+five. *(Done — see `docs/VARARGS.md`. The four operations are as described below, but
+the description of the tag they manipulate is superseded: there is no tag, and
+`__builtin_va_copy` is an eight-byte pointer copy rather than a 24-byte structure
+copy.)*
 
 - `__builtin_va_start(ap, last)` — assign the address of the tag, which is already what
   `__va_area__` holds.
@@ -343,6 +348,7 @@ five:
   overflow area once its register class is exhausted. Both the read and the update of `ap`
   happen in place, because `ap` is memory the caller keeps.
 - `__builtin_va_copy(dst, src)` — a 24-byte structure copy, since the tag is that size.
+  *(It is an eight-byte pointer copy. `va_list` is a pointer.)*
 - `__builtin_va_end(ap)` — nothing.
 
 chibicc implements these in the front end for the same reason: the type argument is a
@@ -350,7 +356,8 @@ compile-time type, so the whole offset computation is constant folding, and doin
 backend would mean an instruction-encoder-visible special case for a construct that has
 none at run time. **Partial implementations are worse than none** — a variadic callee that
 reads integers correctly and floats wrongly is far harder to diagnose than one that refuses
-— so all four go in together.
+— so all four go in together. *(Done, and all four went in together. The stride is the
+one thing the type decides, and it is 8, 16 or 8 depending on `sizeof(T)`.)*
 
 **Until they exist, no end-to-end `vprintf` test can be written, and the layout in
 `051812b` is a belief rather than a verified thing.** The differential test to write once
@@ -481,7 +488,72 @@ argument: gcc puts it in `%xmm0` *and* at `32(%rsp)`.
 | `macro:333` | `#include M13 >`, where the spelling comes from a macro |
 | `vla:22` | `sizeof(char[2][n])` — a VLA in a type name, whose size is a run-time value |
 
-### The Windows x64 calling convention, measured
+#**The variadic mechanism is now built, and the layout it was built on was wrong.**
+`docs/VARARGS.md` has the measurements and the five defects found on the way; the
+short version:
+
+- `va_list` is **a pointer**, and the 24-byte `gp_offset`/`fp_offset`/`overflow_arg_area`/
+  `reg_save_area` tag that `051812b` put in `src/ast/abi.v` is the psABI's, not this
+  target's. Reading the bytes a callee's `va_list` addresses shows the *argument
+  values*, in gcc's output as much as tcc's.
+- So there is no tag and no register save area. The callee spills its four argument
+  registers to the caller's own home area, which makes the register arguments and the
+  caller's stack arguments **contiguous**, and `va_arg` is "read at `*ap`, add the
+  stride". The four `__builtin_va_*` operations are what `<stdarg.h>` on this target
+  reduces to in full.
+- The `__va_area__` local and `va_area_size` are gone, replaced by
+  `va_start_offset` and `va_slot` in `src/ast/abi.v`.
+
+**Verified by running**, five programs in `tests/endtoend/`: `varargs.c`,
+`va_start_offset.c`, `va_arg_stride.c`, `sum6.c` and `assign_convert.c`, each compiled by
+vcc and by tcc and compared on stdout *and* exit code, identical. `varargs.c` includes a
+case that hands a vcc-built `va_list` to mingw's `vprintf`, which is the part that cannot
+be checked by two vcc-compiled functions agreeing with each other.
+
+`tools/probe/probe.v` is the runner. It reads `tests/endtoend/` from the tree, so adding a
+program there is enough to have it compared, and it needs two environment variables:
+
+- `VCC_V_ROOT` — the V tree to take `thirdparty/tcc/tcc.exe` from.
+- `VCC_PROBE_DIR` — a scratch directory for the `.s` and `.exe` it leaves behind. It is
+  required rather than defaulted, because `join_path('', 'cmp')` is the *relative* `cmp`
+  and the runner would quietly create it wherever it was started from — which is how the
+  first version of this tool came to leave its output under `tools/probe/`.
+
+**Three defects were pre-existing and had nothing to do with varargs.** Two were in the
+way of the above and are fixed; one was measured, found not to be a defect, and left
+alone. `docs/VARARGS.md` has the evidence for all three.
+
+- `add_type` never converted an assignment's right-hand side to the left-hand side's
+  type, so `double s = 0;` stored an integer zero through an SSE store. A program with
+  no `va_arg` in it at all returned `3.7756e+150` where gcc and tcc return 7. Fixed.
+- `push_args` counted one eight-byte slot per stack argument, so an aggregate pushed whole
+  by `push_struct` left the caller's own cleanup short by `size / 8 - 1` and the program
+  was refused with `function "main" left 3 values on the stack` — a diagnostic naming the
+  stack rather than the argument that unbalanced it. Fixed, with a test that was seen to
+  fail first.
+- `get_common_type` returns `pointer_to(nil)` for an aggregate, and looked like it was
+  making every struct 8 bytes wide. It was not: `long` is four bytes on this target, so
+  the probe that "proved" it was written with `long` where it needed `long long`. The
+  branch is also unreachable — all three callers are arithmetic contexts, which cannot
+  receive a struct operand — and a version that returned the aggregate measured
+  byte-identical. Reverted; an unreachable branch with a latent bug is a smaller problem
+  than a reachable one.
+
+**Two more pre-existing defects were found and are recorded, not fixed**, because both
+belong to the aggregate ABI rather than to the variadic walk. `docs/VARARGS.md` gives the
+reproductions. The larger one: an aggregate over two eightbytes is passed *by reference*
+on this target — gcc emits `leaq -64(%rbp), %rax; movq %rax, %rdx` — and vcc's `va_arg`
+reads the slot that way, but vcc's *caller* copies the bytes inline instead of passing the
+address. The two halves agree with each other and with neither the platform nor the
+oracle, which is why such a call access-violates where tcc answers correctly. Fixing it
+means changing the convention on both sides for every struct-passing call in the compiler.
+
+**The suite is unchanged at 5 of 18**, the same five and the same eight wrong answers.
+`function.c` now fails to compile on `undefined variable "__va_area__"` rather than
+computing a wrong answer, which is the divergence already recorded as unfixable: the
+suite declares its own 24-byte `va_list` and reads the local this work removed.
+
+## The Windows x64 calling convention, measured
 
 Recorded from mingw gcc 15.2 `-S -O0` on this host, because the implementation should be
 written against these instructions rather than against a recollection of the ABI. Three

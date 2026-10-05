@@ -156,6 +156,17 @@ pub enum Keyword {
 	extension_
 	restrict_
 	va_arg
+	// The other three variadic builtins. They are separate keywords rather than one
+	// `va_other` because each takes a different argument shape: `va_start` and
+	// `va_copy` take two operands, `va_end` takes one, and folding them together
+	// would mean the parser branches on arity anyway while losing the name it reports.
+	va_start
+	va_copy
+	va_end
+	// va_list is a *type* name, not a function: `typedef __builtin_va_list va_list;`
+	// is the entire body of the `stdarg.h` this target ships, so it has to resolve in
+	// `declspec` rather than as an expression.
+	va_list_
 	offsetof
 	types_compatible_p
 	constant_p
@@ -219,6 +230,10 @@ pub fn keyword_name(k Keyword) string {
 		.extension_ { '__extension__' }
 		.restrict_ { 'restrict' }
 		.va_arg { '__builtin_va_arg' }
+		.va_start { '__builtin_va_start' }
+		.va_copy { '__builtin_va_copy' }
+		.va_end { '__builtin_va_end' }
+		.va_list_ { '__builtin_va_list' }
 		.offsetof { '__builtin_offsetof' }
 		.types_compatible_p { '__builtin_types_compatible_p' }
 		.constant_p { '__builtin_constant_p' }
@@ -280,6 +295,10 @@ pub fn keyword_from_spelling(text string) ?Keyword {
 		'__restrict' { Keyword.restrict_ }
 		'__restrict__' { Keyword.restrict_ }
 		'__builtin_va_arg' { Keyword.va_arg }
+		'__builtin_va_start' { Keyword.va_start }
+		'__builtin_va_copy' { Keyword.va_copy }
+		'__builtin_va_end' { Keyword.va_end }
+		'__builtin_va_list' { Keyword.va_list_ }
 		'__builtin_offsetof' { Keyword.offsetof }
 		'__builtin_types_compatible_p' { Keyword.types_compatible_p }
 		'__builtin_constant_p' { Keyword.constant_p }

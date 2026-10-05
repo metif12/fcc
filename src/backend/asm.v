@@ -14,18 +14,19 @@ import src.ast
 // What is here is the part that can be checked on its own: a data section is
 // either right or wrong, and `as` and the linker will say which.
 
-// gp_max, fp_max, shadow_space, incoming_base, va_area_size and xmm_slot live in
-// src/ast/abi.v, and are used from there: the front end needs `va_area_size` too and cannot
-// import the backend without a cycle. Reading them rather than declaring them here is what
-// makes the register counts the backend emits for and the frame sizes the front end lays
-// out the same numbers by construction. These aliases exist so the rest of the backend reads
-// as one name rather than `ast.` everywhere.
+// gp_max, fp_max, shadow_space, incoming_base, va_start_offset and va_slot live
+// in src/ast/abi.v, and are used from there: the front end needs the frame
+// arithmetic too and cannot import the backend without a cycle. Reading them
+// rather than declaring them here is what makes the register counts the backend
+// emits for and the frame sizes the front end lays out the same numbers by
+// construction. These aliases exist so the rest of the backend reads as one name
+// rather than `ast.` everywhere.
 const gp_max = ast.gp_max
 const fp_max = ast.fp_max
 const shadow_space = ast.shadow_space
 const incoming_base = ast.incoming_base
-const xmm_slot = ast.xmm_slot
-const va_area_size = ast.va_area_size
+const va_slot = ast.va_slot
+const va_start_offset = ast.va_start_offset
 
 // arg_regs and its byte and word forms are the argument registers in Windows x64 order:
 // `%rcx`, `%rdx`, `%r8`, `%r9`. A parameter is spilled from whichever form matches its
@@ -43,7 +44,6 @@ const arg_regs32 = ['%ecx', '%edx', '%r8d', '%r9d']
 // without a fixed-point instruction. `printf("%d", 1.0)` depends on it. There is no
 // counterpart for a non-variadic call, and gcc emits none for `dadd(1.0, 2.0)`.
 const arg_regs_mirror = arg_regs
-
 
 // TextEmitter writes AT&T assembly lines.
 //
@@ -83,8 +83,8 @@ pub fn (e &TextEmitter) text_of() string {
 // AsmGen is the code generator.
 pub struct AsmGen {
 pub mut:
-	out     []string
-	emit    &TextEmitter = &TextEmitter{}
+	out  []string
+	emit &TextEmitter = &TextEmitter{}
 	// depth counts 8-byte slots pushed since the frame was set up. It is what
 	// tells the epilogue how far to move the stack pointer, so it is maintained
 	// by every push and pop rather than recomputed.
@@ -237,7 +237,11 @@ fn (mut g AsmGen) gen_addr(node &ast.Node) {
 		}
 		else {}
 	}
-	g.errors << 'not an lvalue line ' + node.tok.line.disp_line.str() + ' kind ' + int(node.kind).str() + ' ty ' + (if node.ty == unsafe { nil } { -1 } else { int(node.ty.kind) }).str()
+	g.errors << 'not an lvalue line ' + node.tok.line.disp_line.str() + ' kind ' + int(node.kind).str() + ' ty ' + (if node.ty == unsafe { nil } {
+		-1
+	} else {
+		int(node.ty.kind)
+	}).str()
 }
 
 // load turns the address in %rax into the value it points at.
@@ -420,70 +424,80 @@ fn (mut g AsmGen) cast(from &ast.Type, to &ast.Type) {
 // A `none` is not a missing conversion but a decision: two types that need no
 // instruction between them.
 const cast_table = [
-	['none', 'none', 'none', 'i32i64', 'i32u8', 'i32u16', 'none', 'i32i64', 'i32f32', 'i32f64', 'i32f80']
-	['i32i8', 'none', 'none', 'i32i64', 'i32u8', 'i32u16', 'none', 'i32i64', 'i32f32', 'i32f64', 'i32f80']
-	['i32i8', 'i32i16', 'none', 'i32i64', 'i32u8', 'i32u16', 'none', 'i32i64', 'i32f32', 'i32f64', 'i32f80']
-	['i32i8', 'i32i16', 'none', 'none', 'i32u8', 'i32u16', 'none', 'none', 'i64f32', 'i64f64', 'i64f80']
+	['none', 'none', 'none', 'i32i64', 'i32u8', 'i32u16', 'none', 'i32i64', 'i32f32', 'i32f64',
+		'i32f80']
+	['i32i8', 'none', 'none', 'i32i64', 'i32u8', 'i32u16', 'none', 'i32i64', 'i32f32', 'i32f64',
+		'i32f80']
+	['i32i8', 'i32i16', 'none', 'i32i64', 'i32u8', 'i32u16', 'none', 'i32i64', 'i32f32', 'i32f64',
+		'i32f80']
+	['i32i8', 'i32i16', 'none', 'none', 'i32u8', 'i32u16', 'none', 'none', 'i64f32', 'i64f64',
+		'i64f80']
 	['i32i8', 'none', 'none', 'i32i64', 'none', 'none', 'none', 'i32i64', 'i32f32', 'i32f64', 'i32f80']
-	['i32i8', 'i32i16', 'none', 'i32i64', 'i32u8', 'none', 'none', 'i32i64', 'i32f32', 'i32f64', 'i32f80']
-	['i32i8', 'i32i16', 'none', 'u32i64', 'i32u8', 'i32u16', 'none', 'u32i64', 'u32f32', 'u32f64', 'u32f80']
-	['i32i8', 'i32i16', 'none', 'none', 'i32u8', 'i32u16', 'none', 'none', 'u64f32', 'u64f64', 'u64f80']
-	['f32i8', 'f32i16', 'f32i32', 'f32i64', 'f32u8', 'f32u16', 'f32u32', 'f32u64', 'none', 'f32f64', 'f32f80']
-	['f64i8', 'f64i16', 'f64i32', 'f64i64', 'f64u8', 'f64u16', 'f64u32', 'f64u64', 'f64f32', 'none', 'f64f80']
-	['f80i8', 'f80i16', 'f80i32', 'f80i64', 'f80u8', 'f80u16', 'f80i32', 'f80i64', 'f80f32', 'f80f64', 'none']
+	['i32i8', 'i32i16', 'none', 'i32i64', 'i32u8', 'none', 'none', 'i32i64', 'i32f32', 'i32f64',
+		'i32f80']
+	['i32i8', 'i32i16', 'none', 'u32i64', 'i32u8', 'i32u16', 'none', 'u32i64', 'u32f32', 'u32f64',
+		'u32f80']
+	['i32i8', 'i32i16', 'none', 'none', 'i32u8', 'i32u16', 'none', 'none', 'u64f32', 'u64f64',
+		'u64f80']
+	['f32i8', 'f32i16', 'f32i32', 'f32i64', 'f32u8', 'f32u16', 'f32u32', 'f32u64', 'none', 'f32f64',
+		'f32f80']
+	['f64i8', 'f64i16', 'f64i32', 'f64i64', 'f64u8', 'f64u16', 'f64u32', 'f64u64', 'f64f32', 'none',
+		'f64f80']
+	['f80i8', 'f80i16', 'f80i32', 'f80i64', 'f80u8', 'f80u16', 'f80i32', 'f80i64', 'f80f32', 'f80f64',
+		'none'],
 ]
 
 const cast_instructions = {
-	'i32i8':   'movsbl %al, %eax'
-	'i32u8':   'movzbl %al, %eax'
-	'i32i16':  'movswl %ax, %eax'
-	'i32u16':  'movzwl %ax, %eax'
-	'i32f32':  'cvtsi2ssl %eax, %xmm0'
-	'i32i64':  'movsxd %eax, %rax'
-	'i32f64':  'cvtsi2sdl %eax, %xmm0'
-	'i32f80':  'mov %eax, -4(%rsp); fildl -4(%rsp)'
-	'u32i64':  'mov %eax, %eax'
-	'u32f32':  'mov %eax, %eax; cvtsi2ssq %rax, %xmm0'
-	'u32f64':  'mov %eax, %eax; cvtsi2sdq %rax, %xmm0'
-	'u32f80':  'mov %eax, %eax; mov %rax, -8(%rsp); fildll -8(%rsp)'
-	'i64f32':  'cvtsi2ssq %rax, %xmm0'
-	'i64f64':  'cvtsi2sdq %rax, %xmm0'
-	'i64f80':  'movq %rax, -8(%rsp); fildll -8(%rsp)'
+	'i32i8':  'movsbl %al, %eax'
+	'i32u8':  'movzbl %al, %eax'
+	'i32i16': 'movswl %ax, %eax'
+	'i32u16': 'movzwl %ax, %eax'
+	'i32f32': 'cvtsi2ssl %eax, %xmm0'
+	'i32i64': 'movsxd %eax, %rax'
+	'i32f64': 'cvtsi2sdl %eax, %xmm0'
+	'i32f80': 'mov %eax, -4(%rsp); fildl -4(%rsp)'
+	'u32i64': 'mov %eax, %eax'
+	'u32f32': 'mov %eax, %eax; cvtsi2ssq %rax, %xmm0'
+	'u32f64': 'mov %eax, %eax; cvtsi2sdq %rax, %xmm0'
+	'u32f80': 'mov %eax, %eax; mov %rax, -8(%rsp); fildll -8(%rsp)'
+	'i64f32': 'cvtsi2ssq %rax, %xmm0'
+	'i64f64': 'cvtsi2sdq %rax, %xmm0'
+	'i64f80': 'movq %rax, -8(%rsp); fildll -8(%rsp)'
 	// An unsigned 64-bit value above 2^63 is not representable by `cvtsi2sd`,
 	// which reads the input as signed. The fix is to halve it and double the
 	// result, which is exact for every value that is not representable, and the
 	// branch is what keeps it exact for the ones that are.
-	'u64f32':  'cvtsi2ssq %rax, %xmm0'
-	'u64f64':  'test %rax,%rax; js 1f; pxor %xmm0,%xmm0; cvtsi2sd %rax,%xmm0; jmp 2f; 1: mov %rax,%rdi; and $1,%eax; pxor %xmm0,%xmm0; shr %rdi; or %rax,%rdi; cvtsi2sd %rdi,%xmm0; addsd %xmm0,%xmm0; 2:'
-	'u64f80':  'mov %rax, -8(%rsp); fildq -8(%rsp); test %rax, %rax; jns 1f; mov $1602224128, %eax; mov %eax, -4(%rsp); fadds -4(%rsp); 1:'
-	'f32i8':   'cvttss2sil %xmm0, %eax; movsbl %al, %eax'
-	'f32u8':   'cvttss2sil %xmm0, %eax; movzbl %al, %eax'
-	'f32i16':  'cvttss2sil %xmm0, %eax; movswl %ax, %eax'
-	'f32u16':  'cvttss2sil %xmm0, %eax; movzwl %ax, %eax'
-	'f32i32':  'cvttss2sil %xmm0, %eax'
-	'f32i64':  'cvttss2siq %xmm0, %rax'
-	'f32u32':  'cvttss2siq %xmm0, %rax'
-	'f32u64':  'cvttss2siq %xmm0, %rax'
-	'f32f64':  'cvtss2sd %xmm0, %xmm0'
-	'f32f80':  'movss %xmm0, -4(%rsp); flds -4(%rsp)'
-	'f64i8':   'cvttsd2sil %xmm0, %eax; movsbl %al, %eax'
-	'f64u8':   'cvttsd2sil %xmm0, %eax; movzbl %al, %eax'
-	'f64i16':  'cvttsd2sil %xmm0, %eax; movswl %ax, %eax'
-	'f64u16':  'cvttsd2sil %xmm0, %eax; movzwl %ax, %eax'
-	'f64i32':  'cvttsd2sil %xmm0, %eax'
-	'f64i64':  'cvttsd2siq %xmm0, %rax'
-	'f64u32':  'cvttsd2siq %xmm0, %rax'
-	'f64u64':  'cvttsd2siq %xmm0, %rax'
-	'f64f32':  'cvtsd2ss %xmm0, %xmm0'
-	'f64f80':  'movsd %xmm0, -8(%rsp); fldl -8(%rsp)'
-	'f80i8':   'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistps -24(%rsp); fldcw -10(%rsp); movsbl -24(%rsp), %eax'
-	'f80u8':   'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistps -24(%rsp); fldcw -10(%rsp); movzbl -24(%rsp), %eax'
-	'f80i16':  'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistps -24(%rsp); fldcw -10(%rsp); movswl -24(%rsp), %eax'
-	'f80u16':  'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistpl -24(%rsp); fldcw -10(%rsp); movzwl -24(%rsp), %eax'
-	'f80i32':  'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistpl -24(%rsp); fldcw -10(%rsp); mov -24(%rsp), %eax'
-	'f80i64':  'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistpq -24(%rsp); fldcw -10(%rsp); mov -24(%rsp), %rax'
-	'f80f32':  'fstps -8(%rsp); movss -8(%rsp), %xmm0'
-	'f80f64':  'fstpl -8(%rsp); movsd -8(%rsp), %xmm0'
+	'u64f32': 'cvtsi2ssq %rax, %xmm0'
+	'u64f64': 'test %rax,%rax; js 1f; pxor %xmm0,%xmm0; cvtsi2sd %rax,%xmm0; jmp 2f; 1: mov %rax,%rdi; and $1,%eax; pxor %xmm0,%xmm0; shr %rdi; or %rax,%rdi; cvtsi2sd %rdi,%xmm0; addsd %xmm0,%xmm0; 2:'
+	'u64f80': 'mov %rax, -8(%rsp); fildq -8(%rsp); test %rax, %rax; jns 1f; mov $1602224128, %eax; mov %eax, -4(%rsp); fadds -4(%rsp); 1:'
+	'f32i8':  'cvttss2sil %xmm0, %eax; movsbl %al, %eax'
+	'f32u8':  'cvttss2sil %xmm0, %eax; movzbl %al, %eax'
+	'f32i16': 'cvttss2sil %xmm0, %eax; movswl %ax, %eax'
+	'f32u16': 'cvttss2sil %xmm0, %eax; movzwl %ax, %eax'
+	'f32i32': 'cvttss2sil %xmm0, %eax'
+	'f32i64': 'cvttss2siq %xmm0, %rax'
+	'f32u32': 'cvttss2siq %xmm0, %rax'
+	'f32u64': 'cvttss2siq %xmm0, %rax'
+	'f32f64': 'cvtss2sd %xmm0, %xmm0'
+	'f32f80': 'movss %xmm0, -4(%rsp); flds -4(%rsp)'
+	'f64i8':  'cvttsd2sil %xmm0, %eax; movsbl %al, %eax'
+	'f64u8':  'cvttsd2sil %xmm0, %eax; movzbl %al, %eax'
+	'f64i16': 'cvttsd2sil %xmm0, %eax; movswl %ax, %eax'
+	'f64u16': 'cvttsd2sil %xmm0, %eax; movzwl %ax, %eax'
+	'f64i32': 'cvttsd2sil %xmm0, %eax'
+	'f64i64': 'cvttsd2siq %xmm0, %rax'
+	'f64u32': 'cvttsd2siq %xmm0, %rax'
+	'f64u64': 'cvttsd2siq %xmm0, %rax'
+	'f64f32': 'cvtsd2ss %xmm0, %xmm0'
+	'f64f80': 'movsd %xmm0, -8(%rsp); fldl -8(%rsp)'
+	'f80i8':  'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistps -24(%rsp); fldcw -10(%rsp); movsbl -24(%rsp), %eax'
+	'f80u8':  'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistps -24(%rsp); fldcw -10(%rsp); movzbl -24(%rsp), %eax'
+	'f80i16': 'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistps -24(%rsp); fldcw -10(%rsp); movswl -24(%rsp), %eax'
+	'f80u16': 'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistpl -24(%rsp); fldcw -10(%rsp); movzwl -24(%rsp), %eax'
+	'f80i32': 'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistpl -24(%rsp); fldcw -10(%rsp); mov -24(%rsp), %eax'
+	'f80i64': 'fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; mov %ax, -12(%rsp); fldcw -12(%rsp); fistpq -24(%rsp); fldcw -10(%rsp); mov -24(%rsp), %rax'
+	'f80f32': 'fstps -8(%rsp); movss -8(%rsp), %xmm0'
+	'f80f64': 'fstpl -8(%rsp); movsd -8(%rsp), %xmm0'
 }
 
 // cast_insn looks a conversion up, or returns none when the two types need no
@@ -528,6 +542,26 @@ pub fn has_flonum(ty &ast.Type, lo int, hi int, offset int) bool {
 		&& (ty.basic == .float_ || ty.basic == .double_))
 }
 
+// va_slots_for is how many eight-byte slots one argument occupies in the run a
+// `va_list` walks.
+//
+// Everything is one slot: pointers, integers, floating-point values, `long double`,
+// and an aggregate that is passed by reference. Only an aggregate of more than eight
+// and up to sixteen bytes takes two, because [MS x64 2.2.5] passes that one by value
+// in a pair of registers and the run has to hold both halves.
+//
+// A floating-point argument also takes an SSE register, which this does not count.
+// That is not an omission: a variadic callee never reads `%xmm` through its
+// `va_list`, because the caller mirrored the value into a general register. gcc's
+// `movsd %xmm0, 32(%rsp)` for a *stack* floating-point argument is loading through
+// `%xmm0` as scratch, not publishing the value there.
+fn va_slots_for(ty &ast.Type) int {
+	if (ty.kind == .struct_ || ty.kind == .union_) && ty.size > 8 && ty.size <= 16 {
+		return 2
+	}
+	return 1
+}
+
 // assign_lvar_offsets gives every local a frame offset.
 //
 // A negative offset is a local: the frame grows downwards from %rbp. Parameters
@@ -553,6 +587,22 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 		mut bottom := 0
 		mut gp := 0
 		mut fp := 0
+		// va_slots counts the eight-byte argument slots the *named* parameters occupy,
+		// which is what tells `va_start` where the variadic ones begin. It is counted
+		// here, inside the loop that already decides each parameter's register class,
+		// because a second implementation of the calling convention is a second thing
+		// that can disagree with the first.
+		//
+		// The rule is the Microsoft one and it is simpler than it looks: on a call to a
+		// variadic function *every* argument takes a slot in the general-register run,
+		// including a floating-point one, because the callee reads only that copy. A
+		// floating-point argument also takes an SSE register, but that is not part of
+		// the run `va_list` walks, so it does not move the count.
+		//
+		// Measured against gcc for `void two_dbl(int a, double b, double c, ...)`, where
+		// `ap - &a` came out 24: `a`, `b` and `c` take three slots and the variadic
+		// arguments start at the fourth.
+		mut va_slots := 0
 
 		for pi in 0 .. fun.params.len {
 			ty := fun.params[pi].ty
@@ -596,11 +646,35 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			}
 
 			if passed {
+				if fun.ty.is_variadic {
+					va_slots += va_slots_for(ty)
+				}
 				continue
 			}
 			top = align_to(top, 8)
 			fun.params[pi].offset = top
 			top += ty.size
+		}
+
+		// A parameter that arrived on the stack is not in the register run at all: it
+		// lives above `incoming_base`, past every home slot. So it does not advance
+		// `va_slots`, and the count above is exactly "the named parameters that
+		// arrived in registers" — which is what `leaq 24(%rbp)` is for a function with
+		// one.
+		if fun.ty.is_variadic {
+			// `va_start_offset` is measured from `%rbp` to the first variadic slot. The
+			// home area is *below* `incoming_base`, so a function with `va_slots` named
+			// register parameters starts its walk at `va_start_offset + va_slots` slots —
+			// which for the common `f(int n, ...)` is slot 1, at 24(%rbp).
+			//
+			// This was `va_slots` *below* the base at first, i.e. pointing into the
+			// parameter's own home slot. That is one slot early, so the first `va_arg`
+			// re-read the argument the `n` in `va_start(ap, n)` had already named, and
+			// every later one was shifted. Measured: a probe reading six integers got
+			// `1 9 17 25 33 41` instead of `1 2 3 4 5 6`, each eight bytes of drift per
+			// step — which is what a walk that starts one slot too low and then steps
+			// eight bytes looks like, because it is walking addresses rather than values.
+			fun.va_start_offset = va_start_offset + va_slots * va_slot
 		}
 
 		for li in 0 .. fun.locals.len {
@@ -706,7 +780,11 @@ fn (mut g AsmGen) emit_bytes(obj &ast.Obj) {
 	for pos < obj.ty.size {
 		if rel_i < rels.len && rels[rel_i].offset == pos {
 			rel := rels[rel_i]
-			g.line('  .quad ${g.sym_operand(rel.label)}${if rel.addend < 0 { rel.addend.str() } else { '+' + rel.addend.str() }}')
+			g.line('  .quad ${g.sym_operand(rel.label)}${if rel.addend < 0 {
+				rel.addend.str()
+			} else {
+				'+' + rel.addend.str()
+			}}')
 			rel_i++
 			pos += 8
 			continue
@@ -715,8 +793,6 @@ fn (mut g AsmGen) emit_bytes(obj &ast.Obj) {
 		pos++
 	}
 }
-
-
 
 // b2i is bool to int, for counting how many registers a parameter consumes.
 fn b2i(b bool) int {
