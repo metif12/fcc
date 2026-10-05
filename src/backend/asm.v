@@ -547,11 +547,17 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 		if !fun.is_function {
 			continue
 		}
-		// The first incoming stack parameter is above the return address *and* above the
-		// caller's home area: 8 bytes of return address plus the 32 bytes of shadow space
-		// the caller must reserve. [MS x64 2.2.5] — the psABI's 16 is the same number
-		// without the home area.
-		mut top := 8 + shadow_space
+		// The first incoming stack parameter is at 48: the 8 bytes the `call` pushed as
+		// the return address, the 8 bytes the prologue pushed to save the caller's `%rbp`,
+		// and the callee's 32-byte home area above them.
+		//
+		// This was 40 for the whole of phase 2, and it was read off gcc's own output by
+		// mistaking a *spilled register parameter* at `40(%rbp)` for the first stack
+		// parameter — the callee also writes `%r9d` there, so the offset appears twice in
+		// the listing and means two different things. Reading it as one thing put every
+		// stack argument eight bytes low, which is why `f5(1,2,3,4,5)` returned 3: it
+		// read the slot holding the third *register* argument.
+		mut top := 16 + shadow_space
 		mut bottom := 0
 		mut gp := 0
 		mut fp := 0

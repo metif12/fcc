@@ -161,11 +161,16 @@ fn test_a_parameter_that_arrives_on_the_stack_is_placed_above_the_return_address
 	f := globals[0]
 	// Four integer arguments arrive in registers on this target, so the first four are
 	// placed in the frame like any other local and end up below the frame pointer. The
-	// fifth is the first on the stack, at +40: the psABI's +16 is the same number without
-	// the home area, and getting it wrong puts every stack parameter under the caller.
+	// fifth is the first on the stack, at 48: the return address the `call` pushed, the
+	// `%rbp` the prologue pushed, and the 32-byte home area above them.
+	//
+	// 40 is *not* it, and the mistake is easy to make because gcc's listing contains both
+	// numbers and they mean different things: 40 is where a callee spills its fourth
+	// register parameter, and 48 is where it finds the first stack parameter. Reading the
+	// listing as if the offset appeared once put every stack argument eight bytes low.
 	assert f.params[3].offset < 0
-	assert f.params[4].offset == 8 + shadow_space
-	assert f.params[5].offset == 16 + shadow_space
+	assert f.params[4].offset == 16 + shadow_space
+	assert f.params[5].offset == 24 + shadow_space
 	// The frame itself is a multiple of 16 so that a call from inside it keeps the
 	// stack aligned.
 	assert f.stack_size % 16 == 0
