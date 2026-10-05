@@ -267,6 +267,53 @@ depends on the stack layout rather than on the language — `string` on the `\a`
 `unicode` on stringizing a non-ASCII token, which is a consequence of this phase's own
 decision to let 0x80-and-above bytes be identifier characters.
 
+**`va_list` is 8 bytes on this target, and that is a decision, not a bug.** Measured on
+this host, both compilers agree:
+
+```
+$ gcc -o v.exe v.c && ./v.exe     # printf("sizeof(va_list)=%d", sizeof(va_list))
+sizeof(va_list)=8
+$ tcc -o t.exe v.c && ./t.exe
+sizeof(va_list)=8
+```
+
+Not 24. It is not the SysV struct of `gp_offset`, `fp_offset`, `overflow_arg_area` and
+`reg_save_area`; it is a **pointer** — the Microsoft form — and the register save area it
+points at is a separate 176-byte object.
+
+`emit_va_area` writes the 24-byte SysV struct, because that is what chibicc writes and
+what `test.h` in the suite declares:
+
+```c
+typedef struct { unsigned int gp_offset; unsigned int fp_offset;
+                 void *overflow_arg_area; void *reg_save_area; } __va_elem;
+typedef __va_elem va_list[1];
+```
+
+so `function.c`'s `*ap = *(__va_elem *)__va_area__;` copies 24 bytes into what it then
+passes to `vsprintf` — a function from `common`, built by gcc, whose `va_list` is 8 bytes.
+**The suite's own test is internally inconsistent on this target**, and it only ever worked
+because chibicc's `va_list` and chibicc's `vsprintf` agreed with each other.
+
+That leaves two defensible answers, and no measurement picks between them:
+
+- **Follow this host's ABI.** `__va_area__` becomes an 8-byte pointer to a 176-byte save
+  area. Then a vcc-compiled program can pass a `va_list` to the real `vprintf`, and can
+  read one that `vprintf` filled in. That is the property that matters for replacing tcc,
+  and it is what "a C compiler on Windows" means. `function.c` would then fail, because it
+  is testing chibicc's private convention rather than the platform's.
+- **Follow the suite.** Keep the 24-byte struct. Then `function.c` passes and the suite
+  goes further, at the cost of never interoperating with anything outside it — including
+  V's own generated C, which includes the real `<stdarg.h>`.
+
+The first is right for the project's premise and the second is right for the acceptance
+criterion, and doing the first makes one of the eighteen files permanently unfixable.
+Recorded here rather than decided alone.
+
+**Separately, `function.c`'s failing assertion is now a `va_list` test at line ~100**,
+where before the call-sequence fix it failed at line 4 with a garbage pointer. So this is
+where the variadic *callee* side first became reachable.
+
 **Still failing to compile, four of eighteen:**
 
 | file | what it needs |
