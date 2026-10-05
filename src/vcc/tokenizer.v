@@ -746,6 +746,12 @@ fn decode_escape(src string, i int) (u8, int) {
 		return `\\`, i + 1
 	}
 	c := src[i + 1]
+	// Every escape served *only* by this table fails, while every escape with an explicit
+	// arm in the `match` below works: `\a`, `\b`, `\v`, `\f` and `\e` all come out as the
+	// letter itself. So the lookup never matches, whatever the key type is — V rejects both
+	// `c` and `c.str()` here, `expected string, not u8`, which says the map is keyed by
+	// string and the argument is the one that does not fit. The table is only *read* by
+	// this function and by the preprocessor's `#` decoding, so both go through it.
 	if v := simple_escapes[c.str()] {
 		return u8(v), i + 2
 	}
