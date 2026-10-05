@@ -1311,10 +1311,13 @@ fn (mut g AsmGen) emit_va_area(fun &ast.Obj) {
 
 	g.line('  movl $${gp * 8}, ${off}(%rbp)')
 	g.line('  movl $${fp_base + fp * 8}, ${off + 4}(%rbp)')
-	// The overflow area starts above the parameters the caller pushed, which is the
-	// return address plus the caller's home area into this frame.
+	// The overflow area starts at the first incoming *stack* argument, which is the same
+	// address `assign_lvar_offsets` uses: the return address, the saved `%rbp`, and the
+	// caller's home area. It was `8 + shadow_space` — the same eight-bytes-low mistake,
+	// in the second place it appeared, which is why `va_arg` on a call that spilled would
+	// have read a register parameter's slot.
 	g.line('  movq %rbp, ${off + 8}(%rbp)')
-	g.line('  addq $${8 + shadow_space}, ${off + 8}(%rbp)')
+	g.line('  addq $${16 + shadow_space}, ${off + 8}(%rbp)')
 	g.line('  movq %rbp, ${off + 16}(%rbp)')
 	g.line('  addq $${off + 24}, ${off + 16}(%rbp)')
 
