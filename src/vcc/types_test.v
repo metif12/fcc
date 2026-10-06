@@ -22,8 +22,8 @@ fn first_token(src string) ast.Token {
 fn bin_node(kind ast.NodeKind, lhs_ty &ast.Type, rhs_ty &ast.Type) &ast.Node {
 	return &ast.Node{
 		kind: kind
-		lhs:  &ast.Node{kind: .num, tok: first_token('1'), ty: lhs_ty}
-		rhs:  &ast.Node{kind: .num, tok: first_token('1'), ty: rhs_ty}
+		lhs:  &ast.Node{ kind: .num, tok: first_token('1'), ty: lhs_ty }
+		rhs:  &ast.Node{ kind: .num, tok: first_token('1'), ty: rhs_ty }
 	}
 }
 
@@ -197,11 +197,11 @@ fn test_copy_type_records_its_origin() {
 }
 
 fn test_add_type_gives_a_literal_the_type_its_spelling_implies() {
-	mut plain := &ast.Node{kind: .num, tok: first_token('1')}
+	mut plain := &ast.Node{ kind: .num, tok: first_token('1') }
 	add_type(mut plain)
 	assert plain.ty == ty_int
 
-	mut longs := &ast.Node{kind: .num, tok: first_token('1LL')}
+	mut longs := &ast.Node{ kind: .num, tok: first_token('1LL') }
 	add_type(mut longs)
 	assert longs.ty == ty_llong
 }
@@ -228,7 +228,7 @@ fn test_add_type_makes_a_pointer_arithmetic_result_a_pointer() {
 }
 
 fn test_add_type_leaves_a_set_type_alone() {
-	mut node := &ast.Node{kind: .num, tok: first_token('1')}
+	mut node := &ast.Node{ kind: .num, tok: first_token('1') }
 	node.ty = ty_uint
 	add_type(mut node)
 	// Idempotence matters: the parser calls this whenever it needs a type.
@@ -298,15 +298,46 @@ fn test_string_literal_type_counts_the_terminator() {
 	assert ty.size == 4
 }
 
-fn test_wide_string_literal_is_four_bytes_per_element() {
+fn test_a_wide_string_literal_is_two_bytes_per_element() {
+	// Two, not four. `wchar_t` is two bytes on this target and chibicc's System V table
+	// says four, so this is one of the two widths the project deliberately does not
+	// inherit from chibicc — the other is `long`. Measured: tcc and mingw gcc 15.2 both
+	// answer `sizeof(L"ab") == 6`.
 	tok := first_token('L"ab"')
 	ty := string_literal_type(&tok)
-	assert ty.base == ty_int
+	assert ty.base == ty_ushort
 	assert ty.array_len == 3
-	assert ty.size == 12
+	assert ty.size == 6
 }
 
-fn test_u8_prefixed_string_literal_is_a_byte() {
-	tok := first_token('u8"ab"')
-	assert string_element_type(&tok) == ty_char
+fn test_each_prefix_width_is_the_one_this_target_uses() {
+	// C11 6.4.4.4. tcc rejects `u"`, `U"` and `u8"` outright, so these are gcc's answer
+	// alone — but they are the standard's, and `U` being four here is the one wide
+	// width this target shares with Linux.
+	// Each is bound to a local because V will not take the address of a call's result,
+	// and `&` a token is what these functions take.
+	mut plain := first_token('"ab"')
+	mut u8s := first_token('u8"ab"')
+	mut wide := first_token('L"ab"')
+	mut c16 := first_token('u"ab"')
+	mut c32 := first_token('U"ab"')
+	assert string_element_type(&plain) == ty_char
+	assert string_element_type(&u8s) == ty_char
+	assert string_element_type(&wide) == ty_ushort
+	assert string_element_type(&c16) == ty_ushort
+	assert string_element_type(&c32) == ty_uint
+}
+
+fn test_a_prefixed_character_constant_is_not_an_int() {
+	// `L'a'` is a `wchar_t`, so two bytes here. It reached `numeric_type` looking like
+	// a token that does not start with a digit and was answered `int` — four bytes —
+	// because the guard for that case ran before anything looked at the prefix.
+	mut wide := first_token("L'a'")
+	assert numeric_type(&wide) == ty_ushort
+	assert ty_ushort.size == 2
+	assert ty_ushort.is_unsigned
+	// An unprefixed character constant is an `int` in every implementation, and that
+	// one must not change.
+	mut narrow := first_token("'a'")
+	assert numeric_type(&narrow) == ty_int
 }

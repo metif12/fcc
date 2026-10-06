@@ -461,6 +461,19 @@ pub fn add_type(mut node &ast.Node) {
 // unsuffixed decimal that does not fit an int becomes a long long, not a long,
 // because a long on this target is the same width as an int.
 pub fn numeric_type(tok &ast.Token) &ast.Type {
+	// A prefixed *character* constant is a `wchar_t`, `char16_t` or `char32_t` and
+	// nothing else, so its prefix answers the question outright. It has to be asked
+	// before the guard below, which would otherwise reject the token for not starting
+	// with a digit and hand back `int` — four bytes, where this target measures two for
+	// both `L` and `u`.
+	//
+	// Only a character constant reaches here with a prefix: a prefixed *string* is a
+	// `str_` token and is typed by `string_literal_type` instead. This is not a hot
+	// path, so one extra map-free comparison on every numeric literal is the cheap
+	// version of keeping the two apart.
+	if wide := wide_literal_type(tok) {
+		return wide
+	}
 	// A token whose spelling does not begin like a number is not one. This guard is
 	// there because a type derived from the wrong token is a wrong answer rather than
 	// an error: an enumeration constant's spelling is an identifier, and `NEG` contains
@@ -560,26 +573,72 @@ fn count_byte(s string, c u8) int {
 // terminating NUL.
 //
 // The element count is a count of code points, not of bytes: `str_data` holds UTF-8,
-// and `L"ab"` is three four-byte elements rather than one. Dividing the byte length by
+// and `L"ab"` is three two-byte elements rather than one. Dividing the byte length by
 // the element size would give 1 there, which is how this was wrong the first time.
 pub fn string_literal_type(tok &ast.Token) &ast.Type {
 	elem := string_element_type(tok)
 	return array_of(elem, code_point_count(tok.str_data) + 1)
 }
 
-// string_element_type returns the type one element of a string literal has, which
-// its prefix decides: `L` and `u` and `U` are four bytes, `u8` is one, and an
-// unprefixed literal is one.
+// string_element_type returns the type one element of a string literal has, which its
+// prefix decides.
+//
+// The widths are measured, not carried over from chibicc. chibicc is System V, where
+// `wchar_t` is four bytes; on this target it is two, and so is `char16_t`.
 pub fn string_element_type(tok &ast.Token) &ast.Type {
+	return wide_literal_type(tok) or { ty_char }
+}
+
+// wide_literal_type returns the type a prefixed literal's element has, or none for an
+// unprefixed one — which is `char`.
+//
+// Measured on this host for a three-character literal, tcc and mingw gcc 15.2
+// answering identically where tcc can answer at all:
+//
+//	 L"ab"   =  6   ->  2 bytes   wchar_t
+//	 u"ab"   =  6   ->  2 bytes   char16_t
+//	 U"ab"   = 12   ->  4 bytes   char32_t
+//	 u8"ab"  =  3   ->  1
+//	 "ab"    =  3   ->  1
+//	L'a'     =  2
+//	u'a'     =  2
+//	U'a'     =  4
+//
+// tcc rejects `u"` and `U"` outright and does not know `u8"` either, so those three are
+// gcc's answer alone. It is also what C11 6.4.4.4 says, and it agrees with `U` being
+// four here, which is the one width this target does *not* differ from Linux on.
+//
+// This was four bytes for every prefix, and the consequence was worse than a wrong
+// `sizeof`: the storage image was already written at the correct stride, because
+// `string_initializer` takes the element width from the *declared* array rather than
+// from the literal. So `wchar_t wa[] = L"ab"` emitted `61 00 62 00 00 00` and then
+// declared the object `int[4]`. Measured before the fix, `sizeof(L"ab")` was 12 and
+// after it is 6, with the bytes unchanged.
+//
+// `Lu` and `LU` are not in C11, but the tokenizer has always accepted them, and taking
+// their width from the second letter costs one `match` arm.
+pub fn wide_literal_type(tok &ast.Token) ?&ast.Type {
 	text := tok.text
-	if text.len > 1 && text[0] == `L` {
-		return ty_int
+	if text.len < 2 {
+		return none
 	}
-	if text.len > 2 && (text[0] == `u` || text[0] == `U`) && text[1] == `8` {
-		return ty_char
+	match text[0] {
+		`L` {
+			match text[1] {
+				`u` { return ty_ushort }
+				`U` { return ty_uint }
+				else { return ty_ushort }
+			}
+		}
+		`u` {
+			// `u8` is the one prefix that means *narrower*, and testing the second
+			// character is the whole difference between one byte and two.
+			if text[1] == `8` {
+				return ty_char
+			}
+			return ty_ushort
+		}
+		`U` { return ty_uint }
+		else { return none }
 	}
-	if text.len > 1 && (text[0] == `u` || text[0] == `U`) {
-		return ty_int
-	}
-	return ty_char
 }

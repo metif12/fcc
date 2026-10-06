@@ -601,13 +601,30 @@ fn test_a_string_initializer_leaves_the_rest_zero() {
 	assert bytes_of(obj) == '6162000000000000'
 }
 
-fn test_a_wide_string_initializer_uses_four_byte_elements() {
-	// `L"ab"` is three elements of four bytes: the bytes tcc stores are the code points
-	// little-endian, with the NUL last.
-	obj := global('int w[] = L"ab";\n')
-	assert obj.ty.array_len == 3
-	assert obj.ty.base.size == 4
-	assert bytes_of(obj) == '6100000062000000 00000000'
+fn test_a_wide_string_initializer_uses_the_declared_element_width() {
+	// `unsigned short`, which is what `wchar_t` is on this target: three two-byte
+	// elements — `a`, `b` and the NUL — so the bytes are `61 00 62 00 0000`.
+	//
+	// This used to be `int w[] = L"ab"`, which is not a construct either oracle accepts:
+	// gcc rejects it as `array of inappropriate type initialized from string constant`
+	// and tcc reads the literal as a pointer and warns. Asserting vcc's answer for it
+	// was asserting about a case nothing else has an opinion on.
+	r := parsed('unsigned short w[] = L"ab";\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].ty.array_len == 3
+	assert r.globals[0].ty.base.size == 2
+	assert bytes_of(r.globals[0]) == '610062000000'
+}
+
+fn test_a_narrow_literal_in_a_wider_array_takes_the_array_s_stride() {
+	// The element count comes from the literal; the stride comes from the array. Twelve
+	// bytes here, not six — and this is the case the previous line's `resized.ty.size`
+	// got wrong in the other direction.
+	r := parsed('unsigned int w[] = L"ab";\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].ty.array_len == 3
+	assert r.globals[0].ty.size == 12
+	assert bytes_of(r.globals[0]) == '6100000062000000 00000000'
 }
 
 fn test_a_float_initializer_is_written_as_its_encoding() {
@@ -804,13 +821,92 @@ fn test_one_terminator_is_written_for_the_whole_run() {
 }
 
 fn test_a_wide_piece_decides_the_width_of_the_whole_run() {
-	// 16, not 8: a wide element is four bytes in vcc, which is what chibicc's suite
-	// expects. tcc on this host answers 8 because `wchar_t` is two bytes on Windows.
-	// See the note on `string_literal_value`; the conflict is recorded in PLAN.md and is
-	// a Windows ABI decision, not a parser bug.
+	// 8, not 16. A run of literals is one array of the *first* piece's element type, and
+	// a wide element is two bytes on this target, so four characters is eight. This
+	// asserted 16 while chibicc's suite expected 16 — chibicc is System V, where
+	// `wchar_t` is four bytes. Measured: tcc and mingw gcc 15.2 both answer 8 here, and
+	// the project's own rule is to follow this host rather than chibicc, which is the
+	// same decision already made for `long` being four bytes.
 	r := parsed('int n = sizeof(L"ab" "c");')
 	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
-	assert r.globals[0].init_data[0] == 16, 'got ${r.globals[0].init_data[0]}'
+	assert r.globals[0].init_data[0] == 8, 'got ${r.globals[0].init_data[0]}'
+}
+
+fn test_a_wide_run_keeps_the_run_width_even_when_the_pieces_disagree() {
+	// [C11 6.4.5p5] a mismatched prefix in a run is undefined rather than an error, and
+	// both tcc and chibicc take the first piece's width and say nothing. So `L"ab" "cd"`
+	// is four wide elements, and asserting the *count* here is what keeps the count and
+	// the width from being checked independently — the width alone was right at one point
+	// with the count still wrong.
+	r := parsed('unsigned n = sizeof(L"ab" "cd");')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].init_data[0] == 10, 'got ${r.globals[0].init_data[0]}'
+}
+
+fn test_a_nested_array_is_an_array_of_rows_not_of_columns() {
+	// `int a[3][5]` is three rows of five, so the *inner* type is `int[5]` and the outer
+	// one has three of them. Building it the other way round — `array(array(int, 3), 5)` —
+	// gives the same total size and the same innermost stride, so a self-consistent
+	// program cannot see it; the row stride is what differs, and any pointer to the row
+	// type disagrees about where a row is.
+	r := parsed('int a[3][5];\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	a := r.globals[0].ty
+	assert a.kind == .array, 'got ${a.kind}'
+	assert a.array_len == 3, 'got ${a.array_len}'
+	assert a.base.kind == .array, 'the element should be the row type, got ${a.base.kind}'
+	assert a.base.array_len == 5, 'got ${a.base.array_len}'
+	assert a.base.base == ty_int
+	// Five rows would be the same total size, so the sizes are asserted to *not* be the
+	// evidence: the row's own width is what a pointer to it steps by.
+	assert a.base.size == 20, 'got ${a.base.size}'
+	assert a.size == 60
+}
+
+fn test_three_dimensions_apply_right_to_left() {
+	// The same rule one dimension further out. `b[2][3][4]` is 2 planes of 3 rows of 4,
+	// so `*b` is 48 bytes and `**b` is 16.
+	r := parsed('int b[2][3][4];\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	b := r.globals[0].ty
+	assert b.array_len == 2
+	assert b.base.array_len == 3
+	assert b.base.base.array_len == 4
+	assert b.base.size == 48, 'got ${b.base.size}'
+	assert b.base.base.size == 16, 'got ${b.base.base.size}'
+}
+
+fn test_a_variable_length_array_carries_its_row_s_size_as_a_runtime_value() {
+	// `int x[n + 1][n + 6]` — both extents are variable, so the row type is itself a VLA
+	// and the whole thing is `vla(vla(int, n + 6), n + 1)`. That is right, and it is why
+	// `vla_of`'s eight-byte placeholder is a trap: `x[i]` has to step by the *row's*
+	// run-time size, so each VLA in the chain has to have recorded its own size local.
+	// Without the inner one, `x[1][0]` advanced four bytes instead of a whole row.
+	//
+	// The size locals are built when the declaration is translated, so they are not
+	// present after parsing alone; what this checks is the shape, and that the parser
+	// built the chain in the right order — suffixes right to left, so the *row* is the
+	// `n + 6` and not the `n + 1`.
+	r := parsed('int f(int n) { int x[n + 1][n + 6]; return 0; }\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	f := r.globals[0]
+	mut x := &ast.Obj{}
+	for l in f.locals {
+		if l.name == 'x' {
+			x = l
+		}
+	}
+	assert x != unsafe { nil }, 'x is not one of the locals'
+	assert x.ty.kind == .vla, 'got ${x.ty.kind}'
+	assert x.ty.base != unsafe { nil }, 'the element type is missing'
+	assert x.ty.base.kind == .vla, 'got ${x.ty.base.kind}'
+	assert x.ty.base.base == ty_int, 'the row should be of int'
+	// The two extents are kept apart, because the outer one is what `sizeof` answers and
+	// the inner one is what a subscript steps by, and swapping them would leave both
+	// right in `sizeof` while every `x[i]` was a row off.
+	assert x.ty.vla_len != unsafe { nil }, 'the outer extent is missing'
+	assert x.ty.base.vla_len != unsafe { nil }, 'the row extent is missing'
+	assert x.ty.vla_len != x.ty.base.vla_len, 'the two extents are the same expression'
 }
 
 fn test_an_escape_is_decoded_by_the_same_rule_inside_a_run() {

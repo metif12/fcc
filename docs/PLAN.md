@@ -160,11 +160,25 @@ is the regression test and a table is not.
 | file | what it needs |
 |---|---|
 | `control:94` | `initializer element is not constant` — a constant-expression rule to widen |
-| `literal:94` | **a line splice is not applied outside a string literal** |
+| `literal:` | `'x80' => -128 expected but got 128` — a plain `char` is signed here |
 | `alignof:33` | `_Alignof` of an expression rather than of a type name |
-| `unicode:9` | `int π = 3;` — a UTF-8 identifier |
+| `unicode:9` | `sizeof(L'0') => 4 expected but got 2` — chibicc is System V; see below |
 | `union:13` | an anonymous struct member inside a `union` |
-| `vla:22` | `sizeof(char[2][n])` — a VLA in a type name, whose size is a run-time value |
+
+`literal:94` and `vla:22` were on this list and are now fixed; `literal` moved past line 94
+to the `'x80'` signedness question above. `vla` passes.
+
+**`unicode.c` now fails on the right answer.** It asserts `sizeof(L'0') == 4`, which is
+chibicc's System V `wchar_t`. This target's is two, and tcc, mingw gcc 15.2 and the
+project's own ABI rule all say two — the same decision already made for `long` being four
+bytes. The file was failing before the wide-literal work too, for other reasons; it now
+fails on its first assertion, which is a strictly better failure and not a regression.
+
+**`pointer.c`'s remaining failure is chibicc's frame layout, not arithmetic.**
+`*(&x + 1) => 5` reads the integer *after* `x` in a statement expression, so it needs `x`
+and `y` laid out adjacently in that order. gcc 15.2 answers `2061499264` and tcc `1441520`
+for that exact statement — all three fail it, so the expectation is a chibicc coincidence
+and not a portable one. The arithmetic around it, `*&x` and `**z`, do pass.
 
 
 **`macro.c` needed its fixtures before it could be read at all.** `include1.h` through
@@ -192,19 +206,41 @@ pure-variadic macro and indexed `args[-1]`. That is why `want` is `params.len`.
 Four fail to compile. The other fourteen compile, and every one of them fails the
 same way, at its first assertion, for one reason.
 
-**The line splice is the interesting one, and it is a design decision rather than a
-bug.** `int size\` / `of(char);` must lex as the single identifier `sizeof`, and it
-lexes as two. The tokenizer applies a splice inside a string literal, where a test
-covers it, and nowhere else. C deletes backslash-newline in *translation phase 2*,
-before anything is tokenized, which is why a splice can join the two halves of an
-identifier — and why it cannot be handled by a scanner that reads one character at a
-time.
+**The line splice was a design decision, and the decision was wrong.** `int size\` /
+`of(char);` must lex as the single identifier `sizeof`, and it lexed as two. The
+tokenizer applied a splice inside a string literal, where a test covered it, and nowhere
+else. C deletes backslash-newline in *translation phase 2*, before anything is tokenized,
+which is why a splice can join the two halves of an identifier.
 
-The fix C specifies is to strip the splices once, in one place, before the tokenizer
-runs, carrying a line number per output byte so diagnostics still point where they did.
-Handled per-scanner instead, it means teaching the identifier, number, character and
-punctuator scanners four variants of the same rule, and the fourth is the one that will
-be wrong.
+The fix C specifies is to strip the splices once, in one place, before the tokenizer runs,
+carrying a line number per output byte so diagnostics still point where they did. Handled
+per-scanner instead, it means teaching the identifier, number, character and punctuator
+scanners four variants of the same rule, and the fourth is the one that will be wrong.
+
+**That is what was done, and the fourth did not get left wrong — but it is still the weaker
+option and the reason is worth keeping.** Four scanners now step over a splice through one
+shared `skip_splice`, and the token's *raw* span is kept for `loc` and `len` while only its
+`text` is spliced out, so a diagnostic still points into the source as written:
+
+| scanner | covers |
+|---|---|
+| `read_ident` | `size\<nl>of` is one identifier — the suite's case |
+| `read_number` | `1\<nl>23` is one constant 123, `0x1\<nl>F` is 0x1F |
+| `read_quoted` | `"spli\<nl>ced"` is one string, not a string plus two identifiers |
+| `read_directive` | already folded splices, before this work |
+| `read_punct` | a splice *at* the cursor, so `a \<nl>+ b` lexes `+` |
+
+**The gap this leaves is a splice strictly inside a multi-character punctuator**: `+\<nl>+`
+is two `+` tokens here and one `++` in C. Matching it means matching the table against a
+spliced-out view of the source, which is the pre-pass above. No ordinary C writes that
+spelling and none of the suite's 18 files contains it, so it is recorded rather than
+silently relied upon. The pre-pass remains the right answer; it was not taken here because
+it changes the meaning of every `loc` offset the preprocessor and `#line` resolution share.
+
+The numeric half is why this was not treated as an identifier rule. `1\<nl>23` split into
+two constants changes a program's arithmetic and names nothing, so it fails silently — a
+strictly worse failure than the identifier one, which at least said
+`undefined variable "size"`.
 
 **The calling convention was the whole of it, and it is fixed.** All fourteen were
 emitting psABI calls — `%rdi`, `%rsi`, no home area, a `%al` vector count — while mingw's
@@ -548,10 +584,98 @@ address. The two halves agree with each other and with neither the platform nor 
 oracle, which is why such a call access-violates where tcc answers correctly. Fixing it
 means changing the convention on both sides for every struct-passing call in the compiler.
 
-**The suite is unchanged at 5 of 18**, the same five and the same eight wrong answers.
-`function.c` now fails to compile on `undefined variable "__va_area__"` rather than
-computing a wrong answer, which is the divergence already recorded as unfixable: the
-suite declares its own 24-byte `va_list` and reads the local this work removed.
+#**Five more defects, none of them about varargs, and two of them severe.**
+
+Found by asking the oracles what a shape is worth rather than by reading the code. All
+five are fixed; all five are measured against tcc and gcc; the two largest have controls
+below.
+
+**A nested array declarator was built backwards.** `int a[3][5]` is three rows of five, so
+the suffixes apply right to left. They applied left to right, which builds
+`array(array(int, 3), 5)`.
+
+The two differ in a total size and in nothing else a self-consistent program looks at —
+same product, same innermost stride, and `a[i][j]` reads and writes through the same
+reversed shape, so **every value came back right**. Two things noticed it, and both are
+now in `tests/endtoend/array_layout.c`:
+
+| | tcc | vcc before |
+|---|---|---|
+| `&a[1] - &a[0]` | 20 | 12 |
+| `sizeof(*a)` | 20 | 12 |
+| `int b[2][3][4]`, `&b[1] - &b[0]` | 48 | 24 |
+| `&b[0][1] - &b[0][0]` | 16 | 8 |
+
+This is the worst of the five, because a *pointer to the row type* is exactly what crosses
+a compiler boundary. `int (*pa)[5] = a` then `pa` was reading a struct layout that no other
+compiler shares, and nothing inside vcc could ever see it.
+
+**A plain binary `+` or `-` on a pointer was never scaled.** [C11 6.5.6p8] `p + n` is
+`p + n * sizeof(*p)`. `q[1]`, `q += 1` and `q++` all scaled — those paths go through
+`new_add` — and only the plain operator built its node directly and ran the *usual
+arithmetic conversions* on it. So `int *q; q + 1` advanced one byte whatever the element
+type: four for an `int`, eight for a `double`, one for a `char`, where only the `char` was
+right and only by accident. `q + 1` and `q[1]` disagreed with each other by a factor of
+four inside one expression. This was the recorded `pointer.c` failure.
+
+Fixed by routing `additive()` through `new_add`/`new_sub`, which is where chibicc puts it.
+The scaling lives in those two builders rather than in `add_type` because `add_type` is a
+free function with no access to the node builders, and because it is idempotent — a node
+that already has a type is left alone, so a second `add_type` cannot scale twice.
+
+**A pointer to a VLA stepped by the placeholder width.** `vla_of` gives every VLA an
+eight-byte `size`, because the extent is not known until the declaration runs. For
+`int x[n + 1][n + 6]` — both extents variable, so the row is *itself* a VLA — `x[i]` scaled
+by that eight, and `x[1][0]` returned `2` where it must be `16`. `pointee_size` now reads
+the element's own size local when the element is a VLA, which is what the declaration
+already computed.
+
+**A wide literal was typed at twice the width.** `L` and `u` were four bytes per element
+because chibicc is System V. Measured on this host:
+
+| | tcc | gcc | vcc before | vcc now |
+|---|---|---|---|---|
+| `sizeof(L"ab")` | 6 | 6 | 12 | 6 |
+| `sizeof(L"ab" "c")` | 8 | 8 | 16 | 8 |
+| `sizeof(L'a')` | 2 | 2 | 4 | 2 |
+| `sizeof("ab")` | 3 | 3 | 3 | 3 |
+
+`U` is four here and `u8` is one, which is what C11 6.4.4.4 says; tcc rejects `u"`, `U"`
+and `u8"` outright, so those three are gcc's answer alone. This is the same decision as
+`long` being four bytes: follow the host, not chibicc.
+
+It was worse than a wrong `sizeof`, because the *storage image* was already right —
+`string_initializer` takes the stride from the declared array, not from the literal — so
+vcc wrote `61 00 62 00 00 00` and then declared the object sixteen bytes wide.
+
+**`sizeof` of a type name containing a VLA.** Only a bare VLA was handled; an array of one
+answered `array_len * 8`, the placeholder, so `sizeof(int[n][5])` was 40 where it is 100.
+And a bare VLA fell through to an untyped `.generic` node that the backend reached as
+`gen_binary` with a nil left operand, which is the suite's recorded
+`operator with no left operand at line 22` — a diagnostic naming the arithmetic rather
+than the type that could not be sized. All three shapes now match tcc exactly, and
+`vla.c` **passes**.
+
+### The controls
+
+Neither the array-order fix nor the pointer-scaling fix is believed because the tests are
+green. Both were reverted and the suite run again:
+
+| reverted | unit tests | cross-boundary probe | chibicc suite |
+|---|---|---|---|
+| nothing | 9 passed | 9 of 9 match | **6 of 18** |
+| suffixes left to right | **1 failed** | `array_layout`, `vla_size` DIFFER | — |
+| plain `+` unscaled | — | `array_layout`, `va_start_offset` DIFFER | 6 of 18 |
+
+`vla.c` is the suite file that went from failing to passing, so the suite is **6 of 18**
+and not 5. The five that already passed still pass.
+
+
+**The suite is at 6 of 18**, the six listed in `tools/suite/suite.v`'s own output and the
+twelve still recorded above. `vla.c` is the one that moved; the five that already passed
+still pass, and nothing regressed. `function.c` still fails at compile time on
+`undefined variable "__va_area__"`, because the suite declares its own 24-byte `va_list`
+and reads the local the variadic work removed.
 
 ## The Windows x64 calling convention, measured
 

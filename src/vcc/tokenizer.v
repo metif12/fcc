@@ -193,11 +193,7 @@ fn (mut t Tokenizer) skip_insignificant() {
 	for t.pos < t.src.len {
 		c := t.src[t.pos]
 		if c == `\\` && t.peek_at(t.pos + 1) == `\n` {
-			// A splice removes the newline, so the logical line continues. The
-			// physical line still advances, which is why `line` is bumped here.
-			t.pos += 2
-			t.line++
-			t.line_start = t.pos
+			t.skip_splice()
 			continue
 		}
 		if c == `\n` {
@@ -238,6 +234,18 @@ fn (mut t Tokenizer) skip_insignificant() {
 		}
 		break
 	}
+}
+
+// skip_splice deletes one backslash-newline pair at the cursor.
+//
+// [C11 5.1.1.2p1.2] deletes the pair, so the logical line continues; the *physical* line
+// still advances, which is why `line` is bumped here. It is a method rather than three
+// lines repeated because a splice can also land inside a token, where `skip_insignificant`
+// has already stopped — see `read_ident`.
+fn (mut t Tokenizer) skip_splice() {
+	t.pos += 2
+	t.line++
+	t.line_start = t.pos
 }
 
 // peek_at returns the byte at offset, or 0 past the end, so lookahead needs no
@@ -328,12 +336,37 @@ fn is_ident_cont(c u8) bool {
 	return is_ident_start(c) || is_digit(c)
 }
 
+// read_ident reads an identifier, which may have a line splice inside it.
+//
+// [C11 5.1.1.2p1.2] a backslash immediately followed by a newline is deleted in
+// translation phase two, which is *before* tokenization — so `size\` + newline + `of` is
+// the one identifier `sizeof` and not the two tokens `size` and `of`.
+//
+// `skip_insignificant` already deletes the splices that fall *between* tokens. It cannot
+// reach one inside a token, because it stops at the first byte of the token and the
+// scanner below owns everything from there. Without this, chibicc's `literal.c` line 94
+// reports `undefined variable "size"`, which names the half it did see rather than the
+// splice it did not.
+//
+// The raw span is kept for `loc` and `len`, so a diagnostic still points into the source
+// as written; only `text` is the spliced-out spelling, which is what the keyword lookup
+// has to see.
 fn (mut t Tokenizer) read_ident() ast.Token {
 	start := t.pos
-	for t.pos < t.src.len && is_ident_cont(t.src[t.pos]) {
+	mut spliced := false
+	for t.pos < t.src.len {
+		if t.src[t.pos] == `\\` && t.peek_at(t.pos + 1) == `\n` {
+			spliced = true
+			t.skip_splice()
+			continue
+		}
+		if !is_ident_cont(t.src[t.pos]) {
+			break
+		}
 		t.pos++
 	}
-	text := t.src[start..t.pos]
+	raw := t.src[start..t.pos]
+	text := if spliced { remove_splices(raw) } else { raw }
 	kw := lookup_keyword(text)
 	return ast.Token{
 		kind:       if kw == none { .ident } else { .keyword }
@@ -342,6 +375,24 @@ fn (mut t Tokenizer) read_ident() ast.Token {
 		len:        t.pos - start
 		line:       t.make_line()
 	}
+}
+
+// remove_splices returns s with every backslash-newline pair deleted.
+//
+// It walks the bytes rather than using `s.replace('\n', '')` or similar, because the pair
+// is two bytes and removing only one of them would leave the other behind as content.
+fn remove_splices(s string) string {
+	mut out := []u8{}
+	mut i := 0
+	for i < s.len {
+		if s[i] == `\\` && i + 1 < s.len && s[i + 1] == `\n` {
+			i += 2
+			continue
+		}
+		out << s[i]
+		i++
+	}
+	return out.bytestr()
 }
 
 // lookup_keyword returns the keyword for a spelling, or none for an identifier.
@@ -380,6 +431,17 @@ fn lookup_keyword(text string) ?ast.Keyword {
 }
 
 fn (mut t Tokenizer) read_punct() ast.Token {
+	// A splice at the cursor goes first, so `a \` + newline + `+ b` lexes `+` rather than
+	// reaching the match below on a backslash it cannot match and reporting the splice.
+	//
+	// It cannot go *inside* a multi-character punctuator, and that is the one gap this
+	// leaves: `+\` + newline + `+` is two `+` tokens here and one `++` in C. Matching it
+	// would mean matching the table against a spliced-out view of the source, which is
+	// the pre-pass `docs/PLAN.md` recommends and the reason this is recorded rather than
+	// left silent. No ordinary C and none of the suite's 18 files writes that spelling.
+	if t.pos < t.src.len && t.src[t.pos] == `\\` && t.peek_at(t.pos + 1) == `\n` {
+		t.skip_splice()
+	}
 	for p in punctuators {
 		if t.src.len - t.pos >= p.len && t.src[t.pos..t.pos + p.len] == p {
 			t.pos += p.len
@@ -409,6 +471,7 @@ fn (mut t Tokenizer) read_punct() ast.Token {
 // a base prefix, and `0x10` must not be confused with `10` at parse time.
 fn (mut t Tokenizer) read_number() ast.Token {
 	start := t.pos
+	mut spliced := false
 	mut is_float := false
 	if t.src[t.pos] == `0` && (t.peek_at(t.pos + 1) == `x` || t.peek_at(t.pos + 1) == `X`) {
 		// A hexadecimal constant is either an integer (`0x1F`) or a float
@@ -416,56 +479,43 @@ fn (mut t Tokenizer) read_number() ast.Token {
 		// binary exponent, and both must be consumed here: leaving the `.` behind
 		// would split one literal into three tokens.
 		t.pos += 2
-		for t.pos < t.src.len && is_hex_digit(t.src[t.pos]) {
-			t.pos++
-		}
-		if t.pos < t.src.len && t.src[t.pos] == `.` {
+		spliced = t.scan(is_hex_digit)
+		if t.at(`.`) {
 			is_float = true
 			t.pos++
-			for t.pos < t.src.len && is_hex_digit(t.src[t.pos]) {
-				t.pos++
-			}
+			spliced = t.scan(is_hex_digit) || spliced
 		}
 		// A `p` exponent is what actually makes it a float; without one the
 		// constant is an integer and `p` would be a separate identifier.
-		if t.pos < t.src.len && (t.src[t.pos] == `p` || t.src[t.pos] == `P`) {
+		if t.at(`p`) || t.at(`P`) {
 			is_float = true
 			t.pos++
-			if t.pos < t.src.len && (t.src[t.pos] == `+` || t.src[t.pos] == `-`) {
+			if t.at(`+`) || t.at(`-`) {
 				t.pos++
 			}
-			for t.pos < t.src.len && is_digit(t.src[t.pos]) {
-				t.pos++
-			}
+			spliced = t.scan(is_digit) || spliced
 		}
 	} else {
-		for t.pos < t.src.len && is_digit(t.src[t.pos]) {
-			t.pos++
-		}
-		if t.pos < t.src.len && t.src[t.pos] == `.` {
+		spliced = t.scan(is_digit)
+		if t.at(`.`) {
 			is_float = true
 			t.pos++
-			for t.pos < t.src.len && is_digit(t.src[t.pos]) {
-				t.pos++
-			}
+			spliced = t.scan(is_digit) || spliced
 		}
-		if t.pos < t.src.len && (t.src[t.pos] == `e` || t.src[t.pos] == `E`) {
+		if t.at(`e`) || t.at(`E`) {
 			next := t.peek_at(t.pos + 1)
 			if is_digit(next) || next == `+` || next == `-` {
 				is_float = true
 				t.pos += 2
-				for t.pos < t.src.len && is_digit(t.src[t.pos]) {
-					t.pos++
-				}
+				spliced = t.scan(is_digit) || spliced
 			}
 		}
 	}
 	// Type suffixes: u/U, l/L, ll/LL, f/F, and combinations. Read greedily and
 	// validate in the type checker, because C11 allows several spellings.
-	for t.pos < t.src.len && is_suffix_char(t.src[t.pos]) {
-		t.pos++
-	}
-	text := t.src[start..t.pos]
+	spliced = t.scan(is_suffix_char) || spliced
+	raw := t.src[start..t.pos]
+	text := if spliced { remove_splices(raw) } else { raw }
 	mut tok := ast.Token{
 		kind: .num_
 		text: text
@@ -480,6 +530,37 @@ fn (mut t Tokenizer) read_number() ast.Token {
 	return tok
 }
 
+// at reports whether the byte at the cursor is c. It is the one-byte lookahead the
+// number scanner needs, kept as a method so a splice cannot creep past it.
+fn (t &Tokenizer) at(c u8) bool {
+	return t.pos < t.src.len && t.src[t.pos] == c
+}
+
+// scan consumes the run of bytes pred accepts, stepping over a line splice between any
+// two of them, and reports whether it stepped over one.
+//
+// The splice is why this is a method rather than a `for` at each call site: [C11
+// 5.1.1.2p1.2] deletes it in translation phase two, so `1\` + newline + `23` is the one
+// constant 23 and not two. `peek_at` returning 0 past the end means a splice at the very
+// end of the file is simply not taken, which is the right answer — C forbids a file from
+// ending inside a token.
+fn (mut t Tokenizer) scan(pred fn (u8) bool) bool {
+	mut spliced := false
+	for t.pos < t.src.len {
+		if t.src[t.pos] == `\\` && t.peek_at(t.pos + 1) == `\n` {
+			t.skip_splice()
+			spliced = true
+			continue
+		}
+		if !pred(t.src[t.pos]) {
+			break
+		}
+		t.pos++
+	}
+	return spliced
+}
+
+// is_hex_digit is a byte a hexadecimal constant is written from.
 fn is_hex_digit(c u8) bool {
 	return is_digit(c) || (c >= `a` && c <= `f`) || (c >= `A` && c <= `F`)
 }
@@ -703,6 +784,14 @@ fn (mut t Tokenizer) read_quoted(quote u8, from int) ast.Token {
 	for i < t.src.len && t.src[i] != quote {
 		if t.src[i] == `\n` {
 			break
+		}
+		// A line splice is deleted before anything is tokenized, so it does not end a
+		// quoted literal either: `"spli\` + newline + `ced"` is one string of six
+		// characters. It has to be tested *before* the newline above, or the newline
+		// that is part of the pair is taken for the end of the line.
+		if t.src[i] == `\\` && i + 1 < t.src.len && t.src[i + 1] == `\n` {
+			i += 2
+			continue
 		}
 		if t.src[i] == `\\` && i + 1 < t.src.len && t.src[i + 1] != `\n` {
 			v, next := decode_escape(t.src, i)

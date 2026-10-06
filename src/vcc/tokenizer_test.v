@@ -442,6 +442,48 @@ fn test_a_dollar_sign_continues_an_identifier() {
 	assert toks[1].text == 'a$b', 'got ${toks[1].text}'
 }
 
+fn test_a_line_splice_joins_the_two_halves_of_a_keyword() {
+	// [C11 5.1.1.2p1.2] deletes the pair before tokenization, so this is `sizeof` and
+	// not the two tokens `size` and `of`. `skip_insignificant` already handled a splice
+	// *between* tokens; it could not reach one inside one, because it stops at the first
+	// byte of the token.
+	toks := tokenize('size\\\nof(int);')
+	// `sizeof`, `(`, `int`, `)`, `;`, eof.
+	assert toks.len == 6, 'got ${toks.len}'
+	assert toks[0].kind == .keyword, 'got ${toks[0].kind}'
+	assert toks[0].text == 'sizeof', 'got ${toks[0].text}'
+	assert toks[0].is_keyword, 'the keyword lookup did not see the joined spelling'
+}
+
+fn test_a_line_splice_joins_the_two_halves_of_a_number() {
+	// A literal split in two changes a program's arithmetic rather than naming
+	// anything, so this is the case that cannot be left until someone notices a wrong
+	// answer: one constant, not two.
+	toks := tokenize('int a = 1\\\n23;')
+	assert toks.len == 6, 'got ${toks.len}'
+	assert toks[3].kind == .num_, 'got ${toks[3].kind}'
+	assert toks[3].val == 123, 'got ${toks[3].val}'
+	// And a hexadecimal one, which is where the scanner's two branches differ.
+	hex := tokenize('int a = 0x1\\\nF + 1;')
+	assert hex.len == 8, 'got ${hex.len}'
+	assert hex[3].text == '0x1F', 'got ${hex[3].text}'
+	assert hex[3].val == 31, 'got ${hex[3].val}'
+}
+
+fn test_a_line_splice_does_not_end_a_quoted_literal() {
+	// The literal's terminating newline is the *second* byte of the pair, so the splice
+	// has to be tested before it. Read the other way round, `"spli\` + `ced"` is a
+	// one-token string literal followed by three stray identifiers.
+	toks := tokenize('char *s = "spli\\\nced";')
+	// `char`, `*`, `s`, `=`, the literal, `;`, eof.
+	assert toks.len == 7, 'got ${toks.len}'
+	assert toks[4].kind == .str_, 'got ${toks[4].kind}'
+	assert toks[4].str_data == 'spliced'.bytes(), 'got ${toks[4].str_data.bytestr()}'
+	// The closing quote was still found, so the literal did not run to end of file: the
+	// `;` after it is a token rather than part of the string.
+	assert toks[5].text == ';', 'got ${toks[5].text}'
+}
+
 fn test_the_simple_escapes_decode_to_their_values() {
 	// All eight, from the one reproducer that found them: `\a`, `\b`, `\v`, `\f` and `\e`
 	// were served by a lookup table that never matched, so every one of them decoded as

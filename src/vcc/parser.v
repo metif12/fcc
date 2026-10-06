@@ -1007,11 +1007,28 @@ fn (mut p Parser) parse_suffix() Suffix {
 // Without a group the `*`s come first, because `*a[10]` is ten of them. With a group
 // the suffixes come first, because in `(*a)[10]` the `*` is inside the group and the
 // `[10]` applies to the group as a whole.
+//
+// **The suffixes apply right to left.** `int a[3][5]` is an array of three, each an
+// array of five, so the `[5]` is applied to `int` first and the `[3]` to the result. They
+// were applied in source order, which builds `array(array(int, 3), 5)` instead.
+//
+// The two differ in a total size and in nothing else that a self-consistent program
+// looks at, which is why this survived: both are 3*5*4, and `a[i][j]` reads and writes
+// through the same reversed shape, so every value came back right. Two things noticed
+// it. `sizeof(*a)` is 12 rather than 20. And the *stride* is 12, so `&a[1]` is twelve
+// bytes past `&a[0]` where it must be twenty — which matters the moment anything whose
+// layout is not this compiler's agrees about where a row is: `int (*pa)[5] = a`, then
+// `pa`, or a C library. Measured, tcc against this:
+//
+//	                 tcc    vcc
+//	&a[1] - &a[0]      20    12
+//	int b[2][3][4], &b[1] - &b[0]   48    24
+//	                &b[0][1] - &b[0][0]  16     8
 fn (mut p Parser) build_decl(base &ast.Type, d &Decl) &ast.Type {
 	mut t := base
 	if nested := d.nested {
-		for s in d.suffixes {
-			t = p.apply_suffix(t, s)
+		for i := d.suffixes.len - 1; i >= 0; i-- {
+			t = p.apply_suffix(t, d.suffixes[i])
 		}
 		for _ in 0 .. d.ptrs {
 			t = pointer_to(t)
@@ -1021,8 +1038,8 @@ fn (mut p Parser) build_decl(base &ast.Type, d &Decl) &ast.Type {
 	for _ in 0 .. d.ptrs {
 		t = pointer_to(t)
 	}
-	for s in d.suffixes {
-		t = p.apply_suffix(t, s)
+	for i := d.suffixes.len - 1; i >= 0; i-- {
+		t = p.apply_suffix(t, d.suffixes[i])
 	}
 	return t
 }
@@ -2108,17 +2125,31 @@ fn (mut p Parser) string_literal_expr() &ast.Node {
 
 // string_initializer initializes an array from a string literal.
 //
-// The literal's own element type decides the target's: `char x[] = "abc"` is four
-// bytes, `int x[] = L"abc"` is sixteen. The terminating NUL is included, and a
-// shorter literal in a longer array leaves the rest zero.
+// The *declared* array's element type decides the stride, and the literal's own element
+// type does not: [C11 6.4.5p5] lets a string literal initialize an array of character
+// type, and the element count is what the literal contributes. So `char x[] = "abc"` is
+// four bytes, and `unsigned int x[] = L"abc"` is twelve — three wide characters in
+// four-byte slots.
+//
+// Sizing from the literal was wrong, and invisible for as long as the two agreed.
+// `array_of(elem, lit.array_len)` already builds the array at the declared element's
+// width, so overwriting its size with the literal's own dropped a declared array to the
+// literal's narrower stride: `int w[] = L"ab"` came out six bytes rather than twelve.
+// That construct is ill-formed — gcc rejects it outright as `array of inappropriate type
+// initialized from string constant`, and tcc reads the literal as a pointer and warns —
+// so nothing caught it.
+//
+// The terminating NUL is included, and a shorter literal in a longer array leaves the
+// rest zero.
 fn (mut p Parser) string_initializer(mut init &Initializer) {
 	run := p.string_run()
 	lit, _ := string_literal_value(run)
 
 	if init.is_flexible {
-		// The array's length is the literal's, including the NUL.
+		// The array's *length* is the literal's, including the NUL. Its size is not:
+		// `array_of` has already computed that from the declared element type, and this
+		// used to overwrite it with the literal's own.
 		mut resized := p.new_initializer(array_of(init.ty.base, lit.array_len), false)
-		resized.ty.size = lit.size
 		init.ty = resized.ty
 		init.is_flexible = false
 		init.children = resized.children
@@ -2707,9 +2738,29 @@ fn (mut p Parser) additive() &ast.Node {
 	mut node := p.multiplicative()
 	for p.at('+') || p.at('-') {
 		tok := p.next()
-		rhs := p.multiplicative()
-		kind := if tok.text == '+' { ast.NodeKind.add } else { ast.NodeKind.sub }
-		node = p.new_binary(kind, node, rhs, tok)
+		mut rhs := p.multiplicative()
+		// `new_add` and `new_sub`, not `new_binary`, because a binary `+` or `-` is
+		// where pointer arithmetic happens and it has to scale: [C11 6.5.6p8] `p + n`
+		// is `p + n * sizeof(*p)`.
+		//
+		// This built the node directly, so `new_binary` ran, `add_type` applied the
+		// *usual arithmetic conversions* to it, and nothing scaled. `int *p; p + 1`
+		// advanced one byte for every element type — four for an `int`, eight for a
+		// `double`, one for a `char`, where the last was right by accident and the other
+		// two were not. `q[1]`, `q += 1` and `q++` all scaled, because the subscript and
+		// the compound-assignment paths go through `new_add`; only the plain operator
+		// did not, so `p + 1` and `p[1]` disagreed with each other by a factor of four
+		// in the same expression.
+		//
+		// The scaling lives in these two builders rather than in `add_type` because
+		// `add_type` is a free function with no access to the parser's node builders, and
+		// because it is idempotent: a node that already has a type is left alone, so a
+		// second `add_type` cannot scale twice.
+		node = if tok.text == '+' {
+			p.new_add(mut node, mut rhs, tok)
+		} else {
+			p.new_sub(mut node, mut rhs, tok)
+		}
 		add_type(mut node)
 	}
 	return node
@@ -3272,16 +3323,65 @@ fn (mut p Parser) unsupported_expression() &ast.Node {
 
 // size_of_type returns `sizeof` of a type.
 //
-// A variable-length array's size is a run-time value, held in a local the type
-// records, so the answer is a read of that local rather than a constant.
+// A variable-length array's size is a run-time value held in a local the type records,
+// so the answer is either a read of that local or, for a type name that has never been
+// declared, the expression that computes it.
+//
+// Three shapes, and only the first is a constant:
+//
+//	sizeof(int[5])      array of a fixed type       -> a number
+//	sizeof(char[n])     a VLA                       -> n
+//	sizeof(char[2][n])  an array of a VLA           -> 2 * n
+//
+// The third is the one that used to be wrong in two directions at once. An array whose
+// element is a VLA has a constant *length* and a run-time *element*, so its size is
+// neither: it answered `array_len * 8`, the placeholder width `vla_of` gives a VLA, which
+// is 40 for `int[n][5]` where the answer is 60. And a bare VLA fell through to an untyped
+// `.generic` node, which the backend reached as `gen_binary` with a nil left operand and
+// reported as `operator with no left operand at line 22` — a diagnostic naming the
+// arithmetic rather than the type name that could not be sized.
 fn (mut p Parser) size_of_type(ty &ast.Type, tok ast.Token) &ast.Node {
 	if ty.kind == .vla {
-		if ty.vla_size == unsafe { nil } {
-			return p.new_node(.generic, tok)
+		// A declared VLA already has its size local, and computing a second one would
+		// mean `sizeof(x)` evaluated the extent expression a second time.
+		if ty.vla_size != unsafe { nil } {
+			return p.new_var_node(ty.vla_size, tok)
 		}
-		return p.new_var_node(ty.vla_size, tok)
+		mut fresh := ty
+		return p.compute_vla_size(mut fresh, tok)
+	}
+	if ty.kind == .array && ty.base != unsafe { nil } && ty.base.kind == .vla {
+		mut base := ty.base
+		// `compute_vla_size` assigns the element's size to a local of its own and
+		// yields it, so the product reads that local rather than running the extent
+		// expression twice.
+		sized := p.compute_vla_size(mut base, tok)
+		mut product := p.new_binary(.mul, p.new_var_node(base.vla_size, tok),
+			p.new_num(i64(ty.array_len), tok), tok)
+		mut node := p.new_binary(.comma, sized, product, tok)
+		add_type(mut node)
+		return node
 	}
 	return p.new_size_t(i64(ty.size), tok)
+}
+
+// pointee_size returns the expression giving the size of what a pointer points at.
+//
+// A pointer to a variable-length array steps by the array's *run-time* size, which the
+// declaration already computed into a local of its own. The type's `size` is not it:
+// `vla_of` gives every VLA a placeholder of eight bytes, because the extent is not known
+// until the declaration runs.
+//
+// So for `int x[n + 1][n + 6]`, `x[i]` steps by `sizeof(int[n + 6])` — a read of the
+// inner VLA's size local — and not by eight. Scaling by the placeholder is what made
+// `x[1][0]` return the second element of the first row rather than the first element of
+// the second: measured against tcc, `x[1][0]` was 2 where it must be 16.
+fn (mut p Parser) pointee_size(ty &ast.Type, tok ast.Token) &ast.Node {
+	base := ty.base
+	if base != unsafe { nil } && base.kind == .vla && base.vla_size != unsafe { nil } {
+		return p.new_var_node(base.vla_size, tok)
+	}
+	return p.new_num(i64(base.size), tok)
 }
 
 // new_sub builds `lhs - rhs`, scaling by the pointee's size when the left side is a
@@ -3292,8 +3392,7 @@ fn (mut p Parser) new_sub(mut lhs &ast.Node, mut rhs &ast.Node, tok ast.Token) &
 	add_type(mut rhs)
 	mut node := p.new_binary(.sub, lhs, rhs, tok)
 	if lhs.ty.base != unsafe { nil } && rhs.ty.base == unsafe { nil } {
-		scale := p.new_num(i64(lhs.ty.base.size), tok)
-		mut scaled := p.new_binary(.mul, rhs, scale, tok)
+		mut scaled := p.new_binary(.mul, rhs, p.pointee_size(lhs.ty, tok), tok)
 		add_type(mut scaled)
 		node.rhs = scaled
 	}
@@ -3314,14 +3413,12 @@ fn (mut p Parser) new_add(mut lhs &ast.Node, mut rhs &ast.Node, tok ast.Token) &
 	}
 	if lhs.ty.base != unsafe { nil } && rhs.ty.base == unsafe { nil } {
 		// ptr + int
-		scale := p.new_num(i64(lhs.ty.base.size), tok)
-		mut scaled := p.new_binary(.mul, rhs, scale, tok)
+		mut scaled := p.new_binary(.mul, rhs, p.pointee_size(lhs.ty, tok), tok)
 		add_type(mut scaled)
 		node.rhs = scaled
 	} else if lhs.ty.base == unsafe { nil } && rhs.ty.base != unsafe { nil } {
 		// int + ptr
-		scale := p.new_num(i64(rhs.ty.base.size), tok)
-		mut scaled := p.new_binary(.mul, lhs, scale, tok)
+		mut scaled := p.new_binary(.mul, lhs, p.pointee_size(rhs.ty, tok), tok)
 		add_type(mut scaled)
 		node.lhs = scaled
 		node.rhs = rhs
