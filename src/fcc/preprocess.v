@@ -54,6 +54,11 @@ pub mut:
 	errors []string
 	// counter names `__COUNTER__`.
 	counter int
+	// base_file is the top-level translation unit. `__BASE_FILE__` needs it, and it
+	// cannot be read from the `path` an expansion is currently handed, because that
+	// changes on every `#include` — inside a header, `__FILE__` is the header and
+	// `__BASE_FILE__` must still be the file that was compiled.
+	base_file string
 	// depth bounds include nesting and expansion recursion, so a pathological file is
 	// reported instead of exhausting the stack.
 	depth int
@@ -92,6 +97,15 @@ pub enum BuiltinMacro {
 	file
 	line
 	counter
+	// stdc is `__STDC__`, whose value is the *number* 1 rather than a string.
+	stdc
+	// date, time_ and timestamp are the clock, spelled the way C spells them.
+	date
+	time_
+	timestamp
+	// base_file is `__BASE_FILE__`: the top-level translation unit, not the header the
+	// use happens to sit in. `file` is the current one.
+	base_file
 }
 
 // Conditional is one open `#if`.
@@ -178,6 +192,11 @@ pub fn (mut p Preprocessor) define_builtins() {
 	p.define_builtin('__FILE__', .file)
 	p.define_builtin('__LINE__', .line)
 	p.define_builtin('__COUNTER__', .counter)
+	p.define_builtin('__STDC__', .stdc)
+	p.define_builtin('__DATE__', .date)
+	p.define_builtin('__TIME__', .time_)
+	p.define_builtin('__TIMESTAMP__', .timestamp)
+	p.define_builtin('__BASE_FILE__', .base_file)
 }
 
 // lookup finds a macro by name, or returns none.
@@ -228,6 +247,7 @@ pub fn (mut p Preprocessor) run(path string) Result {
 			errors: p.errors.clone()
 		}
 	}
+	p.base_file = path
 	return Result{
 		tokens: p.finish(strip_sentinels(p.directives(tokenize(src), path)))
 		errors: p.errors.clone()
@@ -237,6 +257,10 @@ pub fn (mut p Preprocessor) run(path string) Result {
 // run_text preprocesses source with no file behind it, for tests and for `-D`-only
 // runs. `path` is used for include resolution and for `__FILE__` only.
 pub fn (mut p Preprocessor) run_text(src string, path string) Result {
+	// A run with no file still needs a `__BASE_FILE__`, and `path` is the best answer
+	// available: the alternative is the empty string, which compares equal to nothing
+	// and so fails silently in any program that checks it.
+	p.base_file = path
 	return Result{
 		tokens: p.finish(strip_sentinels(p.directives(tokenize(src), path)))
 		errors: p.errors.clone()

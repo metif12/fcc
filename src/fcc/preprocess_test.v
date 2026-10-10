@@ -23,6 +23,20 @@ fn pp(src string) PPResult {
 	}
 }
 
+// ppb is `pp` with the predefined macros registered.
+//
+// `pp` alone leaves them undefined, which is right for a test about `#define` and wrong
+// for one about `__STDC__`. C always has them, so a test that needs one asks for them.
+fn ppb(src string) PPResult {
+	mut p := preprocessor([], [])
+	p.define_builtins()
+	r := p.run_text(src, 'test.c')
+	return PPResult{
+		text:   r.tokens.filter(it.kind != .eof).map(it.text).join(' ')
+		errors: r.errors
+	}
+}
+
 struct PPResult {
 	text   string
 	errors []string
@@ -438,3 +452,109 @@ fn test_a_macro_expansion_does_not_end_the_translation_unit() {
 	assert names.contains('b'), 'got ${names}'
 	assert names.contains('c'), 'got ${names}'
 }
+
+// [C11 7.1.2p2] A macro whose name is a keyword is legal, and DR 108 records the
+// Committee's intention as allowing it. Keywords become reserved only in phases 7 and 8,
+// after expansion, so `#define if 5` masks the keyword rather than colliding with it.
+// gcc, gcc -pedantic-errors and tcc all accept it silently.
+//
+// `expand` looked the macro table up only for `.ident` tokens, so the keyword never
+// reached it. This is the one gate in the way — the table is text-keyed and never
+// inspects a token's kind.
+fn test_a_macro_may_be_named_for_a_keyword() {
+	assert preprocessed('#define if 5\nint x = if;') == 'int x = 5 ;'
+	assert preprocessed('#define for 1\nfor') == '1'
+	// A genuine keyword with no macro in scope is untouched, which is the whole reason
+	// the change is safe: nothing is retagged, only the lookup is widened.
+	assert preprocessed('int x = 3;\nif (x) { return 1; }') == 'int x = 3 ; if ( x ) { return 1 ; }'
+}
+
+// `#if`/`#ifdef` are unaffected. `eval_condition` tokenises and evaluates without
+// consulting the macro table, and `eval_ifdef` already accepts both token kinds — so a
+// keyword macro is visible to `#ifdef` and still invisible to `#if`, which is a separate
+// recorded divergence and not something this makes worse.
+fn test_a_keyword_macro_is_visible_to_ifdef() {
+	assert preprocessed('#define if 5\n#ifdef if\nyes\n#endif') == 'yes'
+}
+
+// [C11 6.10.8p1] `__STDC__` is the integer constant 1.
+//
+// It was missing, and emitting it as a *string* — which is what every other builtin
+// does, and what `builtin_token` hardcoded — would hand `assert(int, int)` a `char[2]`
+// and fail the type check instead of the value. A numeric token needs both `kind` and
+// `text`, because `numeric_type` reads the spelling and ignores `val`.
+fn test_stdc_is_an_integer_one() {
+	assert ppb('int a = __STDC__;').text == 'int a = 1 ;'
+	assert ppb('int b = __STDC__ + 1;').text == 'int b = 1 + 1 ;'
+	// `strlen` of it is 1, which is what chibicc's macro.c asserts.
+	assert ppb('strlen(__STDC__)').text == 'strlen ( 1 )'
+}
+
+// [C11 6.10.8p1] `__DATE__` is "Mmm dd yyyy" — space-padded, not zero-padded, which is
+// the difference from `time`'s own `DD` format and what makes it 11 characters.
+// `__TIME__` is "hh:mm:ss", 8 characters.
+//
+// The exact spelling is a clock, so only the length and the shape are pinned; asserting a
+// date would make the test fail at midnight.
+fn test_date_and_time_have_the_shape_c_spells_them() {
+	// The raw result is used rather than `pp`, which joins the token spellings and
+	// throws the rest away — the byte image is what carries the value here.
+	mut p := preprocessor([], [])
+	p.define_builtins()
+	r := p.run_text('char *d = __DATE__;\nchar *t = __TIME__;\n', 'test.c')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	strs := r.tokens.filter(it.kind == .str_)
+	assert strs.len == 2, 'expected two string literals, got ${strs.len}'
+	// Three space-separated fields, the middle two characters wide and space-padded.
+	d := strs[0].str_data.bytestr()
+	assert d.len == 11, 'got "${d}" (${d.len})'
+	assert d[3] == ` `
+	assert d[6] == ` `
+	t := strs[1].str_data.bytestr()
+	assert t.len == 8, 'got "${t}" (${t.len})'
+	assert t[2] == `:` && t[5] == `:`
+}
+
+// `__BASE_FILE__` is the top-level translation unit and must not change on an include,
+// which is what distinguishes it from `__FILE__`. It needs a field on the preprocessor
+// because the path an expansion is handed changes with every `#include`.
+fn test_base_file_does_not_follow_an_include() {
+	mut p := preprocessor([], [])
+	p.define_builtins()
+	r := p.run_text('char *a = __BASE_FILE__;', 'top/top.c')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	strs := r.tokens.filter(it.kind == .str_)
+	assert strs.len == 1, 'expected one string literal, got ${strs.len}'
+	assert strs[0].str_data.bytestr() == 'top/top.c'
+}
+
+// [C23 6.10.5.1] `__VA_OPT__(content)` is present only when the variadic part is
+// non-empty, and its content is the replacement list of the *current* macro — so a
+// parameter inside it is substituted.
+//
+// The emptiness test comes first, and that order is observable: `__VA_OPT__(EMPTY x)`
+// expands to nothing with no variadic arguments and to ` x` with one. Expanding the
+// content first would make it `< x>` both ways. Measured against gcc.
+fn test_va_opt_is_absent_when_the_variadic_part_is_empty() {
+	// The body has no `__VA_ARGS__`, so the argument itself is consumed and discarded —
+	// which is why `F(1)` answers `a , b` and not `a , b 1`.
+	assert pp('#define F(...) a __VA_OPT__(,) b\nF()').text == 'a b'
+	assert pp('#define F(...) a __VA_OPT__(,) b\nF(1)').text == 'a , b'
+	// A parameter inside the content is this macro's parameter, and is substituted.
+	assert pp('#define F(x, ...) f(__VA_OPT__(x))\nF(1)').text == 'f ( )'
+	assert pp('#define F(x, ...) f(__VA_OPT__(x, y))\nF(1, 2)').text == 'f ( 1 , y )'
+	// Empty content is legal and contributes nothing either way.
+	assert pp('#define F(...) a __VA_OPT__() b\nF(1)').text == 'a b'
+	// Nested parens inside the content do not close it early.
+	assert pp('#define F(...) a __VA_OPT__(g(1)) b\nF(2)').text == 'a g ( 1 ) b'
+	// Both spellings confirmed against gcc on the same inputs.
+}
+
+// [C23 6.10.5.1p3] forbids `__VA_OPT__` inside a `__VA_OPT__`. gcc diagnoses it, and
+// left to recurse it would not terminate — so it is reported rather than dropped.
+fn test_va_opt_inside_va_opt_is_reported_not_dropped() {
+	r := pp('#define F(...) a __VA_OPT__(x __VA_OPT__(y)) b\nF(1)')
+	assert r.errors.len > 0, 'expected a diagnostic, got none'
+	assert r.errors[0].contains('__VA_OPT__')
+}
+

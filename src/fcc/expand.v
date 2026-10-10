@@ -1,5 +1,8 @@
 module fcc
+
 import ast
+import os
+import time
 
 // backslash and hash are named constants rather than literals.
 //
@@ -30,7 +33,33 @@ fn (mut p Preprocessor) builtin_token(m Macro, tok ast.Token, path string) ast.T
 			p.counter++
 			p.counter.str()
 		}
+		// [C11 6.10.8p1] `__STDC__` is the integer constant 1, and the decimal spelling
+		// of the implementation's conformance. gcc prints a bare `1` with no quotes, and
+		// `strlen` of it is 1, which is what chibicc's macro.c asserts.
+		.stdc { '1' }
+		.date { date_spelling(time.now()) }
+		.time_ { time.now().hhmmss() }
+		.timestamp { timestamp_spelling(p.base_file) }
+		.base_file { p.base_file }
 		else { '0' }
+	}
+	// Most builtins are strings — a file name is text and a line number pastes and
+	// compares more usefully as one — but `__STDC__` is a number, and emitting it as
+	// `"1"` would hand `assert(int, int)` a `char[2]`. A numeric token needs both `kind`
+	// and `text`: `numeric_type` reads the text to decide the type and does not look at
+	// `val`, so flipping only the kind would give the default `int` and lose the value.
+	if m.builtin == .stdc {
+		return ast.Token{
+			kind: .num_
+			text: value
+			val:  i64(1)
+			len:  value.len
+			loc:  tok.loc
+			line: tok.line
+			// `numeric_type` also inspects the spelling, and a bare `1` is an int.
+			at_bol:    tok.at_bol
+			has_space: tok.has_space
+		}
 	}
 	return ast.Token{
 		kind:      .str_
@@ -46,13 +75,55 @@ fn (mut p Preprocessor) builtin_token(m Macro, tok ast.Token, path string) ast.T
 	}
 }
 
+// date_spelling renders `__DATE__`'s value: "Mmm dd yyyy".
+//
+// The day is space-padded, not zero-padded, which is the difference from `time`'s own
+// `DD` format and what makes the field 11 characters rather than 12. Measured: gcc
+// prints "Oct 10 2026" and chibicc's macro.c asserts strlen == 11.
+fn date_spelling(t time.Time) string {
+	return '${t.smonth()} ${t.day:2} ${t.year}'
+}
+
+// timestamp_spelling renders `__TIMESTAMP__`'s value: "Www Mmm dd hh:mm:ss yyyy".
+//
+// It is the *source file's modification time*, not the current time, which is what
+// distinguishes it from `__DATE__` followed by `__TIME__`. Twenty-four characters, and
+// the order is weekday, month, day, **time, year** — the year last, not as `__DATE__`
+// spells it. Measured against gcc, which prints "Sat Oct 10 13:32:29 2026" and whose
+// macro.c counterpart asserts strlen == 24.
+//
+// When the file cannot be stat'ed the current time is used rather than an empty string,
+// because a program that compares the result against something is then wrong in an
+// obvious way instead of not at all.
+fn timestamp_spelling(path string) string {
+	t := if st := os.stat(path) {
+		time.unix(st.mtime)
+	} else {
+		time.now()
+	}
+	return '${t.weekday_str()} ${t.smonth()} ${t.day:2} ${t.hhmmss()} ${t.year}'
+}
+
 // expand rescans a token stream, replacing every macro invocation.
 fn (mut p Preprocessor) expand(toks []ast.Token, path string) []ast.Token {
 	mut out := []ast.Token{}
 	mut i := 0
 	for i < toks.len {
 		tok := toks[i]
-		if tok.kind != .ident {
+		// Keywords are looked up too, not only identifiers.
+		//
+		// [C11 7.1.2p2] reserves keyword-named macros only "prior to the inclusion of
+		// the header", and DR 108 records the Committee's intention as allowing macros to
+		// mask a keyword. Keywords become reserved in phases 7 and 8, after expansion, so
+		// `#define if 5` followed by `int x = if;` is legal C and must see the 5. Measuring
+		// it: gcc, gcc -pedantic-errors and tcc all accept it silently, and chibicc's
+		// macro.c line 133 depends on it.
+		//
+		// The table is text-keyed and never inspects a token's kind, so this is the only
+		// gate in the way. `#if`/`#ifdef` are unaffected — `eval_condition` tokenises and
+		// evaluates without consulting the table, and `eval_ifdef` already accepts both
+		// kinds.
+		if tok.kind != .ident && tok.kind != .keyword {
 			out << tok
 			i++
 			continue
@@ -192,6 +263,38 @@ fn is_va(m Macro, name string) bool {
 	return name == '__VA_ARGS__' || (m.va_name.len > 0 && name == m.va_name)
 }
 
+// matching_paren returns the index of the `)` closing the `(` at `open`, or -1 when the
+// list is never closed.
+//
+// Nesting is counted rather than assumed flat, because `__VA_OPT__`'s content is an
+// arbitrary replacement list and a call or a cast inside it would otherwise close it
+// early. `m.body` ends with the tokenizer's eof token, whose text is empty, so a missing
+// `)` runs off the end and returns -1 instead of looping.
+fn matching_paren(body []ast.Token, open int) int {
+	mut depth := 0
+	for i in open .. body.len {
+		if body[i].text == '(' {
+			depth++
+		} else if body[i].text == ')' {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// has_va_opt reports whether a token list contains `__VA_OPT__`.
+fn has_va_opt(toks []ast.Token) bool {
+	for t in toks {
+		if t.text == '__VA_OPT__' {
+			return true
+		}
+	}
+	return false
+}
+
 // substitute replaces a macro's parameters in its body with the given arguments.
 //
 // It returns the substituted token list and, for a function-like macro, the
@@ -246,6 +349,40 @@ fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, line int) ([]ast
 	mut i := 0
 	for i < body.len {
 		t := body[i]
+		// [C23 6.10.5.1] `__VA_OPT__(content)`, present only when the variadic part is.
+		//
+		// The emptiness test is on a *hypothetical* substitution of `__VA_ARGS__`, so it
+		// is answered by `va_args` being empty, and the content is expanded only in the
+		// non-empty branch — which is the order that matters: `__VA_OPT__(EMPTY x)`
+		// expands to nothing when there are no variadic arguments and to ` x` when there
+		// are, and expanding the content first would make it `< x>` both ways. Measured
+		// against gcc: `#define G(...) <__VA_OPT__(EMPTY x)>` gives `<>` and `< x>`.
+		//
+		// The content is substituted by recursing on a copy of this macro with the
+		// content as its body, because it is the replacement list of the *current* macro
+		// and its parameters are this macro's parameters. A single `body[i+2..close]`
+		// copy would leave `x` in the output unsubstituted.
+		if t.text == '__VA_OPT__' && m.is_variadic && i + 1 < body.len
+			&& body[i + 1].text == '(' {
+			close := matching_paren(body, i + 1)
+			if close > i + 1 {
+				if va_args.len > 0 {
+					// [C23 6.10.5.1p3] forbids `__VA_OPT__` inside a `__VA_OPT__`, and gcc
+					// diagnoses it. Left to recurse it would not terminate, so it is
+					// reported rather than silently expanded or silently dropped.
+					if has_va_opt(body[i + 2..close]) {
+						p.errorf(line, '__VA_OPT__ may not appear inside __VA_OPT__')
+					} else {
+						mut inner := m
+						inner.body = body[i + 2..close].clone()
+						mut sub, _ := p.substitute(inner, args, line)
+						out << sub
+					}
+				}
+				i = close + 1
+				continue
+			}
+		}
 		// `# param`
 		if t.text == hash && i + 1 < body.len {
 			param := body[i + 1]
