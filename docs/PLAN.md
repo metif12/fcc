@@ -2,7 +2,7 @@
 
 ## Goal
 
-`vcc` replaces the bundled TinyCC that `vlang/v` uses as its default C backend on
+`fcc` replaces the bundled TinyCC that `vlang/v` uses as its default C backend on
 Windows, so that the dependency becomes pure V and is built from V source like the
 rest of the toolchain.
 
@@ -39,39 +39,39 @@ reported as a clean run.
 **Done:** contract documented and pinned by 12 tests; harness with 15 tests.
 
 **Remaining:** a corpus of V programs to compare `v.exe -cc tcc` against
-`v.exe -cc vcc` on.
+`v.exe -cc fcc` on.
 
 ### Phase 1 — C front end
 
-Reuse lemoncmd/vcc's skeleton, fill from chibicc.
+Reuse lemoncmd/fcc's skeleton, fill from chibicc.
 
 Scope: **full C11, chibicc-style** (decision D15). Narrowing this to only what V's
 codegen emits would be faster to reach, but it would reject the chibicc test suite
 that phase 2 depends on for correctness.
 
-- `src/vcc/tokenizer.v` — **done**: lexing, line splicing, both comment forms, every
+- `src/fcc/tokenizer.v` — **done**: lexing, line splicing, both comment forms, every
   integer and floating base including hex floats, the full escape set, wide and UTF
   literals, and `#` lines captured whole for the preprocessor
-- `src/vcc/preprocess.v` — **done**: `#define`/`#undef`, `#if`/`#ifdef`/`#ifndef`,
+- `src/fcc/preprocess.v` — **done**: `#define`/`#undef`, `#if`/`#ifdef`/`#ifndef`,
   `#elif`/`#else`/`#endif`, `#include` with the full search order, `#pragma once`,
   `#error`, `#line`, and macro expansion including `#`, `##` and the GNU variadic forms
-- `src/vcc/expand.v` — **done**: phase-2 expansion with the recursion guard
-- `src/vcc/cond_eval.v` — **done**: the `#if` expression evaluator
-- `src/vcc/parser.v` — **done**: declspec, declarators, struct, union, enum, typedef,
+- `src/fcc/expand.v` — **done**: phase-2 expansion with the recursion guard
+- `src/fcc/cond_eval.v` — **done**: the `#if` expression evaluator
+- `src/fcc/parser.v` — **done**: declspec, declarators, struct, union, enum, typedef,
   attributes, `typeof`, VLAs, initializers with designators, constant expressions,
   globals, and function bodies
-- `src/vcc/stmt.v` — **done**: the statement and assignment grammar. `if`, `for`,
+- `src/fcc/stmt.v` — **done**: the statement and assignment grammar. `if`, `for`,
   `while`, `do`, `switch`/`case`/`default`, `goto` and labels, `break`, `continue`,
   blocks, local declarations, expression statements, `return`, the compound assignments
   and `++`/`--` lowerings, function calls with per-argument conversion, `_Generic`, and
   GNU statement expressions
-- `src/vcc/types.v` — **done**: the type system measured against tcc rather than
+- `src/fcc/types.v` — **done**: the type system measured against tcc rather than
   assumed — `long` is 4 bytes, `long long` and `long double` are 8, `size_t` is 8, and
   `sizeof(void)` is 1. Struct, union, **bitfields**, enum, typedef, function pointers,
   arrays, VLA, `const`/`volatile`/`restrict`, and the implicit conversions
-- `src/vcc/eval.v` — **done**: constant expression evaluation, including the float
+- `src/fcc/eval.v` — **done**: constant expression evaluation, including the float
   forms `is_const_expr` has to fold, and the initializer byte writer
-- `src/vcc/dump.v` — **done**: `--dump-ast`, which is the acceptance signal for this
+- `src/fcc/dump.v` — **done**: `--dump-ast`, which is the acceptance signal for this
   phase. It prints each global's layout, initial data and relocations, and each
   function's frame and statement count
 
@@ -127,13 +127,13 @@ reported against the *including* file's path and line, and the arity of the
 generator. `.loc` directives are not emitted, so the objects carry no line
 information yet.
 
-**Acceptance: the chibicc test suite passes**, adapted to invoke `vcc -S` then
+**Acceptance: the chibicc test suite passes**, adapted to invoke `fcc -S` then
 `gcc`. This is the strongest correctness signal available anywhere in this
 project — it compares runtime behaviour against gcc, not text.
 
 **The suite is wired up and running. 8 of 18 files compile, assemble, link and
 execute; 10 fail, each on a real defect.** The runner reads the 18 test files from
-`rui314/chibicc` at `test/`, runs `vcc -S`, assembles with GNU `as`, links with gcc
+`rui314/chibicc` at `test/`, runs `fcc -S`, assembles with GNU `as`, links with gcc
 against the suite's own `common`, and executes.
 
 The blocker that stopped everything was a `.eof` sentinel (D33), fixed. The four
@@ -162,7 +162,7 @@ runs one suite file through the whole procedure and prints *all* of its stdout, 
 suite's `assert` prints one line per **passing** assertion and a differently-shaped line
 for the failing one, so the last line printed is the last *pass* before it, never the
 failure. Reading five lines off `suite.v` put me on four wrong hypotheses before that
-tool existed. `v run tools/onefile.v <name.c>` and it takes the suite, vcc and gcc paths
+tool existed. `v run tools/onefile.v <name.c>` and it takes the suite, fcc and gcc paths
 as further arguments, which is also how a build from `HEAD` is run for a comparison.
 
 | file | reported failure | cause |
@@ -215,7 +215,7 @@ node's `unique_label`, and `has_label` is tied to that being non-empty rather th
 node's kind — so an *unresolved* `&&x` is still reported as "not a constant" instead of
 becoming a relocation to an empty symbol name, which no assembler diagnoses usefully.
 
-Measured, not argued: **before** the fix `control.c` failed at vcc -S with
+Measured, not argued: **before** the fix `control.c` failed at fcc -S with
 `initializer element is not constant` at lines 94, 95 and 96; **after** it passes, and the
 emitted assembly gives `{&&v52,&&v52,&&v53}` two references to one label and three
 distinct labels for `{&&v41,&&v42,&&v43}`. The deferral is scoped to static locals
@@ -235,7 +235,7 @@ for that exact statement — all three fail it, so the expectation is a chibicc 
 and not a portable one. The arithmetic around it, `*&x` and `**z`, do pass.
 
 Re-measured 2026-10-09: three runs of the same statement gave `-801114008`,
-`-570426200` and `1132460008` under vcc. **The value is a different stack slot each
+`-570426200` and `1132460008` under fcc. **The value is a different stack slot each
 run**, which is what confirms the reading above: the arithmetic is right and the object
 it lands on is wherever this compiler happened to put the next local.
 
@@ -292,7 +292,7 @@ would expand the names the recursion guard and a wrong argument count deliberate
 in place, against whatever the file defined last, which is the original bug by another
 route.
 
-Four unit tests pin it at `src/vcc/preprocess_test.v` — a redefinition of the same name
+Four unit tests pin it at `src/fcc/preprocess_test.v` — a redefinition of the same name
 from `(...)` to `(x, ...)`, a `#define` after a use, an `#undef` between two uses, and
 the whole-file case. Three of the four go red against the broken flush, which is the
 control that they are testing something.
@@ -352,7 +352,7 @@ and every one of the fourteen printed a garbage pointer where `assert`'s third a
 should have been.
 
 It was invisible for the whole of phase 2 because every call in the 264 unit tests and the
-five working programs was between two vcc-compiled functions, which agree with each other
+five working programs was between two fcc-compiled functions, which agree with each other
 on the wrong convention. **A calling convention is only observable across a boundary**,
 and nothing in the project crossed one until the suite did. The target ABI recorded
 earlier in this file — `long` 4, pointers 8 — was measured correctly; it is *data layout*,
@@ -366,20 +366,20 @@ code generation rather than an ABI question.
 
 **Open, and narrowed but not solved: stack arguments.** A call with one stack argument —
 `printf(fmt, 1, 2, 3, 4)` — dies with an access violation, and `sum6(1,2,3,4,5,6)`
-called from vcc to vcc returns the wrong answer. That second one matters: it means the
-caller and the callee disagree *inside* vcc, so this is not an ABI question.
+called from fcc to fcc returns the wrong answer. That second one matters: it means the
+caller and the callee disagree *inside* fcc, so this is not an ABI question.
 
 What is measured, so the next attempt does not repeat it:
 
 | | first stack parameter | second |
 |---|---|---|
 | gcc's callee reads | `40(%rbp)` | `48(%rbp)` |
-| vcc's callee reads | `40(%rbp)` — matches | `48(%rbp)` |
+| fcc's callee reads | `40(%rbp)` — matches | `48(%rbp)` |
 
 So `assign_lvar_offsets`'s `8 + shadow_space` is right, and the callee side is not the
 fault. gcc's *caller* writes the arguments straight into their final slots —
 `movl $5, 32(%rsp)` and `movl $6, 40(%rsp)` — without pushing anything, which is the
-other structural difference: vcc builds the whole argument area on the stack and pops the
+other structural difference: fcc builds the whole argument area on the stack and pops the
 register arguments back out.
 
 Pushing the stack arguments **left to right** makes a six-argument call read
@@ -396,7 +396,7 @@ which is what gcc does.
 `struct` fail on `_Alignof(long)` = 8 against 4, `sizeof(struct { long x : 1; })` = 8
 against 4, and `sizeof(struct { char a; long b; })` = 16 against 8. All three are the
 recorded Linux-versus-Windows difference: chibicc's `long` is eight bytes, tcc's on this
-host is four, and vcc agrees with tcc. So the real count is **five** files computing a
+host is four, and fcc agrees with tcc. So the real count is **five** files computing a
 wrong answer, not nine, and three of them are a divergence to record rather than to fix.
 
 The other five wrong answers are ordinary code generation: `arith` on `++*p` through an
@@ -439,7 +439,7 @@ because chibicc's `va_list` and chibicc's `vsprintf` agreed with each other.
 That leaves two defensible answers, and no measurement picks between them:
 
 - **Follow this host's ABI.** `__va_area__` becomes an 8-byte pointer to a 176-byte save
-  area. Then a vcc-compiled program can pass a `va_list` to the real `vprintf`, and can
+  area. Then a fcc-compiled program can pass a `va_list` to the real `vprintf`, and can
   read one that `vprintf` filled in. That is the property that matters for replacing tcc,
   and it is what "a C compiler on Windows" means. `function.c` would then fail, because it
   is testing chibicc's private convention rather than the platform's.
@@ -469,7 +469,7 @@ typedef __builtin_va_list va_list;
 No `__va_list_tag`, no `gp_offset` arithmetic in a macro — the whole convention is five
 **compiler builtins**, which is why `sizeof(va_list)` is 8 and why nothing in it is a
 struct. So the layout committed in `051812b` is right, but it is only half the answer: the
-header is the one vcc will be asked to satisfy, because `-I` points at tcc's include
+header is the one fcc will be asked to satisfy, because `-I` points at tcc's include
 directory, and it delegates the entire mechanism to the compiler.
 
 **What is therefore missing is five builtins**, and it is one piece of work rather than
@@ -500,13 +500,13 @@ one thing the type decides, and it is 8, 16 or 8 depending on `sizeof(T)`.)*
 
 **Until they exist, no end-to-end `vprintf` test can be written, and the layout in
 `051812b` is a belief rather than a verified thing.** The differential test to write once
-they do: a program using `vprintf`, compiled by vcc and by tcc, compared line by line. tcc
+they do: a program using `vprintf`, compiled by fcc and by tcc, compared line by line. tcc
 is on this host, uses this ABI, and is the better oracle for this subsystem than the suite.
 
 **`function.c` lines 261 and 265 stay unfixable**, and the reason is now exact rather than
 probable: `test.h` defines its own `va_list` as `__va_elem[1]`, twenty-four bytes, which
 shadows the builtin one. `vsprintf` then receives a pointer to twenty-four bytes where it
-reads eight, and reads `gp_offset` and `fp_offset` as an address. Nothing vcc emits changes
+reads eight, and reads `gp_offset` and `fp_offset` as an address. Nothing fcc emits changes
 that, because the inconsistency is between the suite's declaration and mingw's library.
 
 **The escape table: isolated to one line, and the table itself is exonerated.** The
@@ -516,7 +516,7 @@ minimal case needs no preprocessor, no macro, no `#`:
 int main(void) { return "\a"[0] == 7 ? 0 : 1; }
 ```
 
-`tcc` exits 0. vcc exits 1. And the table is *not* the problem — the same declaration,
+`tcc` exits 0. fcc exits 1. And the table is *not* the problem — the same declaration,
 looked up the same way, in a standalone V program:
 
 ```v
@@ -564,14 +564,14 @@ sizeof(L'ab')=6        # three elements of two bytes
 ```
 
 and chibicc's own suite expects `sizeof(u"abc" "def") == 14` — seven elements of two bytes
-— which is the *same* number, so `string.c` and tcc agree here and **vcc is the outlier**:
+— which is the *same* number, so `string.c` and tcc agree here and **fcc is the outlier**:
 `string_element_type` returns `ty_int` for `L`, `u` and `U`, four bytes each, so
 `sizeof(u"abc" "def")` comes out 28.
 
 So the widths to use on this target, from the measurements rather than from the Linux
 convention:
 
-| prefix | vcc now | this target | note |
+| prefix | fcc now | this target | note |
 |---|---|---|---|
 | `L"…"` | 4 | **2** | `wchar_t` is 2 here, so `L` is 2 |
 | `u"…"` | 4 | **2** | `char16_t` |
@@ -603,12 +603,12 @@ Measured on `printf("a=%g b=%s c=%d", 3.5, "hi", 7)`:
 | | `%rcx` | `%rdx` | `%r8` | `%r9` |
 |---|---|---|---|---|
 | gcc | format string | 3.5 (mirror of `%xmm0`) | `"hi"` | 7 |
-| vcc, before | **3.5** | `"hi"` | 7 | — |
-| vcc, after | format string | 3.5 | `"hi"` | 7 |
+| fcc, before | **3.5** | `"hi"` | 7 | — |
+| fcc, after | format string | 3.5 | `"hi"` | 7 |
 
-vcc put the mirror in `%rcx`, overwriting the format string, so the program died
+fcc put the mirror in `%rcx`, overwriting the format string, so the program died
 with `0xC0000005` and printed nothing at all. The boundary test is
-`tools/suite`-style: one `printf` with a `double` in it, built by vcc, linked by
+`tools/suite`-style: one `printf` with a `double` in it, built by fcc, linked by
 gcc, run, and compared with tcc. The unit test that "covered" the mirror asserted
 a register that provably destroys its neighbour.
 
@@ -645,9 +645,9 @@ short version:
 
 **Verified by running**, five programs in `tests/endtoend/`: `varargs.c`,
 `va_start_offset.c`, `va_arg_stride.c`, `sum6.c` and `assign_convert.c`, each compiled by
-vcc and by tcc and compared on stdout *and* exit code, identical. `varargs.c` includes a
-case that hands a vcc-built `va_list` to mingw's `vprintf`, which is the part that cannot
-be checked by two vcc-compiled functions agreeing with each other.
+fcc and by tcc and compared on stdout *and* exit code, identical. `varargs.c` includes a
+case that hands a fcc-built `va_list` to mingw's `vprintf`, which is the part that cannot
+be checked by two fcc-compiled functions agreeing with each other.
 
 `tools/probe/probe.v` is the runner. It reads `tests/endtoend/` from the tree, so adding a
 program there is enough to have it compared, and it needs two environment variables:
@@ -681,8 +681,8 @@ alone. `docs/VARARGS.md` has the evidence for all three.
 **Two more pre-existing defects were found and are recorded, not fixed**, because both
 belong to the aggregate ABI rather than to the variadic walk. `docs/VARARGS.md` gives the
 reproductions. The larger one: an aggregate over two eightbytes is passed *by reference*
-on this target — gcc emits `leaq -64(%rbp), %rax; movq %rax, %rdx` — and vcc's `va_arg`
-reads the slot that way, but vcc's *caller* copies the bytes inline instead of passing the
+on this target — gcc emits `leaq -64(%rbp), %rax; movq %rax, %rdx` — and fcc's `va_arg`
+reads the slot that way, but fcc's *caller* copies the bytes inline instead of passing the
 address. The two halves agree with each other and with neither the platform nor the
 oracle, which is why such a call access-violates where tcc answers correctly. Fixing it
 means changing the convention on both sides for every struct-passing call in the compiler.
@@ -702,7 +702,7 @@ same product, same innermost stride, and `a[i][j]` reads and writes through the 
 reversed shape, so **every value came back right**. Two things noticed it, and both are
 now in `tests/endtoend/array_layout.c`:
 
-| | tcc | vcc before |
+| | tcc | fcc before |
 |---|---|---|
 | `&a[1] - &a[0]` | 20 | 12 |
 | `sizeof(*a)` | 20 | 12 |
@@ -711,7 +711,7 @@ now in `tests/endtoend/array_layout.c`:
 
 This is the worst of the five, because a *pointer to the row type* is exactly what crosses
 a compiler boundary. `int (*pa)[5] = a` then `pa` was reading a struct layout that no other
-compiler shares, and nothing inside vcc could ever see it.
+compiler shares, and nothing inside fcc could ever see it.
 
 **A plain binary `+` or `-` on a pointer was never scaled.** [C11 6.5.6p8] `p + n` is
 `p + n * sizeof(*p)`. `q[1]`, `q += 1` and `q++` all scaled — those paths go through
@@ -736,7 +736,7 @@ already computed.
 **A wide literal was typed at twice the width.** `L` and `u` were four bytes per element
 because chibicc is System V. Measured on this host:
 
-| | tcc | gcc | vcc before | vcc now |
+| | tcc | gcc | fcc before | fcc now |
 |---|---|---|---|---|
 | `sizeof(L"ab")` | 6 | 6 | 12 | 6 |
 | `sizeof(L"ab" "c")` | 8 | 8 | 16 | 8 |
@@ -749,7 +749,7 @@ and `u8"` outright, so those three are gcc's answer alone. This is the same deci
 
 It was worse than a wrong `sizeof`, because the *storage image* was already right —
 `string_initializer` takes the stride from the declared array, not from the literal — so
-vcc wrote `61 00 62 00 00 00` and then declared the object sixteen bytes wide.
+fcc wrote `61 00 62 00 00 00` and then declared the object sixteen bytes wide.
 
 **`sizeof` of a type name containing a VLA.** Only a bare VLA was handled; an array of one
 answered `array_len * 8`, the placeholder, so `sizeof(int[n][5])` was 40 where it is 100.
@@ -852,7 +852,7 @@ SysV tables at the top of `gen.v`. The register lists are the whole change for t
 case; the shadow space, the `%al` removal and the by-address `long double` are the rest.
 
 **The check is differential against tcc, which already uses this ABI on this host**, and
-the first acceptance test is the smallest one that crosses the boundary: a vcc program
+the first acceptance test is the smallest one that crosses the boundary: a fcc program
 that calls `printf` and prints one line. It currently dies with an access violation, and
 that program is the test.
 

@@ -1,5 +1,4 @@
-module vcc
-
+module fcc
 import ast
 
 // The declaration half of the parser.
@@ -294,7 +293,7 @@ fn (mut p Parser) consume_end() bool {
 
 // error_at records a diagnostic at a token.
 //
-// The message is prefixed `tcc:` rather than `vcc:` because that is what V's
+// The message is prefixed `tcc:` rather than `fcc:` because that is what V's
 // driver looks for: `v3_is_tcc_compilation_failure` treats any output line
 // starting with `tcc:` as a compiler failure, and a compiler that reported errors
 // in a format V does not recognise would make V fall back to `cc` instead of

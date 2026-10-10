@@ -2,8 +2,7 @@ module driver
 
 import os
 import src.backend
-import src.vcc
-
+import src.fcc
 // Command line handling and the invocation contract.
 //
 // The contract `vcc` has to satisfy is written out in docs/CONTRACT.md. This
@@ -77,9 +76,9 @@ pub mut:
 	options_not_yet_honoured map[string]string
 }
 
-pub const version = 'vcc 0.1.0 (phase 0)'
+pub const version = 'fcc 0.1.0 (phase 0)'
 
-pub const usage = 'usage: vcc [options] file...
+pub const usage = 'usage: fcc [options] file...
 
   -o <path>        write output to <path>
   -c               compile only, produce a relocatable object
@@ -295,7 +294,7 @@ fn need_value(args []string, i int, flag string) string {
 // implemented" is testable, where one that half-compiles a file is not.
 pub fn main(args []string) {
 	o := parse_args(args) or {
-		eprintln('vcc: ${err.msg()}')
+		eprintln('fcc: ${err.msg()}')
 		eprintln(usage)
 		exit(1)
 	}
@@ -308,7 +307,7 @@ pub fn main(args []string) {
 		return
 	}
 	if o.verbose {
-		eprintln('vcc: ${o.summary()}')
+		eprintln('fcc: ${o.summary()}')
 	}
 	if o.dump_tokens {
 		dump_tokens(o)
@@ -326,7 +325,7 @@ pub fn main(args []string) {
 		emit_asm(o)
 		return
 	}
-	eprintln('vcc: phase 1 — the front end runs, but no code is generated yet')
+	eprintln('fcc: phase 1 — the front end runs, but no code is generated yet')
 	exit(1)
 }
 
@@ -339,7 +338,7 @@ pub fn main(args []string) {
 fn dump_ast(o &Options) {
 	mut failed := false
 	for path in o.inputs {
-		mut p := vcc.preprocessor(o.includes, o.sys_includes)
+		mut p := fcc.preprocessor(o.includes, o.sys_includes)
 		for spec in o.defines {
 			p.define_from_option(spec)
 		}
@@ -352,7 +351,7 @@ fn dump_ast(o &Options) {
 			eprintln('${path}: ${e}')
 			failed = true
 		}
-		parsed := vcc.parse_tokens(pre.tokens, path, p.packs)
+		parsed := fcc.parse_tokens(pre.tokens, path, p.packs)
 		for e in parsed.errors {
 			eprintln(e)
 			failed = true
@@ -378,7 +377,7 @@ fn emit_asm(o &Options) {
 	mut first := true
 
 	for path in o.inputs {
-		mut p := vcc.preprocessor(o.includes, o.sys_includes)
+		mut p := fcc.preprocessor(o.includes, o.sys_includes)
 		p.define_builtins()
 		pre := p.run(path)
 		for e in pre.errors {
@@ -389,7 +388,7 @@ fn emit_asm(o &Options) {
 		// the result's own slice rather than to a temporary copy of its header. A copy
 		// is silently empty, and an empty globals list produces a one-line assembly
 		// file that assembles and links into nothing.
-		mut parsed := vcc.parse_tokens(pre.tokens, path, p.packs)
+		mut parsed := fcc.parse_tokens(pre.tokens, path, p.packs)
 		for e in parsed.errors {
 			eprintln(e)
 			failed = true
@@ -423,7 +422,7 @@ fn emit_asm(o &Options) {
 	if o.output == '' {
 		print(text)
 	} else if os.write_file(o.output, text) or { -1 } != 0 {
-		eprintln('vcc: cannot write ${o.output}')
+		eprintln('fcc: cannot write ${o.output}')
 		exit(1)
 	}
 }
@@ -431,7 +430,7 @@ fn emit_asm(o &Options) {
 // tokens. It is how phase 1 is validated, since every phase-2 acceptance criterion
 // depends on the front end being right.
 fn dump_preprocessed(o &Options) {
-	mut p := vcc.preprocessor(o.includes, o.sys_includes)
+	mut p := fcc.preprocessor(o.includes, o.sys_includes)
 	for spec in o.defines {
 		p.define_from_option(spec)
 	}
@@ -468,11 +467,11 @@ fn dump_tokens(o &Options) {
 	mut failed := false
 	for path in o.inputs {
 		src := os.read_file(path) or {
-			eprintln('vcc: cannot read ${path}: ${err.msg()}')
+			eprintln('fcc: cannot read ${path}: ${err.msg()}')
 			failed = true
 			continue
 		}
-		toks := vcc.tokenize(src)
+		toks := fcc.tokenize(src)
 		println('--- ${path}')
 		for t in toks {
 			if t.kind == .eof {

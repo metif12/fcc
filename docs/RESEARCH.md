@@ -8,9 +8,9 @@ design instead of inventing one. Every number below was measured, not recalled.
 Can a TCC-like C compiler be written in pure V, and can an existing project be
 reused to get there quickly?
 
-## Finding 1: `vcc` already exists, and is a dead end as a base
+## Finding 1: `fcc` already exists, and is a dead end as a base
 
-`lemoncmd/vcc` — "C compiler written in V", MIT, created 2019-10-02, last push
+`lemoncmd/fcc` — "C compiler written in V", MIT, created 2019-10-02, last push
 **2024-03-05**.
 
 Total V source: **77,550 bytes** across five files.
@@ -21,7 +21,7 @@ Total V source: **77,550 bytes** across five files.
 | `src/type.v` | 18,662 | C type system |
 | `src/gen.v` | 15,947 | x86-64 assembly text emitter |
 | `src/token.v` | 6,727 | tokenizer |
-| `vcc.v` | 541 | entry point |
+| `fcc.v` | 541 | entry point |
 
 Its own README lists as *work in progress*: **preprocessor, initialization,
 float, enum, compound literals**. There is no linker. It emits assembly text to
@@ -33,7 +33,7 @@ and the *hard* parts — preprocessor, float, ABI, linking — absent. Useful as
 skeleton; not usable as a finished front end. Its four-and-year staleness also
 means chibicc has moved well past it.
 
-`werdl/vcc` is a fork with one contributor and one star.
+`werdl/fcc` is a fork with one contributor and one star.
 
 ## Finding 2: the ecosystem has a gap where TCC lives
 
@@ -102,7 +102,7 @@ fn C.tcc_backtrace(fmt &char) i32
 and `panicing.c.v:52` and `:128` call it. `cfns.c.v:316` notes the declaration is
 guarded by `#ifdef __TINYC__`.
 
-The entire backtrace feature is **one function that `vcc` must export under this
+The entire backtrace feature is **one function that `fcc` must export under this
 exact name**. `tests/contract/contract_test.v` asserts this stays true, and
 additionally asserts no *second* `fn C.tcc_` symbol appears — if one does, phase
 4 grows.
@@ -134,7 +134,7 @@ rest of the runtime rather than in phase 2 with the code generator.
 
 | Component | Reusable from | How much |
 |---|---|---|
-| lexer, preprocessor, parser, types | chibicc | ~70% by design; ~40% already written in V by lemoncmd/vcc |
+| lexer, preprocessor, parser, types | chibicc | ~70% by design; ~40% already written in V by lemoncmd/fcc |
 | x86-64 codegen | chibicc `codegen.c` (43,920 B) | direct port |
 | x86-64 instruction encoding | Intel SDM | write from spec, not from TCC (LGPL) |
 | object writer and linker | **nothing** | must be written; TCC is LGPL and is the only reference |

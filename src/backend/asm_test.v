@@ -2,8 +2,7 @@ module backend
 
 import os
 import src.ast
-import src.vcc
-
+import src.fcc
 // Backend tests.
 //
 // The assertions are about the text an assembler sees, not about a running
@@ -14,7 +13,7 @@ import src.vcc
 
 // parsed_globals is the front end's globals for a snippet, without a preprocessor.
 fn parsed_globals(src string) []&ast.Obj {
-	r := vcc.parse_tokens(vcc.tokenize(src), 'test.c', []vcc.PackEvent{})
+	r := fcc.parse_tokens(fcc.tokenize(src), 'test.c', []fcc.PackEvent{})
 	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
 	return r.globals
 }
@@ -221,7 +220,7 @@ fn test_a_cast_between_two_identical_types_emits_nothing() {
 	mut g := AsmGen{}
 	g.out = []
 	g.emit = &TextEmitter{}
-	int_ty := vcc.ty_int
+	int_ty := fcc.ty_int
 	g.cast(int_ty, int_ty)
 	assert g.out.len == 0
 }
@@ -230,8 +229,8 @@ fn test_a_cast_to_bool_is_a_comparison() {
 	mut g := AsmGen{}
 	g.out = []
 	g.emit = &TextEmitter{}
-	int_ty := vcc.ty_int
-	bool_ty := vcc.ty_bool
+	int_ty := fcc.ty_int
+	bool_ty := fcc.ty_bool
 	g.cast(int_ty, bool_ty)
 	// Not a move: a value is true when it is not zero, which is a comparison.
 	assert g.out.join('\n').contains('cmp $0, %eax')
@@ -242,7 +241,7 @@ fn test_a_cast_to_void_emits_nothing() {
 	mut g := AsmGen{}
 	g.out = []
 	g.emit = &TextEmitter{}
-	g.cast(vcc.ty_int, vcc.ty_void)
+	g.cast(fcc.ty_int, fcc.ty_void)
 	assert g.out.len == 0
 }
 

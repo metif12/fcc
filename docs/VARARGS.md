@@ -2,7 +2,7 @@
 
 Measured 2026-10-06 on this host, against mingw gcc 15.2 and tcc 0.9.28rc, which
 agree on every shape below. The tcc builds used tcc's own `include/` directory; the
-vcc builds were given the same directory with `-I`, because vcc has no built-in
+fcc builds were given the same directory with `-I`, because fcc has no built-in
 include path and a probe that fails on `#include <stdio.h>` measures the include path
 rather than the compiler.
 
@@ -98,7 +98,7 @@ A program doing only
 double s = 0; s += 1.5; s += 2.5; s += 3.0; return s;
 ```
 
-returned `3.7756e+150` under vcc and `7` under both gcc and tcc. Confirmed pre-existing
+returned `3.7756e+150` under fcc and `7` under both gcc and tcc. Confirmed pre-existing
 by building the commit before this work: same garbage. Fixed in `add_type`, which now
 converts the right operand to the left operand's type — [C11 6.5.16.1], and the left
 type is fixed because it is the object being stored into, so `usual_arith_conv` is the
@@ -108,7 +108,7 @@ wrong helper to reach for.
 size of the stack argument area by counting one eight-byte slot per argument, with a
 special case for `long double`. An aggregate larger than two eightbytes is pushed by
 `push_struct`, which reserves its whole size, so the caller's own cleanup was short by
-`size / 8 - 1` and vcc refused to compile the program with `function "main" left 3 values
+`size / 8 - 1` and fcc refused to compile the program with `function "main" left 3 values
 on the stack` — a diagnostic naming the stack rather than the argument that unbalanced
 it. It now counts `align_to(size, 8) / 8`, which is what `classify_args` had been
 reserving all along.
@@ -144,16 +144,16 @@ and it is recorded here rather than patched.
 `take(1, q, 30)` with a 32-byte `q` it emits `leaq -64(%rbp), %rax; movq %rax, %rdx`,
 the address in the argument register, and `va_arg` reads `movq (%rcx), %rax` through it.
 
-vcc's *caller* does not do that. `push_struct` copies the whole aggregate onto the stack
-argument area, and `classify_args` reserves `align_to(size, 8) / 8` slots for it, so vcc
-passes the bytes inline. vcc's reader and vcc's writer therefore agree with each other
+fcc's *caller* does not do that. `push_struct` copies the whole aggregate onto the stack
+argument area, and `classify_args` reserves `align_to(size, 8) / 8` slots for it, so fcc
+passes the bytes inline. fcc's reader and fcc's writer therefore agree with each other
 and with neither the platform nor the oracle, which is why a `va_arg` of a 32-byte
 aggregate access-violates where tcc returns the right answer:
 
 ```c
 struct Q32 { long long a, b, c, d; };
 struct Q32 q = {1,2,3,4};
-take(1, q, 30);   // vcc: 0xC0000005   gcc, tcc: fine
+take(1, q, 30);   // fcc: 0xC0000005   gcc, tcc: fine
 ```
 
 It is pre-existing and has nothing to do with varargs — the same call through a
@@ -162,7 +162,7 @@ variadic walk:
 
 ```c
 void h(struct Q32 s);
-h(q);             // vcc: function "main" left 3 values on the stack
+h(q);             // fcc: function "main" left 3 values on the stack
 ```
 
 Fixing it means changing the convention on both sides — pass the address instead of the
@@ -172,12 +172,12 @@ owns aggregate layout, not with the varargs builtins.
 
 ## What is verified and what is not
 
-**Verified by running**, `tests/endtoend/`, every program compiled by vcc and by tcc and
+**Verified by running**, `tests/endtoend/`, every program compiled by fcc and by tcc and
 compared on stdout *and* exit code: `varargs.c`, `va_start_offset.c`, `va_arg_stride.c`,
 `sum6.c` and `assign_convert.c`, all matching.
 
-`varargs.c` is the decisive one: it passes a vcc-built `va_list` to mingw's `vprintf`,
-which walks it according to the platform ABI and knows nothing about vcc.
+`varargs.c` is the decisive one: it passes a fcc-built `va_list` to mingw's `vprintf`,
+which walks it according to the platform ABI and knows nothing about fcc.
 
 ```
 sum6=21 sum3=60 dsum=7 str=hello dbl=3.25 i=77 forward: i=42 d=2.5 s=ok
@@ -199,7 +199,7 @@ aggregate over two eightbytes is the other unverified shape, for the reason abov
 **Permanently unfixable in the suite:** `function.c` lines 261 and 265, and now also
 line 96. `test.h` declares its own 24-byte `va_list` and `function.c` reads
 `__va_area__` — the local this work removed, because it is the SysV mechanism and not
-what this target uses. Nothing vcc emits changes that; the inconsistency is between the
+what this target uses. Nothing fcc emits changes that; the inconsistency is between the
 suite's declaration and mingw's library. `function.c` now fails to compile on
 `undefined variable "__va_area__"` rather than computing a wrong answer, which is a
 better failure but is still the same recorded divergence.

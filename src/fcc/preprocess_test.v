@@ -1,5 +1,4 @@
-module vcc
-
+module fcc
 import os
 
 // Preprocessor tests.

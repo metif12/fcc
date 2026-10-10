@@ -1,5 +1,4 @@
-module vcc
-
+module fcc
 import ast
 
 // Constant expressions, and the writing of initializer byte images.

@@ -1,5 +1,4 @@
-module vcc
-
+module fcc
 import ast
 
 // Statement and expression tests.

@@ -37,12 +37,12 @@ preprocessor. V passes `-shared` for DLLs.
 
 ---
 
-## D3. lemoncmd/vcc's skeleton, chibicc's current source for the rest
+## D3. lemoncmd/fcc's skeleton, chibicc's current source for the rest
 
 **Decision.** Keep the four-file skeleton; port the missing parts from chibicc
-today rather than from lemoncmd/vcc.
+today rather than from lemoncmd/fcc.
 
-**Why.** lemoncmd/vcc is ~70% of a chibicc port with the easy parts finished and
+**Why.** lemoncmd/fcc is ~70% of a chibicc port with the easy parts finished and
 the hard parts absent. Its parser predates four years of chibicc development. The
 skeleton is worth keeping; it is not worth treating as authoritative.
 
@@ -76,13 +76,13 @@ right answer wrongly.
 
 ## D6. Unknown flags are a hard error; known-but-unimplemented flags are recorded
 
-**Decision.** An unrecognised option aborts. An option vcc knows but cannot honour
+**Decision.** An unrecognised option aborts. An option fcc knows but cannot honour
 yet — `-imacros`, `-idirafter`, `--sysroot` — is recorded in
 `options_not_yet_honoured` and surfaced by `--verbose`.
 
 **Why.** V computes one large flag set for every C compiler. Refusing the options
-that do not apply would make vcc unusable as a drop-in, so those must be tolerated.
-But silently dropping a flag vcc does not recognise produces a wrong binary with no
+that do not apply would make fcc unusable as a drop-in, so those must be tolerated.
+But silently dropping a flag fcc does not recognise produces a wrong binary with no
 diagnostic, which is the worst possible failure mode. The asymmetry is deliberate.
 
 ---
@@ -132,7 +132,7 @@ would trade the project's only strong correctness signal for a few weeks.
 **Consequence.** Phase 1 is larger than the minimum. Accepted.
 
 **Not in scope.** `-O` and `-W` selection flags are parsed and ignored, because V
-only reaches for gcc/clang under `-prod` (`driver.v:7766`) and never asks vcc to
+only reaches for gcc/clang under `-prod` (`driver.v:7766`) and never asks fcc to
 optimise.
 
 ---
@@ -147,19 +147,19 @@ essentially every instruction, not in a corner of the backend. Retrofitting it
 after phase 3 would mean reworking the emitter that phase 2 already validated.
 Doing it first costs a little in phase 3 and removes a fork entirely.
 
-**Consequence.** `vcc` becomes a genuine full replacement rather than one that
+**Consequence.** `fcc` becomes a genuine full replacement rather than one that
 falls back to gcc for DLL builds.
 
 ---
 
-## D17. `vcc` provides `tcc_backtrace` itself
+## D17. `fcc` provides `tcc_backtrace` itself
 
-**Decision.** Implement the backtrace in vcc's runtime, walking frames with
+**Decision.** Implement the backtrace in fcc's runtime, walking frames with
 dbghelp on Windows.
 
 **Why.** It keeps `vlang/v` unmodified, which matters because the alternative —
 adding a second backtrace backend to V — requires upstream to accept a change and
-means vcc is only usable after that lands.
+means fcc is only usable after that lands.
 
 **Cost, stated plainly.** Frame walking and symbolization is a subsystem in its own
 right, and it must be correct: a backtrace that crashes while reporting a crash is
@@ -170,7 +170,7 @@ cannot block the earlier phases.
 
 ## D20. The C ABI is measured against tcc, not assumed from chibicc
 
-**Decision.** Every size, alignment and `size_t` width in `src/vcc/types.v` comes
+**Decision.** Every size, alignment and `size_t` width in `src/fcc/types.v` comes
 from a probe compiled by the bundled tcc, and the measured values differ from
 chibicc's assumptions on x86-64:
 
@@ -183,7 +183,7 @@ chibicc's assumptions on x86-64:
 | `size_t` | 8 (`unsigned long long`) | 8 |
 | `sizeof(void)` | 1 | 1 |
 
-**Why.** `vcc` has to be layout-compatible with the tcc it replaces, on the same
+**Why.** `fcc` has to be layout-compatible with the tcc it replaces, on the same
 headers and the same generated C. chibicc's layout is System V's, which differs from
 tcc's on Windows in three places that a struct layout test would catch and a
 type-system unit test would not.
@@ -239,7 +239,7 @@ against tcc for the same input:
 
 ```
 tcc:  ms.c:2: error: ';' expected (got 'int')
-vcc:  tcc: ms.c:2: ';' expected (got 'int')
+fcc:  tcc: ms.c:2: ';' expected (got 'int')
 ```
 
 The line is the unexpected token's, not the line that lacks the semicolon. Reporting
@@ -324,7 +324,7 @@ alone cannot tell `int *p = &table[3];` from `int *q = p;`.
 
 Measured against tcc for all four:
 
-| initializer | tcc | vcc |
+| initializer | tcc | fcc |
 |---|---|---|
 | `int *p = &table[3];` | accepted | accepted, `reloc at 0: table+12` |
 | `char *s = "abc";` | accepted | accepted, `reloc at 0: .L..1+0` |
@@ -377,7 +377,7 @@ it.
 `.size x, n` and the `.tdata`/`.tbss` section spellings are not used.
 
 **Why.** GNU as rejects two of them on this target. Measured on the output of
-`vcc -S`:
+`fcc -S`:
 
 ```
 data.s:2: Error: unknown pseudo-op: `.local'
@@ -505,7 +505,7 @@ if target_os in ['ios', 'wasm32', 'wasm32_emscripten', 'wasm32_wasi'] {
 ```
 
 and `vlib/v/gen/wasm/gen.v` emits a binary module directly, as the arm64 backend
-does. So a `vcc -target wasm32_wasi` backend could never be invoked by V, never be
+does. So a `fcc -target wasm32_wasi` backend could never be invoked by V, never be
 exercised by the contract tests, and never be validated by the differential
 harness. It would be a second product attached to a project whose premise is
 being a drop-in tcc replacement for Windows.
@@ -531,10 +531,10 @@ semantic and phase 6 already wants macOS.
 Recorded rather than decided, because each of them is a question about the finished
 compiler rather than about the code in front of me:
 
-- **The PR.** `origin` is `https://github.com/metif12/vcc.git`. Whether the finished
+- **The PR.** `origin` is `https://github.com/metif12/fcc.git`. Whether the finished
   work lands as one PR from a branch, or as a series, is not decided.
 - **The `tcc:` diagnostic prefix.** Every message is prefixed `tcc:` because V's
-  `v3_is_tcc_compilation_failure` recognises nothing else. Phase 5 adds `vcc` to that
+  `v3_is_tcc_compilation_failure` recognises nothing else. Phase 5 adds `fcc` to that
   check, and the prefix should change with it — one search, but it must not be done
   before then or V falls back to `cc` and reports nothing.
 - **`asm` and `_Atomic` compound assignment.** Both are reported rather than
@@ -549,20 +549,20 @@ compiler rather than about the code in front of me:
 
 ### C1. The `libtcc.dll` requirement was wrong
 
-I claimed the `fastc` parallel path uses TinyCC's shared library and that `vcc`
+I claimed the `fastc` parallel path uses TinyCC's shared library and that `fcc`
 would need a `libvcc` equivalent. That was wrong twice over.
 
 `vlib/v/gen/fastc/link.v:19` selects the in-process library only under
 `$if macos && !tinyc && !fastc_selfhost ?&& !v3_backend`. On Windows the `$else`
 branch runs `fastc_run_command`, invoking the linker as a subprocess — exactly what
-`vcc` will do. The whole branch is also disabled under `v3_backend`, so it is inert
+`fcc` will do. The whole branch is also disabled under `v3_backend`, so it is inert
 in the tree this project targets.
 
 Confirmed by absence: the only link files are `link.v` and `link_darwin.c.v`.
 There is no `link_windows.c.v`, and `libtcc.dll` (359 KB) has no reference
 anywhere in the tree.
 
-**Therefore `vcc` needs nothing resembling `libtcc` on Windows.** The question is
+**Therefore `fcc` needs nothing resembling `libtcc` on Windows.** The question is
 closed. It resurfaces only in phase 6, where macOS genuinely does use it.
 
 ### C2. `libgc.a` was measured, not assumed
@@ -590,7 +590,7 @@ loose grep would have produced a confident, wrong dependency list.
 
 **New finding.** `tcc_atomic_s_arg` (`driver.v:232`) returns an empty string on
 Windows: `atomic.S` is linked only for macOS-arm64 and the BSDs. So on Windows those
-four symbols come from `libtcc1.a` today, and `vcc` must supply them.
+four symbols come from `libtcc1.a` today, and `fcc` must supply them.
 
 That is cheap — all four are the standard GCC libatomic ABI, and each is a single
 `lock`-prefixed instruction on x86-64. Roughly forty lines, so it is not a decision
@@ -605,7 +605,7 @@ Recorded because each one cost a cycle and each fails in a misleading way.
 **Decision.** `ast.Keyword` spellings live in `keyword_name()` and
 `keyword_from_spelling()`, both `match` statements. There is no map.
 
-**Why.** A `pub const map[Keyword]string` in `vcc` behaved wrongly: it reported
+**Why.** A `pub const map[Keyword]string` in `fcc` behaved wrongly: it reported
 `len == 43` for a 50-entry literal, and `.case_` returned `'while'`. The symptom
 in the compiler was that `return` lexed as an identifier.
 
@@ -624,7 +624,7 @@ Isolated probes, each of which asserts its own verdict:
 
 So the map type itself is fine. The defect is narrower and is this: **a map
 literal whose key is not a member of the key's enum is silently discarded.** In
-`vcc` the enum declared `_alignas`, `_alignof`, `_atomic`, `_generic`,
+`fcc` the enum declared `_alignas`, `_alignof`, `_atomic`, `_generic`,
 `_noreturn`, `_static_assert`, `_thread_local` while `keyword_names` used
 `.alignas`, `.alignof`, `.atomic`, `.generic`, `.noreturn`, `.static_assert`,
 `.thread_local`. Seven keys, none of them members of the enum. 50 − 7 = **43**,
@@ -679,7 +679,7 @@ enum-keyed `const` maps. Probes say otherwise:
 | 10-entry map, 4 keys **not** members of the key enum | `len == 6`, silently |
 
 So the map type is fine. The actual rule is narrow: **a map literal key that is not a
-member of the key enum is discarded without any diagnostic.** In `vcc` the enum
+member of the key enum is discarded without any diagnostic.** In `fcc` the enum
 declared `_alignas`, `_alignof`, `_atomic`, `_generic`, `_noreturn`, `_static_assert`,
 `_thread_local` while `keyword_names` used `.alignas`, `.alignof`, `.atomic`,
 `.generic`, `.noreturn`, `.static_assert`, `.thread_local`. Seven mismatched keys,
@@ -716,7 +716,7 @@ nothing. The function is now a plain loop and the revert is meaningful.
 ### `v fmt` did not corrupt anything mysterious: this is a known, fixed bug
 
 An earlier revision of this note blamed `v fmt` for corrupting
-`src/vcc/tokenizer.v` twice and called it a formatter defect. **That was wrong, and
+`src/fcc/tokenizer.v` twice and called it a formatter defect. **That was wrong, and
 checking the reports showed why.**
 
 **The bug is real.** `v fmt -w` rewrites a typed array initializer with positional
