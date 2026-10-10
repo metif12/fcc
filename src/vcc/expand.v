@@ -290,8 +290,25 @@ fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, line int) ([]ast
 			if idx := param_index(m, rhs.text) {
 				r_tokens = if idx < named { args[idx].clone() } else { []ast.Token{} }
 			}
-			out << paste(l_tokens, r_tokens)
+			mut joined := paste(l_tokens, r_tokens)
 			i += 3
+			// `x##y##z` is a chain, and one paste per position is not enough: without
+			// this loop the second `##` matched no branch above and fell through to
+			// `out << t`, so `paste4(1,2,3)` expanded to `12 ## 3` and the parser
+			// reported `expected ",", found "##"` followed by `too many arguments`
+			// against `assert`'s arity. The pasted result's last token is the left
+			// operand of the next `##`, which is why the chain is walked here rather
+			// than inside `paste`: the right-hand operands come from the body this
+			// loop is already walking.
+			for i + 1 < body.len && body[i].text == hashhash {
+				mut n_tokens := [body[i + 1]].clone()
+				if idx := param_index(m, body[i + 1].text) {
+					n_tokens = if idx < named { args[idx].clone() } else { []ast.Token{} }
+				}
+				joined = paste(joined, n_tokens)
+				i += 2
+			}
+			out << joined
 			continue
 		}
 		if idx := param_index(m, t.text) {
@@ -384,52 +401,39 @@ fn string_body(text string) []u8 {
 	return out
 }
 
-// paste concatenates two token sequences and re-lexes the result, following C11
-// 6.10.3.3.
+// paste joins the last token of the left argument with the first token of the right,
+// following C11 6.10.3.3p2.
 //
-// The result must be a single valid token. When the joined text re-lexes as more
-// than one token the behaviour is undefined; the re-lexed tokens are emitted anyway,
-// because that is closer to the intent than a single identifier that the parser will
-// later reject with a worse message.
-fn paste(lhs []ast.Token, rhs []ast.Token) ast.Token {
-	joined := concat_text(lhs) + concat_text(rhs)
+// Only the two boundary tokens are joined. The tokens before the last on the left and
+// after the first on the right stay ordinary tokens either side, which is what makes
+// `paste(1+i,3)` produce `1`, `+`, `i3` rather than the single identifier `1+i3`. This
+// used to concatenate the two arguments whole, so every `x##y` whose operand held more
+// than one token came out as one identifier the parser then rejected with
+// `undefined variable "1+i3"` — a message about the wrong thing entirely, and the reason
+// four lines of chibicc's macro.c failed.
+//
+// An argument with no tokens is a placemarker (p2): it contributes no boundary token, so
+// `x##y` with an empty `y` is `x`. `collect_args` already represents `f(5,)` as an empty
+// argument, so the placemarker rule needs no special case at the call site.
+//
+// Returns a list rather than a token, because a paste that is not one at a chain's end
+// sits *between* other tokens: `2##x` with `x` bound to `1+2` is `21`, `+`, `2`.
+fn paste(lhs []ast.Token, rhs []ast.Token) []ast.Token {
+	if lhs.len == 0 {
+		return rhs.clone()
+	}
+	if rhs.len == 0 {
+		return lhs.clone()
+	}
+	mut out := lhs[..lhs.len - 1].clone()
+	joined := lhs[lhs.len - 1].text + rhs[0].text
 	toks := tokenize_fragment(joined)
-	mut out := []ast.Token{}
 	for t in toks {
 		if t.kind == .eof {
 			continue
 		}
 		out << t
 	}
-	if out.len == 1 {
-		return out[0]
-	}
-	return ast.Token{
-		kind: .ident
-		text: joined
-		len:  joined.len
-	}
-}
-
-// concat_text renders a token sequence back to its spelling, inserting a space only
-// where one is needed to keep the tokens apart.
-fn concat_text(toks []ast.Token) string {
-	mut out := ''
-	for t in toks {
-		if out.len > 0 && needs_space(out, t.text) {
-			out += ' '
-		}
-		out += t.text
-	}
+	out << rhs[1..].clone()
 	return out
-}
-
-// needs_space reports whether a separator is required between two adjacent spellings.
-fn needs_space(left string, right string) bool {
-	if left.len == 0 || right.len == 0 {
-		return false
-	}
-	a := left[left.len - 1]
-	b := right[0]
-	return is_ident_byte(a) && is_ident_byte(b)
 }

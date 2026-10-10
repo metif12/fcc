@@ -202,6 +202,51 @@ fn test_gnu_comma_deletion_when_variadic_is_empty() {
 	assert preprocessed('#define F(a,...) f(a , ## __VA_ARGS__)\nF(1,2)') == 'f ( 1 , 2 )'
 }
 
+// [C11 6.10.3.3p2] `##` joins the *last* token of its left argument with the *first*
+// token of its right one. Everything either side of those two tokens is untouched.
+//
+// It joined the two arguments whole instead, so `paste(1+i,3)` came out as the single
+// identifier `1+i3` and the parser reported `undefined variable "1+i3"` — a message
+// about the wrong thing entirely, which is why four lines of chibicc's macro.c failed
+// for a reason that named no defect. The same defect made `##` in a chain
+// uncontrollable: see the chain tests below.
+fn test_paste_joins_only_the_boundary_tokens() {
+	assert preprocessed('#define P(x,y) x##y\nP(1+i,3)') == '1 + i3'
+	assert preprocessed('#define P(x) x##5\nP(1+2)') == '1 + 25'
+	assert preprocessed('#define P(x) 2##x\nP(1+2)') == '21 + 2'
+	assert preprocessed('#define P(x,y) x##y\nP(1,5)') == '15'
+	assert preprocessed('#define P(x,y) x##y\nP(0,xff)') == '0xff'
+	assert preprocessed('#define P(x,y) x##y\nP(foo,bar)') == 'foobar'
+}
+
+// [C11 6.10.3.3p2] An argument with no tokens is a placemarker: it contributes no
+// boundary token, so `x##y` with an empty `y` is just `x`. `collect_args` already
+// represents `f(5,)` as an empty argument, so this needs no special case.
+fn test_paste_with_an_empty_argument_is_a_placemarker() {
+	assert preprocessed('#define P(x,y) x##y\nP(5,)') == '5'
+	assert preprocessed('#define P(x,y) x##y\nP(,5)') == '5'
+}
+
+// `x##y##z` is a chain, and one paste per position is not enough. Without a chain loop
+// the second `##` matched no branch, fell through to the ordinary-token path, and
+// `paste4(1,2,3)` expanded to `12 ## 3` — which the parser then reported as
+// `expected ",", found "##"` and, because `expect` advances anyway, `too many arguments`
+// against `assert`'s arity. Two messages, one defect, and the arity check was right.
+fn test_paste_handles_a_chain() {
+	assert preprocessed('#define P(x,y,z) x##y##z\nP(1,2,3)') == '123'
+	// Left-associative, and confirmed against gcc rather than assumed: the first paste
+	// glues `i` to `2`, and that result's last token — `i2` — is the left operand of the
+	// second paste, so `j+3` contributes only its first token `j`. gcc answers
+	// `1 + i2j + 3` for exactly this input.
+	assert preprocessed('#define P(x,y,z) x##y##z\nP(1+i,2,j+3)') == '1 + i2j + 3'
+	// The chain is left-associative: `x##y` is pasted first, and its result's last token
+	// is the left operand of the next `##`. That is what makes `P(x##1, 2)` with x bound
+	// to 3 answer `312` and not `21` — the inner paste gives `31`, and the outer pastes
+	// its last token onto `2`. Confirmed against gcc, which answers the same.
+	assert preprocessed('#define P(a,b) a##b\n#define Q(x) P(x##1, 2)\nQ(3)') == '312'
+}
+
+
 // --- conditionals ---
 
 fn test_if_true_branch_is_kept() {
