@@ -160,6 +160,41 @@ fn test_gnu_named_variadic() {
 	assert preprocessed('#define F(a,args...) [a|args]\nF(1,2,3)') == '[ 1 | 2 , 3 ]'
 }
 
+// [C11 6.10p7] A preprocessing directive takes effect from the point it appears.
+//
+// This is the regression test for a defect that made every `#define` in a file take
+// effect *retroactively*, because phase 2 ran one expansion pass over the whole stream
+// after every directive had been consumed. With it, `M14()` below was expanded with the
+// *second* definition of `M14`: it reported `requires 1 arguments, but 0 given` against
+// the first line and left the call unexpanded. Measured on chibicc's macro.c line 347.
+// The same defect is what made a real `#include <stdio.h>` unusable here, reporting
+// `macro getwchar requires 0 arguments, but 1 given` on mingw's own headers.
+fn test_a_define_takes_effect_at_its_own_line_not_retroactively() {
+	// The first call uses the first definition...
+	assert preprocessed('#define M(...) 3\nint a = M();') == 'int a = 3 ;'
+	// ...and a later redefinition does not reach back to it.
+	assert preprocessed('#define M(...) 3\nint a = M();\n#define M(x, ...) f(1,2,x,__VA_ARGS__)\nint b = M(3,4,5);') == 'int a = 3 ; int b = f ( 1 , 2 , 3 , 4 , 5 ) ;'
+}
+
+// The redefinition across the variadic boundary is the nastier shape: the same name
+// changes from pure-variadic to named-plus-variadic, and the earlier call has to keep
+// the definition it was written against.
+fn test_a_redefinition_across_the_variadic_boundary() {
+	assert preprocessed('#define M(...) 3\nint a = M();\n#define M(x, ...) x\nint b = M(5);') == 'int a = 3 ; int b = 5 ;'
+}
+
+// A macro defined *between* two uses is the same rule seen from the other side: the
+// earlier use must not expand at all.
+fn test_a_define_after_a_use_does_not_reach_back() {
+	assert preprocessed('int a = G;\n#define G 7\nint b = G;') == 'int a = G ; int b = 7 ;'
+}
+
+// An `#undef` between two uses is symmetric, and is the case a single whole-file pass
+// gets wrong in the opposite direction.
+fn test_an_undef_between_two_uses() {
+	assert preprocessed('#define G 7\nint a = G;\n#undef G\nint b = G;') == 'int a = 7 ; int b = G ;'
+}
+
 fn test_gnu_comma_deletion_when_variadic_is_empty() {
 	// glibc headers depend on this extension: the comma disappears when nothing
 	// follows it.

@@ -211,6 +211,72 @@ fn test_an_undeclared_label_is_reported() {
 	assert r.errors[0].contains('undeclared label "nowhere"')
 }
 
+// label_gvar finds the anonymous global a static local became, by its relocations. A
+// static local is the only global with initial-data relocations in these snippets, and
+// `__func__` has none, so the flag picks it out without knowing its generated name.
+fn label_gvar(r ParseResult) &ast.Obj {
+	for obj in r.globals {
+		if obj.rel.len > 0 {
+			return obj
+		}
+	}
+	assert false, 'no global with relocations'
+	return unsafe { nil }
+}
+
+// [GNU] A static local initialized from labels used as values.
+//
+// This was reported as `initializer element is not constant` at the `static void *`
+// line, because the byte image was written while the initializer was still being
+// parsed and `&&a` carried no label yet. Measured on chibicc's own control.c lines
+// 94-96, which failed at vcc -S before the deferral and pass now.
+fn test_a_static_local_initialized_from_a_label_as_a_value() {
+	r := parsed_src('int f(int n) { static void *p[] = {&&a, &&a, &&b}; goto *p[0]; a: return 1; b: return 2; }\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	obj := label_gvar(r)
+	assert obj.rel.len == 3
+	// The three initializers are addresses, so none of the bytes is a value: a
+	// relocation that wrote a number into the slot would be indistinguishable from a
+	// correct one until the linker resolved it.
+	for i in 0 .. 3 {
+		assert obj.rel[i].addend == 0
+	}
+	assert obj.rel[0].label == obj.rel[1].label
+	assert obj.rel[0].label != obj.rel[2].label
+	assert obj.rel[0].label.starts_with('.L..')
+}
+
+// A static local with an ordinary initializer keeps a byte image, which is what the
+// deferral could have dropped for every other static local in the language.
+fn test_a_static_local_with_an_ordinary_initializer_keeps_its_byte_image() {
+	r := parsed_src('int f(int n) { static int j = 1 + 1; return j + n; }\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	mut found := false
+	for obj in r.globals {
+		// `1 + 1` is two bytes wide, and the point is that it was evaluated at all
+		// rather than left zero by a deferral that never ran.
+		if obj.ty.size == 4 && obj.init_data.len == 4 {
+			found = true
+		}
+	}
+	assert found, 'no evaluated static int in ${r.globals.len} globals'
+}
+
+// A static array whose length comes from its initializer still learns that length,
+// because the parse — which decides it — is not deferred along with the byte image.
+fn test_a_static_array_still_learns_its_length_from_its_initializer() {
+	r := parsed_src('int f(int n) { static int a[] = {1, 2, 3}; return a[n]; }\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	mut found := false
+	for obj in r.globals {
+		if obj.ty.kind == .array && obj.ty.array_len == 3 {
+			found = true
+			assert obj.ty.size == 12
+		}
+	}
+	assert found, 'no three-element array among ${r.globals.len} globals'
+}
+
 fn test_a_break_outside_a_loop_is_reported() {
 	r := parsed_src('int f(int n) { break; return n; }\n')
 	assert r.errors.len > 0

@@ -703,7 +703,7 @@ fn (mut p Parser) generic_selection() &ast.Node {
 		p.expect(':')
 		node := p.assign()
 		// The last matching association wins, as [C11 6.5.1.1p2] requires.
-		if is_compatible(ctrl_ty, assoc_ty) {
+		if is_exact_type_match(ctrl_ty, assoc_ty) {
 			ret = node
 		}
 	}

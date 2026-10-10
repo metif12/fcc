@@ -816,7 +816,8 @@ fn (mut t Tokenizer) read_quoted(quote u8, from int) ast.Token {
 		str_data: data
 	}
 	if quote == `'` && data.len > 0 {
-		tok.val = i64(data.last())
+		val := data.last()
+		tok.val = if val > 127 { i64(i8(val)) } else { i64(val) }
 	}
 	for j in start .. end {
 		if t.src[j] == `\n` {

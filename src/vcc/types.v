@@ -249,6 +249,62 @@ pub fn is_compatible(t1 &ast.Type, t2 &ast.Type) bool {
 	}
 }
 
+// is_exact_type_match reports whether two types are the same type, which is what
+// [C11 6.5.1.1p2] requires for a generic selection: the controlling expression's type
+// is compared against each association's type, and only an exact match selects.
+//
+// The difference from is_compatible is that the three floating types are distinct:
+// `double` is not `float`, so `_Generic(100.0, double: 1, float: 4)` selects the
+// `double` association. is_compatible treats them as one class, which is correct for
+// assignment and function calls but wrong here.
+pub fn is_exact_type_match(t1 &ast.Type, t2 &ast.Type) bool {
+	if t1 == t2 {
+		return true
+	}
+	if t1.origin != unsafe { nil } {
+		return is_exact_type_match(t1.origin, t2)
+	}
+	if t2.origin != unsafe { nil } {
+		return is_exact_type_match(t1, t2.origin)
+	}
+	if t1.kind != t2.kind {
+		return false
+	}
+	match t1.kind {
+		.basic {
+			if is_flonum(t1) || is_flonum(t2) {
+				return t1.basic == t2.basic
+			}
+			return t1.basic == t2.basic && t1.is_unsigned == t2.is_unsigned
+		}
+		.pointer { return is_exact_type_match(t1.base, t2.base) }
+		.func {
+			if !is_exact_type_match(t1.ret_type, t2.ret_type) {
+				return false
+			}
+			if t1.is_variadic != t2.is_variadic {
+				return false
+			}
+			if t1.params.len != t2.params.len {
+				return false
+			}
+			for i, p in t1.params {
+				if !is_exact_type_match(p, t2.params[i]) {
+					return false
+				}
+			}
+			return true
+		}
+		.array {
+			if !is_exact_type_match(t1.base, t2.base) {
+				return false
+			}
+			return t1.array_len < 0 || t2.array_len < 0 || t1.array_len == t2.array_len
+		}
+		else { return false }
+	}
+}
+
 // get_common_type returns the type both operands of a binary operator become.
 fn get_common_type(ty1 &ast.Type, ty2 &ast.Type) &ast.Type {
 	// An array or a function decays to a pointer in every arithmetic context, and

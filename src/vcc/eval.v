@@ -35,6 +35,13 @@ fn is_address_form(mut n &ast.Node) bool {
 	if n.kind == .addr {
 		return true
 	}
+	// [GNU] `&&label` is a label's address, and nothing else. It is the address form
+	// that makes `static void *p[] = {&&done}` a legal constant expression: the label
+	// is in the function whose initializer this is, so the address is fixed once the
+	// function has been parsed.
+	if n.kind == .goto_expr {
+		return true
+	}
 	// An array or function name is its own address: `table` and `&table[0]` agree, and
 	// a string literal is an array.
 	if n.kind == .var_ref && (n.var.ty.kind == .array || n.var.ty.kind == .func) {
@@ -207,6 +214,21 @@ fn eval2(mut node &ast.Node) ConstValue {
 			}
 		}
 		.num { return ConstValue{value: node.num} }
+		// [GNU] A label as a value. `unique_label` is the spelling the backend emits for
+		// the label, so the relocation names exactly what the definition will be called.
+		//
+		// It is empty until `resolve_goto_labels` has matched the label, which is why a
+		// static local holding one has its byte image written after the body is parsed —
+		// see `gvar_initializer_in_function`. `has_label` is tied to that rather than to
+		// the node's kind, so an unresolved one is still reported as "not a constant"
+		// instead of becoming a relocation to an empty symbol name, which no assembler
+		// can diagnose usefully.
+		.goto_expr {
+			return ConstValue{
+				label:     node.unique_label
+				has_label: node.unique_label != ''
+			}
+		}
 		// A `.generic` node stands for something the parser could not read and was
 		// already reported where it was parsed. Answering zero here keeps one
 		// unsupported construct from producing a diagnostic at every enclosing level.
@@ -311,6 +333,9 @@ fn is_const_expr(mut node &ast.Node) bool {
 		.comma { return is_const_expr(mut node.rhs) }
 		.neg, .not, .bit_not, .cast { return is_const_expr(mut node.lhs) }
 		.num { return true }
+		// [GNU] A label's address is fixed before the program starts, so `&&done` is a
+		// constant expression in exactly the sense `&g` is.
+		.goto_expr { return true }
 		else { return false }
 	}
 }
@@ -359,8 +384,52 @@ fn eval_double(mut node &ast.Node) f64 {
 // written into `init_data`. Anything that needs an address becomes a relocation rather
 // than a value, because no address is known yet.
 fn (mut p Parser) gvar_initializer(mut obj &ast.Obj) {
+	init, ty := p.parse_gvar_initializer(mut obj)
+	p.write_gvar_bytes(mut obj, init, ty)
+}
+
+// gvar_initializer_in_function parses an initializer for a static local and leaves its
+// byte image for `flush_static_inits`.
+//
+// [GNU] `static void *p[] = {&&done, &&loop}` is the reason this exists separately. A
+// label used as a value names an address that can only be spelled once
+// `resolve_goto_labels` has matched it to its definition, and that runs after the whole
+// body has been read. The *parse* stays here, where the initializer is read and where
+// an array's length is still being decided from it, and only the byte image waits.
+//
+// A file-scope global cannot need this: a label belongs to the function it appears in,
+// so `&&x` in a file-scope initializer has no label to name.
+fn (mut p Parser) gvar_initializer_in_function(mut obj &ast.Obj) {
+	init, ty := p.parse_gvar_initializer(mut obj)
+	p.deferred_static_inits << StaticInit{
+		obj:  obj
+		init: init
+		ty:   ty
+	}
+}
+
+// flush_static_inits writes the byte image of every static local declared in the
+// function that has just been parsed. It runs after `resolve_goto_labels`, which is
+// what makes a label used as a value spellable.
+fn (mut p Parser) flush_static_inits() {
+	for mut si in p.deferred_static_inits {
+		p.write_gvar_bytes(mut si.obj, si.init, si.ty)
+	}
+	p.deferred_static_inits = []StaticInit{}
+}
+
+// parse_gvar_initializer reads an initializer and completes the object's type from it.
+//
+// The completion is not optional: `static int x[] = {1,2,3}` learns both its length and
+// its size from the braces, and a later declaration that indexes `x` depends on it.
+fn (mut p Parser) parse_gvar_initializer(mut obj &ast.Obj) (&Initializer, &ast.Type) {
 	init, ty := p.initializer(obj.ty)
 	obj.ty = ty
+	return init, ty
+}
+
+// write_gvar_bytes evaluates a parsed initializer into the object's byte image.
+fn (mut p Parser) write_gvar_bytes(mut obj &ast.Obj, init &Initializer, ty &ast.Type) {
 	mut buf := []u8{len: ty.size, init: 0}
 	mut rels := []ast.Relocation{}
 	p.write_gvar_data(mut rels, init, ty, mut buf, 0)

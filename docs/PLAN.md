@@ -153,20 +153,74 @@ defects behind it, in the order a shape matrix found them:
   (x=y).a; })` needs an anonymous struct declaration inside a statement expression, and
   an assignment used as a value.
 
-**Failing now: 8 of 18.** Four are one construct each and four are larger. Each was
-narrowed to a minimal reproducer before being recorded here, because the suite itself
-is the regression test and a table is not.
+**Failing now: 10 of 18.** Eight compile, assemble, link and run green — `builtin`,
+`compat`, `control`, `enum`, `generic`, `offsetof`, `union`, `vla`.
 
-| file | what it needs |
-|---|---|
-| `control:94` | `initializer element is not constant` — a constant-expression rule to widen |
-| `literal:` | `'x80' => -128 expected but got 128` — a plain `char` is signed here |
-| `alignof:33` | `_Alignof` of an expression rather than of a type name |
-| `unicode:9` | `sizeof(L'0') => 4 expected but got 2` — chibicc is System V; see below |
-| `union:13` | an anonymous struct member inside a `union` |
+**Nine of the ten are not defects.** Every one was opened with `tools/onefile.v`, which
+runs one suite file through the whole procedure and prints *all* of its stdout, because
+`suite.v` reports five trimmed lines and that is not enough to find a failure: the
+suite's `assert` prints one line per **passing** assertion and a differently-shaped line
+for the failing one, so the last line printed is the last *pass* before it, never the
+failure. Reading five lines off `suite.v` put me on four wrong hypotheses before that
+tool existed. `v run tools/onefile.v <name.c>` and it takes the suite, vcc and gcc paths
+as further arguments, which is also how a build from `HEAD` is run for a comparison.
 
-`literal:94` and `vla:22` were on this list and are now fixed; `literal` moved past line 94
-to the `'x80'` signedness question above. `vla` passes.
+| file | reported failure | cause |
+|---|---|---|
+| `arith` | `sizeof ( 0 ? ( long ) 1 : ( long ) 2 ) => 8` | `long` is 4 here |
+| `literal` | `sizeof ( 0L ) => 8` | `long` is 4 here |
+| `string` | `sizeof ( L"abc" "" ) => 16` | `wchar_t` is 2 here |
+| `struct` | `sizeof ( struct { char a ; long b ; } ) => 16` | `long` is 4 here |
+| `alignof` | `_Alignof ( long ) => 8` | `long` is 4 here |
+| `bitfield` | `sizeof ( struct { long x : 1 ; } ) => 8` | `long` is 4 here |
+| `unicode` | `sizeof ( L'0' ) => 4` | `wchar_t` is 2 here |
+| `pointer` | `*( & x + 1 ) => 5` | chibicc's frame layout; gcc 15.2 and tcc fail it too |
+| `function:96` | `__va_area__` | chibicc's private save-area name; decision below |
+
+`types.v:19-24` records `long 4 / 4 (chibicc: 8 / 8)` and `types.v:642-643` records
+`wchar_t` 2 against System V's 4, both as deliberate — the compiler has to agree with the
+mingw objects it links against, not with chibicc. So these nine fail *correctly*, and the
+only way to make them pass is to break every `long` in V's generated C.
+
+**`macro.c` is the only genuine defect left, and it is in the preprocessor.** Its
+remaining errors are all mechanical, none of them an ABI question:
+`##` pastes whole argument lists instead of the two boundary tokens (lines 257, 261,
+264, 267), stringification merges into one identifier (`f0 zz`, line 385), and five
+builtins are missing — `__STDC__`, `__DATE__`, `__TIME__`, `__TIMESTAMP__`,
+`__BASE_FILE__` — plus `__VA_OPT__` (C23) is unsupported.
+
+Measured on the `##` one, because it is the kind of thing that gets mis-attributed:
+`#define i 5` then `paste(1+i,3)` with `#define paste(x,y) x##y` produces the single
+token `1+i3`, where C pastes only the *boundary* — the last token of `x` with the first
+of `y` — giving `1`, `+`, `i3`. A build from `HEAD` produces the identical wrong token,
+so this is pre-existing and not a regression from the interleaving change. It was
+invisible before that change only because the whole file failed at line 333 first.
+
+`control:94`, `literal:94`, `vla:22`, `generic`, `union:13` and `macro:333` were on this
+list and are now fixed. `control` was `initializer element is not constant` and `macro`
+was two defects; both are below.
+
+**`control:94` was a label used as a value in a static local's initializer.**
+`static void *p[] = {&&v41,&&v42,&&v43}` is a GNU extension and a legal constant
+expression: a label's address is fixed before the program starts, exactly as `&g` is. The
+byte image was being written while the initializer was still being parsed, and `&&v41`
+carries no label until `resolve_goto_labels` matches it — which runs after the *whole*
+body has been read. So the evaluator answered "not a constant".
+
+The fix splits `gvar_initializer` in two. The **parse** stays where the initializer is
+read, because that is also where `static int x[] = {1,2,3}` learns its length from the
+braces and a later declaration indexing `x` depends on it. Only the **byte image** is
+deferred, to a `flush_static_inits` after `resolve_goto_labels`. `eval2` returns the
+node's `unique_label`, and `has_label` is tied to that being non-empty rather than to the
+node's kind — so an *unresolved* `&&x` is still reported as "not a constant" instead of
+becoming a relocation to an empty symbol name, which no assembler diagnoses usefully.
+
+Measured, not argued: **before** the fix `control.c` failed at vcc -S with
+`initializer element is not constant` at lines 94, 95 and 96; **after** it passes, and the
+emitted assembly gives `{&&v52,&&v52,&&v53}` two references to one label and three
+distinct labels for `{&&v41,&&v42,&&v43}`. The deferral is scoped to static locals
+because a label belongs to the function it appears in, so a file-scope global can never
+name one.
 
 **`unicode.c` now fails on the right answer.** It asserts `sizeof(L'0') == 4`, which is
 chibicc's System V `wchar_t`. This target's is two, and tcc, mingw gcc 15.2 and the
@@ -180,6 +234,11 @@ and `y` laid out adjacently in that order. gcc 15.2 answers `2061499264` and tcc
 for that exact statement — all three fail it, so the expectation is a chibicc coincidence
 and not a portable one. The arithmetic around it, `*&x` and `**z`, do pass.
 
+Re-measured 2026-10-09: three runs of the same statement gave `-801114008`,
+`-570426200` and `1132460008` under vcc. **The value is a different stack slot each
+run**, which is what confirms the reading above: the arithmetic is right and the object
+it lands on is wherever this compiler happened to put the next local.
+
 
 **`macro.c` needed its fixtures before it could be read at all.** `include1.h` through
 `include4.h` are in the suite's directory on GitHub and were simply never fetched, so the
@@ -190,18 +249,62 @@ What line 333 needs is an include whose *spelling* comes from a macro:
 `#define M13 < include4.h` then `#include M13 >`. The directive's own tokens are `<`,
 `include4`, `.`, `h`, `>`, and the expansion has to happen before the spelling is read.
 
-The two errors after it — `M14()` at lines 347 and 350, a variadic macro called with no
-arguments — are **not** a variadic-argument bug, and I was wrong about that twice before
-measuring it. `#define NOTHING(...) 3` with `NOTHING()` expands to `3`, and so does the
-same call nested as another macro's argument: both give `assert(0, 3)`, which is what tcc
-gives. So either the `M14` errors are downstream of the failed include at 333 leaving the
-preprocessor mis-positioned, or they are a third thing; that is untested, and the honest
-entry is "one known defect and one unexplained pair".
+The two errors after it — `M14()` at lines 347, 350, 363, 369 and `M31(buf, fmt, ...)`
+called with three arguments at 406 and 407 — were recorded here as "one known defect and
+one unexplained pair", with the guess that they were downstream of the failed include
+leaving the preprocessor mis-positioned. **That guess was wrong, and the reason is the
+most valuable thing in this file.**
 
-The tempting repair — treating `...` as one parameter less when checking the argument
-count — is wrong here, because `parse_params` deliberately leaves `...` out of `params`
-and records it as the variadic flag. Subtracting one made `want` negative for a
-pure-variadic macro and indexed `args[-1]`. That is why `want` is `params.len`.
+`#include M13 >` never affects them. Measured with `--preprocess`: the include at 333
+fails, and the tokens on lines 7 and 10 after it are still correct, and `M14()` on its
+own still expands to `3`. The four `M14` shapes and `M31` all expand correctly in
+isolation. Bisecting the file by truncation showed the 347 error appears only when lines
+356-360 are present, which is the tell.
+
+**A `#define` took effect retroactively over the whole file.** `Preprocessor.run` called
+`directives(tokens)` — which consumes every `#` line and emits the rest *unexpanded* —
+and then ran **one** `expand` pass over the entire accumulated stream. So every macro
+definition in the file was already in the table when any of it was expanded:
+
+```c
+#define M(...) 3
+int a = M();                              // expanded with the *second* definition below
+#define M(x, ...) f(1,2,x,__VA_ARGS__)
+int b = M(3,4,5);
+```
+
+reports `macro M requires 1 arguments, but 0 given` against the *first* line, leaves
+`M()` unexpanded, and expands the second call correctly. `run_text` had the same shape.
+[C11 6.10p7] is explicit: a directive takes effect from the point it appears.
+
+**The same defect is what blocked `#include <stdio.h>` entirely.** mingw's own headers
+carry `macro getwchar requires 0 arguments, but 1 given` on this compiler, because some
+later definition of a function-like macro reached back to a call written against an
+earlier one. That is fixed by the same change, and it is the one that unblocks real
+programs rather than one suite file.
+
+**The fix is to interleave, not to defer.** `directives` now holds a `pending` batch and
+flushes it through `p.expand` at every directive and once more at the end, so a batch is
+exactly the tokens between two directives and an invocation never spans one — which is
+also what C requires, because a directive line cannot appear inside an argument list.
+The outer `expand` in `run` and `run_text` is removed rather than kept: a second pass
+would expand the names the recursion guard and a wrong argument count deliberately leave
+in place, against whatever the file defined last, which is the original bug by another
+route.
+
+Four unit tests pin it at `src/vcc/preprocess_test.v` — a redefinition of the same name
+from `(...)` to `(x, ...)`, a `#define` after a use, an `#undef` between two uses, and
+the whole-file case. Three of the four go red against the broken flush, which is the
+control that they are testing something.
+
+**The tempting repair for the *unexplained pair* — treating `...` as one parameter less
+when checking the argument count — would have been wrong twice over.** `parse_params`
+deliberately leaves `...` out of `params` and records it as the variadic flag, so
+subtracting one made `want` negative for a pure-variadic macro and indexed `args[-1]`.
+And the pair was never an argument-count bug at all: it was the line at which the
+expander chose to expand, which is why the diagnosis went in a circle for a whole
+session. **A diagnostic whose line number points at code that is correct on its own
+terms is evidence the diagnosis is aimed at the wrong thing.**
 
 Four fail to compile. The other fourteen compile, and every one of them fails the
 same way, at its first assertion, for one reason.

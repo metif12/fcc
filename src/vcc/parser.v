@@ -78,6 +78,19 @@ mut:
 	mem_index int = -1
 }
 
+// StaticInit is a static local whose initializer has been parsed but whose byte image
+// has not been written.
+//
+// It is kept rather than dropped because the tree is the only thing that still refers
+// to the label-as-value nodes inside it, and the byte image reads `unique_label` off
+// them — which is empty until `resolve_goto_labels` has run.
+struct StaticInit {
+mut:
+	obj  &ast.Obj
+	init &Initializer
+	ty   &ast.Type
+}
+
 // InitDesg is a step in the chain of lvalues an initializer writes through, for
 // example `x` then `x[2]` then `x[2].b` for `struct S x[3]`.
 //
@@ -142,6 +155,9 @@ pub mut:
 	// can be resolved once the whole body has been read.
 	gotos  []&ast.Node
 	labels []&ast.Node
+	// deferred_static_inits holds the static locals of the function being parsed,
+	// whose byte images are written by `flush_static_inits` once its labels exist.
+	deferred_static_inits []StaticInit
 	// packs are the `#pragma pack` events the preprocessor saw, in order.
 	packs []PackEvent
 }
@@ -1671,6 +1687,10 @@ fn (mut p Parser) function(basety &ast.Type, attr VarAttr) {
 	body := p.compound_stmt()
 	p.leave_scope()
 	p.resolve_goto_labels()
+	// After the labels exist, because a static local may be initialized from one:
+	// `static void *p[] = {&&done}`. Writing the byte image anywhere earlier reads a
+	// `unique_label` that is still empty and emits a relocation to nothing.
+	p.flush_static_inits()
 
 	fn_obj.body = body.body
 	fn_obj.locals = p.locals
@@ -1884,7 +1904,9 @@ fn (mut p Parser) declaration(basety &ast.Type, attr VarAttr) &ast.Node {
 			mut obj := p.new_anon_gvar(ty, ty.name_line)
 			p.push_scope(ty.name).obj = obj
 			if p.consume('=') {
-				p.gvar_initializer(mut obj)
+				// The deferred form, not `gvar_initializer`: the initializer may name a
+				// label, and a label cannot be spelled until the body has been read.
+				p.gvar_initializer_in_function(mut obj)
 			}
 			continue
 		}

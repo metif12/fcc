@@ -215,6 +215,12 @@ pub fn (mut p Preprocessor) errorf(line int, msg string) {
 }
 
 // run preprocesses a file, following `#include`.
+//
+// The expansion has already happened inside `directives`, one batch at a time, which is
+// what makes a `#define` take effect at its own line. Expanding here as well would be a
+// second pass over tokens whose macro names were deliberately kept — the recursion guard
+// and a wrong argument count both leave one in place — and would expand them again
+// against whatever the file defined last.
 pub fn (mut p Preprocessor) run(path string) Result {
 	src := os.read_file(path) or {
 		p.errorf(0, 'cannot read ${path}')
@@ -223,9 +229,8 @@ pub fn (mut p Preprocessor) run(path string) Result {
 			errors: p.errors.clone()
 		}
 	}
-	phase1 := p.directives(tokenize(src), path)
 	return Result{
-		tokens: p.finish(strip_sentinels(p.expand(phase1, path)))
+		tokens: p.finish(strip_sentinels(p.directives(tokenize(src), path)))
 		errors: p.errors.clone()
 	}
 }
@@ -233,9 +238,8 @@ pub fn (mut p Preprocessor) run(path string) Result {
 // run_text preprocesses source with no file behind it, for tests and for `-D`-only
 // runs. `path` is used for include resolution and for `__FILE__` only.
 pub fn (mut p Preprocessor) run_text(src string, path string) Result {
-	phase1 := p.directives(tokenize(src), path)
 	return Result{
-		tokens: p.finish(strip_sentinels(p.expand(phase1, path)))
+		tokens: p.finish(strip_sentinels(p.directives(tokenize(src), path)))
 		errors: p.errors.clone()
 	}
 }
@@ -280,17 +284,42 @@ fn (p &Preprocessor) enclosing_dead() bool {
 // directives handles every `#` line: it defines macros, evaluates conditionals, and
 // splices in included files. Dead branches are discarded here so that phase 2 never
 // sees a token from one.
+//
+// **Expansion is interleaved with the directives, not deferred.** The tokens in front
+// of a directive are expanded at the point that directive is reached, with the macro
+// table as it stands there. Running one expansion pass over the whole stream instead —
+// which is what this did — makes every `#define` in the file take effect *retroactively*:
+//
+//	#define M14(...) 3
+//	int a = M14();                             // 3, correctly
+//	#define M14(x, ...) add6(1,2,x,__VA_ARGS__,6)
+//	int c = M14(3,4,5);                        // add6(1,2,3,4,5,6), correctly
+//
+// expanded the first `M14()` with the *second* definition, reported
+// `macro M14 requires 1 arguments, but 0 given` against the first line, and left it
+// unexpanded. Measured on chibicc's macro.c line 347. [C11 6.10p7] is explicit that a
+// preprocessing directive takes effect from the point it appears, and the same defect
+// is why a retroactive `#define` from a header can reject a perfectly ordinary call
+// elsewhere in the file.
+//
+// The `pending` batch is flushed on every directive and once more at the end, because a
+// batch is delimited by a directive on either side: an invocation never spans one.
 fn (mut p Preprocessor) directives(toks []ast.Token, path string) []ast.Token {
 	mut out := []ast.Token{}
+	mut pending := []ast.Token{}
 	mut i := 0
 	for i < toks.len {
 		tok := toks[i]
 		if tok.kind != .preproc_any {
 			if !p.skipping() {
-				out << tok
+				pending << tok
 			}
 			i++
 			continue
+		}
+		if pending.len > 0 {
+			out << p.expand(pending, path)
+			pending = []ast.Token{}
 		}
 		// Split the directive into its name and its argument text. The tokenizer hands
 		// over the whole line, so the name is the first identifier-like run.
@@ -383,6 +412,10 @@ fn (mut p Preprocessor) directives(toks []ast.Token, path string) []ast.Token {
 				p.simple_directive(name, rest, line, path, mut out)
 			}
 		}
+	}
+	// The last batch has no directive after it, so nothing has flushed it yet.
+	if pending.len > 0 {
+		out << p.expand(pending, path)
 	}
 	return out
 }
@@ -670,6 +703,25 @@ fn find_from(s string, start int, ch u8) ?int {
 	return none
 }
 
+// include_spelling renders a macro expansion back into the header name it stands for.
+//
+// This is the *whole* expansion, not its first token, and that is the defect it fixes.
+// `#define M13 < include4.h` followed by `#include M13 >` expands to five tokens — `<`,
+// `include4`, `.`, `h`, `>` — so reading only the first left the closing `>` behind in
+// tokens that were then dropped, and reported `unterminated include` for a header that
+// was spelled correctly. Measured on chibicc's macro.c line 333, the last preprocessor
+// defect the suite has to offer.
+//
+// The tokens are joined with nothing between them rather than with a space, because a
+// header name has no whitespace in it: `< include4 . h >` names `include4.h`.
+fn include_spelling(toks []ast.Token) string {
+	mut s := ''
+	for t in toks {
+		s += t.text
+	}
+	return s
+}
+
 // do_include resolves an `#include` and splices the included tokens into the output.
 fn (mut p Preprocessor) do_include(rest string, line int, path string, mut out []ast.Token) {
 	if rest.len == 0 {
@@ -694,16 +746,17 @@ fn (mut p Preprocessor) do_include(rest string, line int, path string, mut out [
 	} else {
 		// A macro may expand to the header name. The standard requires this, and glibc
 		// headers rely on it, so it is supported rather than diagnosed.
-		expanded := strip_sentinels(p.expand(tokenize(rest), path))
-		if expanded.len > 0 && (expanded[0].text.starts_with('"')
-			|| expanded[0].text.starts_with('<')) {
-			t := expanded[0].text
-			closer := if t.starts_with('"') { `"` } else { `>` }
-			end := find_from(t, 1, closer) or {
+		//
+		// The spelling is read from the whole expansion, not from its first token — see
+		// `include_spelling` for the measured case this was written for.
+		spelled := include_spelling(strip_sentinels(p.expand(tokenize(rest), path)))
+		if spelled.len > 0 && (spelled[0] == `"` || spelled[0] == `<`) {
+			closer := if spelled[0] == `"` { `"` } else { `>` }
+			end := find_from(spelled, 1, closer) or {
 				p.errorf(line, 'unterminated include')
 				return
 			}
-			name = t[1..end]
+			name = spelled[1..end]
 			angled = closer == `>`
 		} else {
 			p.errorf(line, '#include expects "FILENAME" or <FILENAME>')
