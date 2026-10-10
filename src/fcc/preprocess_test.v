@@ -473,9 +473,81 @@ fn test_a_macro_may_be_named_for_a_keyword() {
 // consulting the macro table, and `eval_ifdef` already accepts both token kinds — so a
 // keyword macro is visible to `#ifdef` and still invisible to `#if`, which is a separate
 // recorded divergence and not something this makes worse.
-fn test_a_keyword_macro_is_visible_to_ifdef() {
-	assert preprocessed('#define if 5\n#ifdef if\nyes\n#endif') == 'yes'
+// [C11 6.10.1p4] An `#if` operand is macro-expanded before it is evaluated. `expand`
+// was never called on the path at all, so `#if 5` and `#if 1+1` were right while every
+// `#if` naming a macro took its `#else` branch — an unknown identifier evaluates to 0,
+// and nothing expanded it. Measured on chibicc's macro.c, and on gcc for every case
+// here.
+fn test_an_if_operand_is_macro_expanded() {
+	assert preprocessed('#define M 5\n#if M\nyes\n#else\nno\n#endif') == 'yes'
+	assert preprocessed('#define M 0\n#if M\nyes\n#else\nno\n#endif') == 'no'
+	assert preprocessed('#define M 5\n#if M + 0\nyes\n#else\nno\n#endif') == 'yes'
+	assert preprocessed('#define M 5\n#if (M)\nyes\n#else\nno\n#endif') == 'yes'
+	// The exponent is arithmetic, and a zero result is the `#else` branch.
+	assert preprocessed('#define M 5\n#if M - 5\nyes\n#else\nno\n#endif') == 'no'
+	// `#elif` takes the same path.
+	assert preprocessed('#define M 5\n#if M - 5\nyes\n#elif M\nalso\n#else\nno\n#endif') == 'also'
+	// A function-like invocation needs its `(` in the same list, which is why
+	// `expand_condition` expands *runs* of tokens rather than one at a time.
+	assert preprocessed('#define F() 1\n#if F()\nyes\n#else\nno\n#endif') == 'yes'
+	assert preprocessed('#define F(x) x\n#if F(1 + 1)\nyes\n#else\nno\n#endif') == 'yes'
+	// Not followed by `(`, so it is an ordinary identifier and evaluates to 0.
+	assert preprocessed('#define F() 1\n#if F\nyes\n#else\nno\n#endif') == 'no'
 }
+
+// [C11 6.10.1p4] The operand of `defined` is *excluded* from that replacement. Expanding
+// the whole list unconditionally would turn `#if defined(M) && M` into
+// `#if defined(5) && 5`, because there `M` belongs to `defined` rather than to the
+// expression. gcc takes the `#if` branch for that input, and so must this.
+fn test_the_defined_operand_is_not_expanded() {
+	assert preprocessed('#define M 1\n#if defined(M) && M\nyes\n#else\nno\n#endif') == 'yes'
+	assert preprocessed('#define M 1\n#if defined M && M\nyes\n#else\nno\n#endif') == 'yes'
+	// Both spellings, and the arithmetic form.
+	assert preprocessed('#define M 1\n#if defined(M) - 1\nyes\n#else\nno\n#endif') == 'no'
+	assert preprocessed('#if defined(NO_SUCH_MACRO)\nyes\n#else\nno\n#endif') == 'no'
+	// `#ifdef` never reaches the expander at all, and takes both token kinds.
+	assert preprocessed('#define if 5\n#ifdef if\nyes\n#else\nno\n#endif') == 'yes'
+	// A third spelling is undefined behaviour, so it is expanded like anything else and
+	// the evaluator's own diagnostic reaches it.
+	assert pp('#if defined ( M )\nx\n#endif').errors.len == 0
+}
+
+// `tokenize_fragment` ends every fragment — and therefore every macro body — with an eof
+// sentinel, so substituting a macro reintroduces one. In a translation unit `run` strips
+// them at the end; the `#if` path has no such pass, and the sentinel surfaced as an
+// empty token the evaluator reported as
+// `unexpected token in #if expression: ` with nothing after the colon.
+fn test_an_if_operand_leaves_no_sentinel_behind() {
+	r := pp('#define M 5\n#if M\nx\n#endif')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert preprocessed('#define M 5\n#if M\nx\n#endif') == 'x'
+}
+
+// [C11 6.10.1p4] says the emptiness test is on the expression *after* expansion, because
+// a macro may expand to nothing. Testing the raw tokens instead silently took the
+// `#else` branch for `#define M` followed by `#if M`.
+fn test_an_operand_that_expands_to_nothing_is_empty() {
+	assert pp('#define M\n#if M\nx\n#endif').errors.len == 1
+	assert pp('#if\nx\n#endif').errors.len == 1
+}
+
+// [C11 6.10.3p4] A macro's own name in its body is not replaced. The recursion guard
+// implements it, and it only worked when the macro was expanded at the top level: an
+// argument was pre-expanded inside `substitute`, which set and cleared `is_expanding`,
+// so the rescan that `expand` performs on the substituted result expanded the same
+// macro a second time.
+//
+// Measured on chibicc's macro.c: with `#define M2 M2 + 3` and
+// `#define ASSERT(x,y) assert(x,y,#y)`, `ASSERT(9, M2)` is `M2 + 3` and twelve was the
+// wrong answer.
+fn test_a_self_referential_macro_is_expanded_once_inside_an_argument() {
+	assert preprocessed('#define M2 M2 + 3\n#define ASSERT(x, y) a(x, y, #y)\nASSERT(9, M2)') == 'a ( 9 , M2 + 3 , "M2" )'
+	// And at the top level, which is the case that always worked.
+	assert preprocessed('#define M2 M2 + 3\nint r = M2;') == 'int r = M2 + 3 ;'
+	// A chain of them: the body's own copy is left alone, and the rest is substituted.
+	assert preprocessed('#define M3 M2 + 3\n#define M2 M2 + 3\nint r = M3;') == 'int r = M2 + 3 + 3 ;'
+}
+
 
 // [C11 6.10.8p1] `__STDC__` is the integer constant 1.
 //

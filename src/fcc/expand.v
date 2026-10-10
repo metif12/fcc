@@ -305,6 +305,23 @@ fn has_va_opt(toks []ast.Token) bool {
 //   - `# param`          stringizes the *unexpanded* argument
 //   - `a ## b`           pastes, using the *unexpanded* argument
 //   - a bare parameter   substitutes the *expanded* argument
+//
+// **An argument is substituted raw and expanded by the rescan, not expanded here.**
+// Expanding it here looks equivalent and is not, because of the recursion guard: a
+// pre-expanded argument has already set and cleared `is_expanding` for any macro it
+// mentioned, so when `expand` rescans the substituted result that macro is expanded a
+// *second* time. Measured on chibicc's macro.c:
+//
+//	#define M2 M2 + 3
+//	#define ASSERT(x,y) assert(x,y,#y)
+//	ASSERT(9, M2)
+//
+// is `assert(9, M2 + 3, "M2")` in C — `M2` is expanded once, and the copy of it left by
+// the self-reference rule is not replaced again. Expanding the argument first gave
+// `M2 + 3 + 3`, twelve instead of nine. Expanding it in the rescan instead means the
+// rescan sees `M2` with the flag clear, expands it once, and paints it for the nested
+// pass — which is the same single expansion, in the same place, with no flag to reset.
+// `#` and `##` are unaffected: they already read `args[idx]` directly.
 fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, line int) ([]ast.Token, int) {
 	if !m.is_func {
 		mut out := []ast.Token{}
@@ -449,13 +466,13 @@ fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, line int) ([]ast
 		}
 		if idx := param_index(m, t.text) {
 			if idx < named {
-				out << p.expand(args[idx], '')
+				out << args[idx].clone()
 			}
 			i++
 			continue
 		}
 		if is_va(m, t.text) {
-			out << p.expand(va_args, '')
+			out << va_args
 			i++
 			continue
 		}

@@ -37,16 +37,30 @@ mut:
 }
 
 // eval_condition evaluates an `#if` or `#elif` operand.
-fn (mut p Preprocessor) eval_condition(text string, line int) bool {
+//
+// [C11 6.10.1p4] "macro invocations in the list of preprocessing tokens that will become
+// the controlling constant expression are replaced ... just as in normal text", so the
+// operand is expanded before it is evaluated. It was not, at all: `#if 5` and `#if 1+1`
+// were correct while every `#if` naming a macro took its `#else` branch, because an
+// unknown identifier evaluates to 0 and nothing expanded it. Measured on chibicc's
+// macro.c: `#define M 5` / `#if M` chose `#else`, and gcc chooses `#if`.
+//
+// The one exception is the operand of `defined`, which the same clause excludes. See
+// `expand_condition`.
+fn (mut p Preprocessor) eval_condition(text string, path string, line int) bool {
 	// The tokenizer's eof sentinel is dropped: the primary case treats an unknown
 	// identifier as 0, and eof is not an identifier.
-	mut body := []ast.Token{}
+	mut raw := []ast.Token{}
 	for t in tokenize_fragment(text) {
 		if t.kind == .eof {
 			continue
 		}
-		body << t
+		raw << t
 	}
+	body := p.expand_condition(raw, path)
+	// The emptiness test is *after* expansion, because a macro may expand to nothing:
+	// `#define M` followed by `#if M` has no expression at all, and gcc says so. Testing
+	// the raw tokens instead would silently take the `#else` branch.
 	if body.len == 0 {
 		p.errorf(line, '#if with no expression')
 		return false
@@ -62,6 +76,67 @@ fn (mut p Preprocessor) eval_condition(text string, line int) bool {
 		p.errorf(line, 'unexpected token in #if expression: ${e.toks[e.pos].text}')
 	}
 	return v.v != 0
+}
+
+// expand_condition expands the tokens of an `#if` operand, leaving the operand of
+// `defined` alone.
+//
+// [C11 6.10.1p4] replaces "macro invocations in the list of preprocessing tokens that
+// will become the controlling constant expression ... (except for those macro names
+// modified by the defined unary operator)". Expanding unconditionally would turn
+// `#if defined(M) && M` into `#if defined(5) && 5`, because there `M` is an operand of
+// `defined` rather than part of the expression. gcc takes the `#if` branch for that
+// input, and so must this.
+//
+// Both spellings are skipped: `defined M` and `defined ( M )`. A third form is undefined
+// behaviour under the same clause, so it falls through and is expanded like anything
+// else, which lets the evaluator's own diagnostic reach it.
+//
+// The skip works by *segmenting* rather than by expanding token by token, because a
+// function-like invocation needs its `(` in the same list: `#if F()` where `F` is
+// `#define F() 1` must expand, and handing `expand` one token at a time would leave the
+// `(` out and never form the invocation. Twenty-eight of the `#if` lines in tcc's own
+// headers are function-like invocations, so this is the common case and not an edge
+// one.
+fn (mut p Preprocessor) expand_condition(toks []ast.Token, path string) []ast.Token {
+	mut out := []ast.Token{}
+	mut seg := []ast.Token{}
+	mut i := 0
+	for i < toks.len {
+		if toks[i].text == 'defined' {
+			// Flush the run before it: it is ordinary expression and is expanded whole.
+			if seg.len > 0 {
+				out << p.expand(seg, path)
+				seg = []ast.Token{}
+			}
+			out << toks[i]
+			i++
+			// `defined ( X )`
+			if i + 2 < toks.len && toks[i].text == '(' && toks[i + 2].text == ')'
+				&& toks[i + 1].kind == .ident {
+				out << [toks[i], toks[i + 1], toks[i + 2]]
+				i += 3
+				continue
+			}
+			// `defined X`
+			if i < toks.len && toks[i].kind == .ident {
+				out << toks[i]
+				i++
+			}
+			continue
+		}
+		seg << toks[i]
+		i++
+	}
+	if seg.len > 0 {
+		out << p.expand(seg, path)
+	}
+	// `tokenize_fragment` ends every fragment — and therefore every macro body — with an
+	// eof sentinel, so substituting a macro anywhere reintroduces one. In a translation
+	// unit `run` strips them at the end; this path has no such pass, and the sentinel
+	// surfaces as an empty token at the end of the expression, which the evaluator then
+	// reports as `unexpected token in #if expression: ` with nothing after the colon.
+	return strip_sentinels(out)
 }
 
 // eval_ifdef evaluates `#ifdef` or `#ifndef`, whose operand must not be expanded.

@@ -360,7 +360,7 @@ fn (mut p Preprocessor) directives(toks []ast.Token, path string) []ast.Token {
 				// because `skipping` looks at the whole stack.
 				mut live := false
 				if !p.skipping() {
-					live = p.eval_condition(rest, line)
+					live = p.eval_condition(rest, path, line)
 				}
 				p.cond_stack << Conditional{
 					taken: live
@@ -395,7 +395,7 @@ fn (mut p Preprocessor) directives(toks []ast.Token, path string) []ast.Token {
 					} else if c.taken || p.outer_dead() {
 						live = false
 					} else {
-						live = p.eval_condition(rest, line)
+						live = p.eval_condition(rest, path, line)
 					}
 					c.live = live
 					if live {
