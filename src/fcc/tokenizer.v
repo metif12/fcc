@@ -167,6 +167,23 @@ fn tokenize_with(src string, first_at_bol bool) []ast.Token {
 		tok.has_space = start_space
 		tok.loc = ast.Pos(start)
 		out << tok
+		// Both flags are *pending* state for the next token, and both must be cleared
+		// once this one has taken them. Leaving them set makes them sticky, and each
+		// stick is a real defect:
+		//
+		// - `has_space` is set by whitespace and never cleared, so one space anywhere in a
+		//   file sets it for every token after it. `#` stringizing renders that as a space
+		//   between tokens that had none — `#define S(x) #x` on `S(a!b)` produced
+		//   `"a ! b"` where C gives `"a!b"`, and chibicc's macro.c line 240 fails on it.
+		// - `at_bol` is set by a newline and never cleared, so a `#` after any token on a
+		//   later line begins a directive. `int x = 0; # define Q 9` on one line defines
+		//   Q here and does not in gcc.
+		//
+		// Clearing here rather than in `skip_insignificant` is what keeps the two apart:
+		// the skip only *sets*, and the one place that knows a token has consumed the
+		// pending state is here.
+		t.at_bol = false
+		t.has_space = false
 		if t.pos == start {
 			// Guarantee forward progress even if a future branch forgets to
 			// advance: skip one byte of unknown input rather than spin.
@@ -454,11 +471,15 @@ fn (mut t Tokenizer) read_punct() ast.Token {
 	}
 	// An unrecognized byte becomes a one-character punctuator so the parser can
 	// report it at the right position instead of the tokenizer aborting.
+	//
+	// `ascii_str`, not `str`: a `u8`'s `str` is its decimal value, so a backtick became
+	// the three-character text "96" and `#define S(x) #x` on `` S(a`b) `` produced
+	// `"a96b"` where C produces `` "a`b" ``. Measured on chibicc's macro.c line 239.
 	c := t.src[t.pos]
 	t.pos++
 	return ast.Token{
 		kind: .punct
-		text: c.str()
+		text: c.ascii_str()
 		len:  1
 		line: t.make_line()
 	}

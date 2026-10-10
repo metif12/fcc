@@ -630,3 +630,19 @@ fn test_va_opt_inside_va_opt_is_reported_not_dropped() {
 	assert r.errors[0].contains('__VA_OPT__')
 }
 
+// A substituted argument inherits the spacing of where the *parameter* stood in the
+// body, and `#` stringizing needs that rather than the invocation site's spacing.
+//
+// `#define M13(x) M12(foo. x)` with `M12` stringifying its argument gives `"foo. bar"`
+// and not `"foo.bar"`: the body wrote a space before `x` even though the invocation
+// `M13(bar)` wrote none before `bar`. Measured on chibicc's macro.c line 311.
+//
+// The two are ORed rather than one overwriting the other, because either side can be
+// the one that carried a real space.
+fn test_a_substituted_argument_inherits_the_bodys_spacing() {
+	assert preprocessed('#define M12(x) #x\n#define M13(x) M12(foo. x)\nM13(bar)') == '"foo. bar"'
+	assert preprocessed('#define M12(x) #x\n#define M13(x) M12(foo.x)\nM13(bar)') == '"foo.bar"'
+	// A real space at the invocation site survives too.
+	assert preprocessed('#define M12(x) #x\n#define M13(x) M12(foo . x)\nM13( bar)') == '"foo . bar"'
+}
+

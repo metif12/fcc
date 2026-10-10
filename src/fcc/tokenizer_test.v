@@ -104,6 +104,64 @@ b') == ['a', 'b']
 	}
 }
 
+// A byte the tokenizer does not recognise becomes a one-character punctuator, and its
+// text must be the *character*. A `u8`'s `str` is its decimal value, so a backtick came
+// out as the three-character text "96": `#define S(x) #x` on `` S(a`b) `` produced
+// `"a96b"` where C produces `` "a`b" ``, and chibicc's macro.c line 239 fails on exactly
+// that.
+fn test_an_unrecognised_byte_becomes_its_own_character() {
+	assert texts('a`b') == ['a', '`', 'b']
+	assert texts('@x') == ['@', 'x']
+	// `$` is deliberately *not* one of these: it is a documented GCC extension that this
+	// tokenizer accepts in identifiers, so `$y` is one token and not two.
+	assert texts('$y') == ['$y']
+	// And a real punctuator is unaffected, which is the control.
+	assert texts('a+b') == ['a', '+', 'b']
+}
+
+// `has_space` is *pending* state for the next token and is cleared once a token has
+// taken it. It was not, so one space anywhere in a file set it for every token after it,
+// and `#` stringizing rendered that as a space between tokens that had none.
+//
+// Measured: `#define S(x) #x` on `S(a!b)` gave `"a ! b"` where C gives `"a!b"`, and
+// chibicc's macro.c line 240 fails on it. `at_bol` had the same shape — see
+// `test_a_hash_after_a_token_is_not_a_directive`.
+fn test_has_space_is_not_sticky() {
+	// A real space is still recorded, which is the other half of the rule.
+	assert texts('a  b') == ['a', 'b']
+	for t in tokenize('a  b') {
+		if t.text == 'b' {
+			assert t.has_space
+		}
+	}
+	// One space early in the file must not mark anything after it. These sources have no
+	// whitespace at all, so no token in any of them may carry the flag.
+	for src in ['a!b', 'a-b', 'S(a-b)', 'a.b', 'a==b', '-a'] {
+		for t in tokenize(src) {
+			if t.kind == .eof {
+				continue
+			}
+			assert !t.has_space, 'in "${src}": [${t.text}] has_space set with no space before it'
+		}
+	}
+}
+
+// `at_bol` is the same pending state and was equally sticky: a single newline set it for
+// every token to the end of the file, so a `#` after any token on a later line began a
+// directive. `int x = 0; # define Q 9` defines Q here and does not in gcc.
+fn test_a_hash_after_a_token_is_not_a_directive() {
+	// A `#` at the start of a line is a directive, which is the rule being guarded. The
+	// whole line is one token, so it appears as written. `Q` is not expanded because this
+	// is the tokenizer on its own: expansion is a later phase, which is the point — the
+	// directive token exists, so the helper can prove it was recognised.
+	assert texts('#define Q 9
+int x = Q;') == ['#define Q 9', 'int', 'x', '=', 'Q', ';']
+	// Mid-line it is not, even on a later line than one that did start with a token.
+	assert texts('int x = 0; # define Q 9
+int y = Q;') == ['int', 'x', '=', '0', ';', '#', 'define', 'Q', '9', 'int', 'y',
+		'=', 'Q', ';']
+}
+
 fn test_line_comment_ends_at_newline() {
 	assert texts('a // b
 c') == ['a', 'c']

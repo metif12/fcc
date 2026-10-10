@@ -466,13 +466,13 @@ fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, line int) ([]ast
 		}
 		if idx := param_index(m, t.text) {
 			if idx < named {
-				out << args[idx].clone()
+				out << with_leading_space(args[idx], t.has_space)
 			}
 			i++
 			continue
 		}
 		if is_va(m, t.text) {
-			out << va_args
+			out << with_leading_space(va_args, t.has_space)
 			i++
 			continue
 		}
@@ -480,6 +480,27 @@ fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, line int) ([]ast
 		i++
 	}
 	return out, named
+}
+
+// with_leading_space returns an argument's tokens with the spacing of its first token
+// reconciled against where the parameter stood in the body.
+//
+// The two disagree, and `#` stringizing needs the body's answer. An argument's tokens
+// carry the spacing of the *invocation site*, which for `M12(foo. x)` with `x` bound to
+// `bar` says there was no space before `bar` — but the body wrote a space before `x`, and
+// the stringified argument is `"foo. bar"`, not `"foo.bar"`. Measured on chibicc's
+// macro.c line 311, where `#define M13(x) M12(foo. x)` must give `"foo. bar"`.
+//
+// OR rather than overwrite, because both sides can be the one that carried a real space.
+fn with_leading_space(arg []ast.Token, param_has_space bool) []ast.Token {
+	if arg.len == 0 || !param_has_space {
+		return arg
+	}
+	mut out := arg.clone()
+	mut first := out[0]
+	first.has_space = true
+	out[0] = first
+	return out
 }
 
 // stamp_line rewrites every token's position to one line.
