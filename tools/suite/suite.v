@@ -24,7 +24,7 @@ import os
 // tool is reported as BLOCKED, never as a pass or a fail.
 
 const suite_default = 'C:/Users/MR/AppData/Local/Temp/opencode/chibicc/test'
-const vcc_default = 'C:/Users/MR/Projects/vcc/vcc.exe'
+const vcc_default = 'C:/Users/MR/Projects/vcc/fcc.exe'
 const gcc_default = 'C:/Users/MR/scoop/apps/gcc/current/bin/gcc.exe'
 const tcc_include = 'C:/Users/MR/Projects/v/thirdparty/tcc/include'
 

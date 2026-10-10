@@ -36,7 +36,7 @@ fn main() {
 	root := os.dir(os.dir(os.dir(os.args[0])))
 	src_dir := os.join_path(root, 'tests', 'endtoend')
 
-	vcc := os.join_path(root, 'vcc.exe')
+	vcc := os.join_path(root, 'fcc.exe')
 	v_root := os.getenv('VCC_V_ROOT')
 	assert v_root != '', 'VCC_V_ROOT must name the V tree tcc and gcc are taken from'
 	gcc := os.join_path(os.dir(os.dir(v_root)), 'scoop', 'apps', 'gcc', 'current', 'bin',
@@ -72,7 +72,7 @@ fn main() {
 		}
 
 		s_path := os.join_path(probe_dir, base + '_cmp_vcc.s')
-		vcc_exe := os.join_path(probe_dir, base + '_cmp_vcc.exe')
+		vcc_exe := os.join_path(probe_dir, base + '_cmp_fcc.exe')
 		mut rc := os.exec([vcc, '-I', tcc_include, '-S', '-o', s_path, src])
 		if rc.exit_code != 0 {
 			println('FAIL    ${name}: vcc -S exited ${rc.exit_code}')
