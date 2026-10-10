@@ -12,6 +12,41 @@ import ast
 // parsed runs a snippet through the parser with no preprocessor, which is what a
 // declaration-only test needs.
 fn parsed(src string) ParseResult {
+
+// A pp-number that is not a valid constant is a diagnostic, not a value.
+//
+// This is the guard `invalid_numeric_suffix` provides, and it is needed because widening
+// the tokenizer to lex whole pp-numbers removed the only thing that was catching these:
+// a number used to stop at the first character that was not a suffix letter, so `0zz`
+// lexed as the number `0` and the identifier `zz`. Without the guard `parse_integer`'s
+// digit loop `continue`s past the bytes it does not understand, and `0zz` would silently
+// decode to int 0 — a plausible wrong value with no diagnostic, which is the failure mode
+// this project says it can least afford.
+//
+// Every one of these is what gcc 15.2 diagnoses, with the same message and the same exit
+// code. `-pedantic-errors` changes nothing in any case.
+fn test_an_invalid_pp_number_is_reported_not_decoded() {
+	for bad in ['0zz', '1abc', '3.5foo', '0x1z', '1e5x', '1p+3', '1\$'] {
+		r := parsed('int x = ${bad};\n')
+		assert r.errors.len > 0, 'no diagnostic for ${bad}'
+		assert r.errors[0].contains('invalid suffix'), 'for ${bad}: ${r.errors}'
+	}
+	// And every legal spelling in the same shapes must not be reported — including a
+	// binary constant, whose digits are all hex digits and which a prefix-blind rule gets
+	// right by accident.
+	for good in ['0u', '0llu', '1e5', '0x1p3', '0b1010', '0xff', '0777', '0b0L', '.5', '1.'] {
+		r := parsed('int x = ${good};\n')
+		assert r.errors.len == 0, 'unexpected diagnostic for ${good}: ${r.errors}'
+	}
+	// A character constant is a `.num_` token too, and its text carries the quotes. The
+	// first version of this check reported `'a'` as a bad number; the same guard
+	// `numeric_type` uses is what keeps it out.
+	for chr in ["'a'", "'\\n'", "'\\x80'", "L'0'", "'ab'"] {
+		r := parsed('int x = ${chr};\n')
+		assert r.errors.len == 0, 'unexpected diagnostic for ${chr}: ${r.errors}'
+	}
+}
+
 	return parse_tokens(tokenize(src), 'test.c', []PackEvent{})
 }
 

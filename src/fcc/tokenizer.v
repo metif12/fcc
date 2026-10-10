@@ -513,6 +513,39 @@ fn (mut t Tokenizer) read_number() ast.Token {
 	// Type suffixes: u/U, l/L, ll/LL, f/F, and combinations. Read greedily and
 	// validate in the type checker, because C11 allows several spellings.
 	spliced = t.scan(is_suffix_char) || spliced
+	// [C11 6.4.8] Everything above is the *numeric* part. A pp-number also continues
+	// with identifier-nondigits and with a `.` or an `e`/`E`/`p`/`P` followed by a sign,
+	// and stopping at the first character that is not a suffix letter is what split
+	// `0zz` into the number `0` and the identifier `zz`.
+	//
+	// This is the catch-all the standard describes, and it runs last for a reason: the
+	// hex-digit scan above must stay hex-only, because widening it would consume the `z`
+	// of `0x1z` before the `p` arm could recognise a binary exponent and `0x1.8p3`
+	// would break. A pp-number that is not a valid constant is rejected later — see
+	// `invalid_numeric_suffix`, which exists because widening here removes the only
+	// thing that was catching them.
+	//
+	// The sign rule is tested *before* the identifier rule, because `e`, `E`, `p` and `P`
+	// are identifier characters and `1p+3` must lex as one pp-number rather than as
+	// `1p` followed by `+3`. gcc reports the whole `p+3` as the invalid suffix.
+	for t.pos < t.src.len {
+		c := t.src[t.pos]
+		if c == `\\` && t.peek_at(t.pos + 1) == `\n` {
+			t.skip_splice()
+			spliced = true
+			continue
+		}
+		if (c == `e` || c == `E` || c == `p` || c == `P`)
+			&& (t.peek_at(t.pos + 1) == `+` || t.peek_at(t.pos + 1) == `-`) {
+			t.pos += 2
+			continue
+		}
+		if is_ident_cont(c) || c == `.` {
+			t.pos++
+			continue
+		}
+		break
+	}
 	raw := t.src[start..t.pos]
 	text := if spliced { remove_splices(raw) } else { raw }
 	mut tok := ast.Token{

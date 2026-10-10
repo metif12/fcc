@@ -3172,6 +3172,23 @@ fn (mut p Parser) primary() &ast.Node {
 	if tok.kind == .num_ {
 		p.pos++
 		ty := numeric_type(&tok)
+		// An invalid pp-number is a diagnostic, not a value. This is the only site with
+		// both the token and an error channel: `numeric_type` is a free function that
+		// returns a type on every path, and the value was already decoded in the
+		// tokenizer — so reporting here cannot disturb the value path, and it is what
+		// stops `0zz` from silently becoming an int 0.
+		//
+		// A character constant is a `.num_` token too, and its text is the spelling *with
+		// the quotes on* — `'a'`. Validating that would report a char literal as a bad
+		// number, which is what happened the first time this was written. The same guard
+		// `numeric_type` uses is applied first, for the same reason.
+		if tok.text.len > 0 && is_number_start(tok.text[0]) {
+			bad := invalid_numeric_suffix(tok.text)
+			if bad != '' {
+				kind := if is_flonum(ty) { 'floating' } else { 'integer' }
+				p.error_at(tok, "invalid suffix '${bad}' on ${kind} constant")
+			}
+		}
 		if is_flonum(ty) {
 			return &ast.Node{
 				kind: .num

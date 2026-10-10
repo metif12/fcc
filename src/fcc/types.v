@@ -569,8 +569,110 @@ pub fn numeric_type(tok &ast.Token) &ast.Type {
 //
 // It is the part `strip_numeric_suffix` removes, found by difference rather than by
 // a second set of rules, so the two cannot disagree about where the digits stop.
+//
+// Note it answers *what a suffix is*, not whether the spelling is valid: for `0x1p3`
+// the strip stops at the `p` and this reports "p3", which is the binary exponent and
+// not a suffix. `invalid_numeric_suffix` is the function that judges validity, and it
+// walks from the front so the exponent is never mistaken for one.
 pub fn numeric_suffix(text string) string {
 	return text[strip_numeric_suffix(text).len..]
+}
+
+// is_valid_suffix_char reports whether a byte may appear in a numeric type suffix:
+// u/U, l/L, ll/LL and f/F, in any combination.
+fn is_valid_suffix_char(c u8) bool {
+	return c == `u` || c == `U` || c == `l` || c == `L` || c == `f` || c == `F`
+}
+
+// is_base_digit reports whether a byte is a digit of the base a prefix selects.
+//
+// `0x` selects hexadecimal and `0b`/`0B` selects binary; anything else is decimal. The
+// binary case is why this is a parameter and not a fixed rule: `0b1010` takes only `0`
+// and `1`, and every one of those is also a hex digit, so a single hex rule would read a
+// binary constant correctly and a single decimal rule would stop at the first `1`.
+fn is_base_digit(hex bool, bin bool, c u8) bool {
+	if hex {
+		return is_hex_digit(c)
+	}
+	if bin {
+		return c == `0` || c == `1`
+	}
+	return is_digit(c)
+}
+
+// invalid_numeric_suffix returns the part of a pp-number's spelling that follows the
+// numeric constant and is not a valid type suffix, or '' when the spelling is a valid
+// constant.
+//
+// [C11 6.4.8p4] says a pp-number has no type and no value until a successful conversion
+// in phase 7, and [5.1.1.3p1] requires a diagnostic when a syntax rule is broken. gcc
+// words it `invalid suffix 'zz' on integer constant` and tcc says `invalid number`; both
+// exit non-zero, and `-pedantic-errors` changes nothing.
+//
+// This exists because the tokenizer used to stop a number at the first character that
+// was not a suffix letter, which caught these by accident: `0zz` lexed as the number `0`
+// followed by the identifier `zz`. Now that it lexes as one pp-number, the decoder would
+// silently skip the digits it does not understand — `parse_integer` `continue`s past a
+// byte outside its base — and hand back a plausible wrong value with no diagnostic. So
+// the check walks from the front, consumes exactly the numeric part including a binary
+// exponent, and reports whatever is left.
+fn invalid_numeric_suffix(text string) string {
+	if text.len == 0 || !is_number_start(text[0]) {
+		return ''
+	}
+	mut i := 0
+	mut hex := false
+	mut bin := false
+	if i + 1 < text.len && text[0] == `0` {
+		c := text[1]
+		if c == `x` || c == `X` {
+			hex = true
+			i = 2
+		} else if c == `b` || c == `B` {
+			// A binary constant is a GNU extension and a C23 one. There is no float form
+			// of it, so no exponent is recognised below for this base.
+			bin = true
+			i = 2
+		}
+	}
+	// The digit set is passed rather than captured: a closure over `hex` and `bin` has to
+	// list them as inherited variables in this V build, and two extra arguments are plainer
+	// than that.
+	for i < text.len && is_base_digit(hex, bin, text[i]) {
+		i++
+	}
+	if i < text.len && text[i] == `.` {
+		i++
+		for i < text.len && is_base_digit(hex, bin, text[i]) {
+			i++
+		}
+	}
+	// A binary exponent is what makes a hex constant a float, and only a hex one may
+	// carry it. The sign is optional but at least one digit must follow, or the letter
+	// starts an identifier instead — which is what `invalid suffix 'p'` reports.
+	exp_lower := if hex { `p` } else { `e` }
+	exp_upper := if hex { `P` } else { `E` }
+	if !bin && i < text.len && (text[i] == exp_lower || text[i] == exp_upper) {
+		mut j := i + 1
+		if j < text.len && (text[j] == `+` || text[j] == `-`) {
+			j++
+		}
+		for j < text.len && is_digit(text[j]) {
+			j++
+		}
+		// More than just the letter and its sign is present, so it is an exponent and not
+		// the start of a suffix.
+		if j > i + 1 {
+			i = j
+		}
+	}
+	rest := text[i..]
+	for c in rest {
+		if !is_valid_suffix_char(c) {
+			return rest
+		}
+	}
+	return ''
 }
 
 // unsigned_version returns the unsigned type of the same width as ty.
@@ -591,7 +693,18 @@ fn is_number_start(c u8) bool {
 
 // is_hex_float reports whether a literal is a hexadecimal float, which is
 // identified by its `p` exponent.
+// is_hex_float reports whether a spelling is a hexadecimal floating constant.
+//
+// [C11 6.4.4.2] A binary exponent — `p` or `P` — exists only in a hexadecimal constant,
+// so the prefix is what makes the letter mean anything. Answering on the letter alone
+// made every spelling containing a `p` a double, including `1p+3`, which is not valid C
+// at all and which gcc reports as an invalid *integer* constant. Measured against gcc:
+// `0x1p3` is a double and `1p+3` is an integer error, and the two are told apart by the
+// prefix and not by the letter.
 fn is_hex_float(text string) bool {
+	if text.len < 3 || text[0] != `0` || (text[1] != `x` && text[1] != `X`) {
+		return false
+	}
 	return text.contains('p') || text.contains('P')
 }
 

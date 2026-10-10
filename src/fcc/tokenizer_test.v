@@ -168,7 +168,42 @@ fn test_octal_and_decimal() {
 fn test_binary_extension() {
 	assert val('0b1010') == 10
 	assert val('0B11') == 3
+	// The digit set is binary, not hex. Every binary digit is also a hex digit, which is
+	// the only reason a single prefix-blind rule got the value right — and why a wider
+	// pp-number scan has to know `0b` is a prefix. See `invalid_numeric_suffix`.
+	assert texts('0b1010') == ['0b1010']
+	assert texts('0b0L') == ['0b0L']
+	assert texts('0b1111') == ['0b1111']
+	assert texts('0B101111') == ['0B101111']
 }
+
+// [C11 6.4.8] A pp-number continues with identifier-nondigits, so `0zz` is one token.
+//
+// It used to stop at the first character that was not a suffix letter and split into `0`
+// and `zz`, which is what made `CONCAT(f,0zz)` produce `f0` plus `zz` instead of `f0zz`.
+fn test_a_pp_number_is_one_token() {
+	assert texts('0zz') == ['0zz']
+	assert texts('1abc') == ['1abc']
+	assert texts('3.5foo') == ['3.5foo']
+	assert texts('0x1z') == ['0x1z']
+	assert texts('1e5x') == ['1e5x']
+	assert texts('1p+3') == ['1p+3']
+	assert texts('1$') == ['1$']
+	// The sign rule is tested before the identifier rule, because `p` is an identifier
+	// character: `1p+3` must be one pp-number and not `1p` followed by `+3`.
+	assert texts('0b11 + 2') == ['0b11', '+', '2']
+}
+
+// A pp-number that is not a valid constant is a diagnostic, not a value.
+//
+// The token-level guard (`invalid_numeric_suffix`) is pinned in `parser_test.v`, which is
+// the only unit that has the parser in scope to see the diagnostic. The token shapes
+// above are this file's half.
+fn test_an_invalid_pp_number_is_one_token() {
+	assert texts('0zz') == ['0zz']
+	assert texts('1abc') == ['1abc']
+}
+
 
 fn test_decimal_float() {
 	assert fval('1.5') == 1.5
