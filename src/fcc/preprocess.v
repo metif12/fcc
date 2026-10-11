@@ -62,6 +62,14 @@ pub mut:
 	// depth bounds include nesting and expansion recursion, so a pathological file is
 	// reported instead of exhausting the stack.
 	depth int
+	// painted and collecting_paint carry [C11 6.10.3.4p2]'s hide set across one macro
+	// replacement. `painted` names the macros an argument's expansion left alone, and
+	// `collecting_paint` says whether the recursion guard should record them.
+	//
+	// Both are scoped: the paint expires with the macro replacement that caused it, so a
+	// later use of the same name expands normally. See `expand_arg`.
+	painted          []string
+	collecting_paint bool
 }
 
 // max_depth bounds include nesting and expansion recursion.

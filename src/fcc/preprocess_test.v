@@ -633,8 +633,8 @@ fn test_va_opt_inside_va_opt_is_reported_not_dropped() {
 // A substituted argument inherits the spacing of where the *parameter* stood in the
 // body, and `#` stringizing needs that rather than the invocation site's spacing.
 //
-// `#define M13(x) M12(foo. x)` with `M12` stringifying its argument gives `"foo. bar"`
-// and not `"foo.bar"`: the body wrote a space before `x` even though the invocation
+// `#define M13(x) M12(foo. x)` with `M12` stringifying gives `"foo. bar"` and not
+// `"foo.bar"`, because the body wrote a space before `x` even though the invocation
 // `M13(bar)` wrote none before `bar`. Measured on chibicc's macro.c line 311.
 //
 // The two are ORed rather than one overwriting the other, because either side can be
@@ -644,5 +644,29 @@ fn test_a_substituted_argument_inherits_the_bodys_spacing() {
 	assert preprocessed('#define M12(x) #x\n#define M13(x) M12(foo.x)\nM13(bar)') == '"foo.bar"'
 	// A real space at the invocation site survives too.
 	assert preprocessed('#define M12(x) #x\n#define M13(x) M12(foo . x)\nM13( bar)') == '"foo . bar"'
+}
+
+// [C11 6.10.3.1p1] an argument is macro-expanded *before* substitution, "unless preceded
+// by a # or ## preprocessing token or followed by a ##". The bare-parameter arm is the
+// one that must expand, and the `#`/`##` arms are the ones that must not.
+//
+// Both halves are observable and they pull in opposite directions, which is why
+// `substitute` arm by arm rather than uniformly:
+//
+//	#define M12 foo
+//	#define S(x)  #x
+//	#define T(x) S(x)        T(M12) -> "foo"   argument expanded before `#` sees it
+//	S(M12)                   -> "M12"           `#` operand, not expanded
+//
+// Measured on chibicc's macro.c 314-320, where `M12` is redefined from function-like to
+// object-like and `M14(bar)` must still give `"bar.foo"`.
+fn test_an_argument_is_expanded_before_a_bare_substitution() {
+	assert preprocessed('#define S(x) #x\n#define T(x) S(x)\n#define M12 foo\nT(M12)') == '"foo"'
+	// A `#` operand is *not* expanded, which is the same clause's exception.
+	assert preprocessed('#define S(x) #x\n#define M12 foo\nS(M12)') == '"M12"'
+	// Nor is a `##` operand: the spelling the paste joins is the raw one.
+	assert preprocessed('#define P(a,b) a##b\n#define M 5\nP(1,M)') == '1M'
+	// And the chain chibicc uses: a macro that is both an argument and a body token.
+	assert preprocessed('#define STR(x) #x\n#define M13(x) STR(x)\n#define M14(x) M13(x.M12)\n#define M12 foo\nM14(bar)') == '"bar.foo"'
 }
 

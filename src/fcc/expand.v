@@ -142,7 +142,24 @@ fn (mut p Preprocessor) expand(toks []ast.Token, path string) []ast.Token {
 		// The recursion guard. A macro already being expanded is not expanded again,
 		// so `#define A B` / `#define B A` terminates instead of looping, and a macro
 		// that legitimately mentions itself stops rather than recursing.
+		//
+		// While an *argument* is being expanded the name is also recorded, because
+		// [C11 6.10.3.4p2] makes that paint permanent for the enclosing replacement:
+		// "These nonreplaced macro name preprocessing tokens are no longer available
+		// for further replacement even if they are later (re)examined". See `painted`.
 		if m.is_expanding {
+			if p.collecting_paint {
+				p.painted << m.name
+			}
+			out << tok
+			i++
+			continue
+		}
+		// [C11 6.10.3.4p2] A name an argument's expansion left unpainted stays unpainted
+		// through the rescan that follows it, because the nonreplaced tokens are "no
+		// longer available for further replacement even if they are later (re)examined".
+		// That is what stops a self-referential macro being expanded a second time.
+		if m.name in p.painted {
 			out << tok
 			i++
 			continue
@@ -164,7 +181,7 @@ fn (mut p Preprocessor) expand(toks []ast.Token, path string) []ast.Token {
 				i++
 				continue
 			}
-			mut substituted, arg_count := p.substitute(m, parsed.list,
+			mut substituted, arg_count := p.substitute(m, parsed.list, path,
 				tok.line.disp_line)
 			if arg_count < 0 {
 				// A wrong argument count is reported by `substitute`; the macro is left
@@ -176,11 +193,15 @@ fn (mut p Preprocessor) expand(toks []ast.Token, path string) []ast.Token {
 			p.macros[idx].is_expanding = true
 			substituted = p.expand(stamp_line(substituted, tok.line.disp_line), path)
 			p.macros[idx].is_expanding = false
+			// The paint an argument's expansion left is spent with this macro's rescan.
+			// Leaving it set would leak into every later use of the same name in the
+			// batch, and gcc expands those normally.
+			p.painted = []string{}
 			out << substituted
 			i = parsed.close
 			continue
 		}
-		mut substituted, _ := p.substitute(m, [][]ast.Token{}, tok.line.disp_line)
+		mut substituted, _ := p.substitute(m, [][]ast.Token{}, path, tok.line.disp_line)
 		p.macros[idx].is_expanding = true
 		substituted = p.expand(stamp_line(substituted, tok.line.disp_line), path)
 		p.macros[idx].is_expanding = false
@@ -322,7 +343,8 @@ fn has_va_opt(toks []ast.Token) bool {
 // rescan sees `M2` with the flag clear, expands it once, and paints it for the nested
 // pass — which is the same single expansion, in the same place, with no flag to reset.
 // `#` and `##` are unaffected: they already read `args[idx]` directly.
-fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, line int) ([]ast.Token, int) {
+fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, path string, line int) ([]ast.Token,
+	int) {
 	if !m.is_func {
 		mut out := []ast.Token{}
 		for t in m.body {
@@ -392,7 +414,7 @@ fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, line int) ([]ast
 					} else {
 						mut inner := m
 						inner.body = body[i + 2..close].clone()
-						mut sub, _ := p.substitute(inner, args, line)
+						mut sub, _ := p.substitute(inner, args, path, line)
 						out << sub
 					}
 				}
@@ -466,13 +488,24 @@ fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, line int) ([]ast
 		}
 		if idx := param_index(m, t.text) {
 			if idx < named {
-				out << with_leading_space(args[idx], t.has_space)
+				// [C11 6.10.3.1p1] the argument is macro-expanded *before* substitution,
+				// "unless preceded by a # or ## preprocessing token or followed by a ##".
+				// This arm is the bare one, so expansion belongs here, and `expand_arg`
+				// keeps the paint an argument's own expansion left for the rescan below.
+				//
+				// The parameter's own spacing is applied afterwards rather than inside
+				// `expand_arg`, because `expand_arg` is told nothing about the body: the
+				// space that matters is the one written before `x` in `M12(foo. x)`, and
+				// the invocation site has none before `bar`.
+				out << with_leading_space(p.expand_arg(args[idx], path), t.has_space)
 			}
 			i++
 			continue
 		}
 		if is_va(m, t.text) {
-			out << with_leading_space(va_args, t.has_space)
+			// `__VA_ARGS__` is a parameter like any other [C11 6.10.3.1p2], and it is
+			// not adjacent to `#` or `##` here, so its argument is expanded too.
+			out << with_leading_space(p.expand_arg(va_args, path), t.has_space)
 			i++
 			continue
 		}
@@ -500,6 +533,29 @@ fn with_leading_space(arg []ast.Token, param_has_space bool) []ast.Token {
 	mut first := out[0]
 	first.has_space = true
 	out[0] = first
+	return out
+}
+
+// expand_arg expands a macro's argument before substitution, per [C11 6.10.3.1p1], and
+// leaves the names it could not expand recorded for the rescan that follows.
+//
+// The recording is scoped by `collecting_paint` rather than always on, because an
+// argument expansion is the *only* place a name may be legitimately left unpainted and
+// still need protecting. Outside it, `#define A A` at top level expands once and a later
+// use of A expands normally — gcc shows exactly that:
+//
+//	#define M2 M2 + 3
+//	#define A(x) x
+//	A(M2)          ->  M2 + 3
+//	int y = M2;    ->  int y = M2 + 3;
+//
+// The paint expires with the macro replacement that caused it, which is what makes those
+// two answers different. `painted` is cleared after that macro's rescan in `expand`.
+fn (mut p Preprocessor) expand_arg(toks []ast.Token, path string) []ast.Token {
+	outer := p.collecting_paint
+	p.collecting_paint = true
+	out := p.expand(toks, path)
+	p.collecting_paint = outer
 	return out
 }
 
