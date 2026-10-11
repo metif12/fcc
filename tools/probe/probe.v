@@ -64,11 +64,29 @@ fn main() {
 		src := os.join_path(src_dir, name)
 		base := name.all_before_last('.')
 
-		tcc_exe := os.join_path(probe_dir, base + '_cmp_tcc.exe')
-		if os.exec([tcc, '-I', tcc_include, '-o', tcc_exe, src]).exit_code != 0 {
-			println('BLOCKED ${name}: tcc refused it')
-			blocked++
-			continue
+		// The oracle is tcc when tcc will take the program, and gcc when it will not.
+		//
+		// tcc is the primary because it is the compiler vcc has to agree with on this
+		// host — same headers, same objects, same C library. But tcc predates C23 and
+		// rejects `__VA_OPT__` outright, and it reads a pp-number used as a macro
+		// argument as an invalid number rather than as one token. Falling back to gcc
+		// keeps those shapes measurable rather than BLOCKED; which oracle answered is
+		// printed, so a MATCH is never ambiguous about what it was measured against.
+		//
+		// A program *both* refuse is still BLOCKED, because that is a statement about
+		// the program and not about vcc.
+		mut oracle := tcc
+		mut oracle_name := 'tcc'
+		mut oracle_exe := os.join_path(probe_dir, base + '_cmp_tcc.exe')
+		if os.exec([tcc, '-I', tcc_include, '-o', oracle_exe, src]).exit_code != 0 {
+			oracle = gcc
+			oracle_name = 'gcc'
+			oracle_exe = os.join_path(probe_dir, base + '_cmp_gcc.exe')
+			if os.exec([gcc, '-o', oracle_exe, src]).exit_code != 0 {
+				println('BLOCKED ${name}: tcc and gcc both refused it')
+				blocked++
+				continue
+			}
 		}
 
 		s_path := os.join_path(probe_dir, base + '_cmp_vcc.s')
@@ -86,15 +104,15 @@ fn main() {
 			continue
 		}
 
-		a := os.exec([tcc_exe])
+		a := os.exec([oracle_exe])
 		b := os.exec([vcc_exe])
 		// stdout *and* the exit code, because a program that prints the right thing and
 		// then crashes is not a pass.
 		if a.output.trim_space() == b.output.trim_space() && a.exit_code == b.exit_code {
-			println('MATCH   ${name}')
+			println('MATCH   ${name}  (${oracle_name})')
 			same++
 		} else {
-			println('DIFFER  ${name}  (tcc exit=${a.exit_code} vcc exit=${b.exit_code})')
+			println('DIFFER  ${name}  (${oracle_name} exit=${a.exit_code} vcc exit=${b.exit_code})')
 			differ++
 		}
 	}
