@@ -73,6 +73,15 @@ fn main() {
 
 	// `mut`, because the same two names are bound three times below — suite.v does the
 	// same thing for the same reason.
+	//
+	// The compiler is run from the chibicc *root* with a relative `test/<name>` path,
+	// which is how chibicc's own Makefile:17 invokes it, and it is the only way
+	// `__FILE__` produces `test/macro.c` — the spelling the tests assert on. With an
+	// absolute source path the compiler correctly answers with an absolute
+	// `__FILE__`, and macro.c 340/343/397 then fail on a path shape rather than on a
+	// defect. The `-I` list stays absolute, because nothing asserts on those.
+	suite_root := os.dir(os.real_path(suite))
+	src_spelling := 'test/' + name
 	mut code := 0
 	mut out := ''
 	code, out = run(vcc, [
@@ -85,8 +94,9 @@ fn main() {
 		'-S',
 		'-o',
 		asm_path,
-		src,
-	], work)	if code != 0 {
+		src_spelling,
+	], suite_root)
+	if code != 0 {
 		println('STAGE vcc -S failed (exit ${code})')
 		println(out)
 		exit(1)

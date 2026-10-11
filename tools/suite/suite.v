@@ -123,8 +123,15 @@ fn one(suite string, vcc string, gcc string, work string, common_obj string, nam
 	// chibicc include tree, and tcc's. The first two carry the headers the tests
 	// ask for by name and the third supplies the standard library, because vcc has
 	// no headers of its own.
+	//
+	// The compiler is run from the chibicc *root* with a relative `test/<name>` path,
+	// which is how chibicc's own Makefile invokes it, and which is what `__FILE__`
+	// then spells. With an absolute source path the compiler answers with an absolute
+	// `__FILE__`, and macro.c 340/343/397 fail on a path shape rather than on a defect.
 	mut out := ''
 	mut code := 0
+	suite_root := os.dir(os.real_path(suite))
+	src_spelling := 'test/' + name
 	code, out = run(vcc, [
 		'-I',
 		suite,
@@ -135,8 +142,8 @@ fn one(suite string, vcc string, gcc string, work string, common_obj string, nam
 		'-S',
 		'-o',
 		asm_path,
-		src,
-	], work)
+		src_spelling,
+	], suite_root)
 	if code != 0 {
 		o.verdict = .failed
 		o.stage = 'vcc -S'

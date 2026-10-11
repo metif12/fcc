@@ -648,7 +648,12 @@ pub mut:
 
 fn (mut p Preprocessor) do_pragma(rest string, line int, path string) {
 	if rest == 'once' {
-		p.pragma_once[path] = true
+		// Keyed on the resolved path rather than on `path`, because `path` is now the
+		// *display* spelling and a header included twice under two different names would
+		// otherwise get two keys and be included twice. gcc is insensitive to the
+		// spelling: `#include "a.h"` followed by `#include "./a.h"` with
+		// `#pragma once` emits the header once.
+		p.pragma_once[os.real_path(path)] = true
 		return
 	}
 	p.do_pragma_pack(rest.trim_space(), line)
@@ -794,7 +799,7 @@ fn (mut p Preprocessor) do_include(rest string, line int, path string, mut out [
 			return
 		}
 	}
-	full := p.resolve_include(name, angled, path) or {
+	mut full, mut disp := p.resolve_include(name, angled, path) or {
 		p.errorf(line, 'cannot find include ${name}')
 		return
 	}
@@ -815,7 +820,10 @@ fn (mut p Preprocessor) do_include(rest string, line int, path string, mut out [
 	// rest of the includer.
 	saved_cond := p.cond_stack.clone()
 	p.cond_stack = []
-	included := p.directives(tokenize(src), full)
+	// `disp`, not `full`: the included tokens are expanded with the spelling they were
+	// included under, which is what `__FILE__` inside them expands to. `full` is still
+	// what opened the file and what keys `#pragma once` above.
+	included := p.directives(tokenize(src), disp)
 	for c in p.cond_stack {
 		p.errorf(c.line, 'unterminated #if in ${full}')
 		break
@@ -843,30 +851,53 @@ fn strip_sentinels(toks []ast.Token) []ast.Token {
 	}
 	return out
 }
-// resolve_include searches for a header.
+// resolve_include searches for a header and returns two spellings of where it found it.
 //
-// A quoted include searches the including file's directory first, which is what
-// `#include "sibling.h"` in a header means; an angled include does not, because
-// `<...>` names a system header.
-fn (p &Preprocessor) resolve_include(name string, angled bool, including string) ?string {
+// The first is the *resolved* path, which is what opens the file and what keys
+// `#pragma once`: an absolute, canonicalised, symlink-resolved name that is the same
+// string however the header was spelled. The second is the *display* spelling, which is
+// what `__FILE__` expands to.
+//
+// The two are different on purpose. C11 6.10.8.1 says `__FILE__` is "the presumed name
+// of the current source file", and gcc's presumed name is the search directory **as
+// spelled** plus `/` plus the include name **as spelled**, with no normalisation at all.
+// Measured: `-Isub` with `h.h` gives `"sub/h.h"`; `"sub/../sub/h.h"` stays exactly that;
+// `-I.\sub` gives `".\\sub/h.h"` with the caller's backslash left alone and only the
+// appended part using `/`. Returning the resolved path for both made `__FILE__` absolute
+// and canonicalised, which is why chibicc's macro.c line 343 got
+// `C:\...\test\include1.h` where C and gcc give `test/include1.h`.
+fn (p &Preprocessor) resolve_include(name string, angled bool, including string) ?(string, string) {
 	if !angled {
 		dir := os.dir(including)
 		candidate := if dir.len > 0 { os.join_path(dir, name) } else { name }
 		if os.is_file(candidate) {
-			return os.real_path(candidate)
+			return os.real_path(candidate), display_path(dir, name)
 		}
 	}
 	for dir in p.quote_paths {
 		candidate := os.join_path(dir, name)
 		if os.is_file(candidate) {
-			return os.real_path(candidate)
+			return os.real_path(candidate), display_path(dir, name)
 		}
 	}
 	for dir in p.angle_paths {
 		candidate := os.join_path(dir, name)
 		if os.is_file(candidate) {
-			return os.real_path(candidate)
+			return os.real_path(candidate), display_path(dir, name)
 		}
 	}
 	return none
+}
+
+// display_path joins a directory and a header name the way C spells an included file.
+//
+// `os.join_path` is the wrong tool: on Windows it rewrites `/` to `\`, and the appended
+// part is the one place gcc always writes a forward slash. Delegating would give
+// `test\include1.h` where chibicc asserts on `test/include1.h`, so the join is written
+// out and the directory keeps whatever separators the caller spelled it with.
+fn display_path(dir string, name string) string {
+	if dir.len == 0 {
+		return name
+	}
+	return dir + '/' + name
 }

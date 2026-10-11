@@ -706,3 +706,78 @@ fn test_a_macro_names_own_spacing_survives_its_expansion() {
 	assert preprocessed('#define A 1\n#define B(x) x\nB( A)') == '1'
 }
 
+// [C11 6.10.8.1] `__FILE__` is "the presumed name of the current source file", and
+// gcc's presumed name for a header is the search directory **as spelled** plus `/` plus
+// the include name **as spelled** — never canonicalised.
+//
+// It was the resolved absolute path, so a header included as `"include1.h"` from
+// `test/macro.c` gave `C:\...\test\include1.h` where C and gcc give `test/include1.h`.
+// Measured against gcc: `-Isub` with `h.h` gives `"sub/h.h"`, `"sub/../sub/h.h"` is left
+// exactly as written, and `-I.\sub` gives `".\\sub/h.h"` with the caller's own backslash
+// kept and only the appended part using `/`.
+//
+// The two spellings are now separate: the resolved path opens the file and keys
+// `#pragma once`, and this display spelling is what the included tokens are expanded
+// with. `#pragma once` is keyed on the resolved path for the same reason — gcc suppresses
+// a header included as `"a.h"` and then `"./a.h"` once, and a spelling key would not.
+fn test_file_is_the_spelling_the_include_used() {
+	// The main file keeps the spelling the driver was given, whatever it is: `run_text`
+	// is handed 'test.c' and that is what comes back. Before this change the value was
+	// canonicalised, so a relative path was lost.
+	mut p := preprocessor([], [])
+	p.define_builtins()
+	r := p.run_text('char *m = __FILE__;', 'test.c')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.tokens.filter(it.kind == .str_)[0].str_data.bytestr() == 'test.c'
+	// A `#` operand is *not* expanded, and that holds for builtins too — verified against
+	// gcc, which answers `"__FILE__"` for `S(__FILE__)`. It is the same rule as for a
+	// named macro.
+	assert ppb('#define S(x) #x\nS(__FILE__)').text == '"__FILE__"'
+	assert ppb('#define S(x) #x\nS(__LINE__)').text == '"__LINE__"'
+	// The *included* spelling — the part the chibicc suite asserts on at macro.c 343 —
+	// needs a real file on disk, so it is covered by that suite rather than here: this
+	// unit test has no filesystem to include from.
+}
+
+// [C11 6.10.8.1p2] `__LINE__` is *the integer constant* of the current line, not a
+// string.
+//
+// It was emitted as a string literal, so `int main_line1 = __LINE__;` became
+// `int main_line1 = "5";` — an `int` initialised from a string literal's address. That
+// compiled, linked and ran, and produced 1648275536 instead of 5: no diagnostic pointed
+// anywhere near the builtin. Measured on chibicc's macro.c 341.
+fn test_line_is_an_integer_constant_not_a_string() {
+	mut p := preprocessor([], [])
+	p.define_builtins()
+	r := p.run_text('int a = __LINE__;', 'test.c')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	// The line number is a numeric token, so it can initialise an `int`.
+	mut numbers := 0
+	for t in r.tokens {
+		if t.text == '1' {
+			assert t.kind == .num_, 'expected a numeric token, got ${t.kind}'
+			numbers++
+		}
+	}
+	assert numbers > 0, 'no numeric 1 in the token stream'
+	// And it is usable in a `#if`, which needs the number.
+	assert ppb('#if __LINE__ == 1\nyes\n#endif').text == 'yes'
+	// A `#` operand is not expanded, builtins included — gcc answers `"__LINE__"` for
+	// `S(__LINE__)`.
+	assert ppb('#define S(x) #x\nS(__LINE__)').text == '"__LINE__"'
+}
+
+// [C11 6.10.8.1p2] `__COUNTER__` begins at 0 and increments *after* each use.
+//
+// It incremented before reading, so the first use was 1. Measured on chibicc's macro.c
+// 391-393, which asserts 0, 1, 2.
+fn test_counter_starts_at_zero_and_increments_after_use() {
+	mut p := preprocessor([], [])
+	p.define_builtins()
+	r := p.run_text('int a = __COUNTER__;\nint b = __COUNTER__;\nint c = __COUNTER__;',
+		'test.c')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	nums := r.tokens.filter(it.kind == .num_).map(it.text)
+	assert nums == ['0', '1', '2'], 'got ${nums}'
+}
+

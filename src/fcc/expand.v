@@ -29,9 +29,13 @@ fn (mut p Preprocessor) builtin_token(m Macro, tok ast.Token, path string) ast.T
 	value := match m.builtin {
 		.file { path }
 		.line { i64(tok.line.disp_line).str() }
+		// [C11 6.10.8.1p2] the value starts at 0 and increments after each use: "a new
+		// integer constant ... beginning with 0". Incrementing *before* reading — which
+		// this did — made the first use 1, and chibicc's macro.c asserts on 0, 1, 2.
 		.counter {
+			value := p.counter.str()
 			p.counter++
-			p.counter.str()
+			value
 		}
 		// [C11 6.10.8p1] `__STDC__` is the integer constant 1, and the decimal spelling
 		// of the implementation's conformance. gcc prints a bare `1` with no quotes, and
@@ -43,20 +47,27 @@ fn (mut p Preprocessor) builtin_token(m Macro, tok ast.Token, path string) ast.T
 		.base_file { p.base_file }
 		else { '0' }
 	}
-	// Most builtins are strings — a file name is text and a line number pastes and
-	// compares more usefully as one — but `__STDC__` is a number, and emitting it as
-	// `"1"` would hand `assert(int, int)` a `char[2]`. A numeric token needs both `kind`
-	// and `text`: `numeric_type` reads the text to decide the type and does not look at
-	// `val`, so flipping only the kind would give the default `int` and lose the value.
-	if m.builtin == .stdc {
+	// Most builtins are strings — a file name is text and a date is text — but
+	// `__STDC__`, `__LINE__` and `__COUNTER__` are *integer constants* by [C11
+	// 6.10.8p1], and every one of them has to be a number.
+	//
+	// Emitting `__LINE__` as a string is the defect this fixes: `int main_line1 =
+	// __LINE__;` became `int main_line1 = "5";`, which initialises an `int` from the
+	// address of a string literal. It compiled, linked, and ran, and produced
+	// 1648275536 instead of 5 — the shape of failure this project can least afford,
+	// because nothing about the diagnostic points at the builtin. Measured on chibicc's
+	// macro.c 341.
+	//
+	// A numeric token needs both `kind` and `text`: `numeric_type` reads the spelling
+	// and ignores `val`, so flipping only the kind would give the default int.
+	if m.builtin in [.stdc, .line, .counter] {
 		return ast.Token{
-			kind: .num_
-			text: value
-			val:  i64(1)
-			len:  value.len
-			loc:  tok.loc
-			line: tok.line
-			// `numeric_type` also inspects the spelling, and a bare `1` is an int.
+			kind:      .num_
+			text:      value
+			val:       value.i64()
+			len:       value.len
+			loc:       tok.loc
+			line:      tok.line
 			at_bol:    tok.at_bol
 			has_space: tok.has_space
 		}
