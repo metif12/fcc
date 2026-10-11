@@ -668,5 +668,41 @@ fn test_an_argument_is_expanded_before_a_bare_substitution() {
 	assert preprocessed('#define P(a,b) a##b\n#define M 5\nP(1,M)') == '1M'
 	// And the chain chibicc uses: a macro that is both an argument and a body token.
 	assert preprocessed('#define STR(x) #x\n#define M13(x) STR(x)\n#define M14(x) M13(x.M12)\n#define M12 foo\nM14(bar)') == '"bar.foo"'
+	// The same chain with a space before the macro name rather than before the dot.
+	assert preprocessed('#define STR(x) #x\n#define M13(x) STR(x)\n#define M14(x) M13(x. M12)\n#define M12 foo\nM14(bar)') == '"bar. foo"'
+}
+
+// Mutual recursion through two macros, where the paint is made and spent in different
+// rescans.
+//
+// [C11 6.10.3.4p2] says a nonreplaced name is "no longer available for further
+// replacement even if they are later (re)examined", which has to hold for the whole
+// enclosing replacement and not just the innermost rescan. Releasing the paint inside
+// each macro's own branch let the *inner* macro spend the paint meant for the outer one:
+// `dbl(2)` came out as `dbl(2) + 3 * 2 + 3 * 2`, sixteen instead of ten. Measured on
+// chibicc's macro.c 234-236.
+fn test_mutual_recursion_expands_the_name_once() {
+	// `dbl` and `M10` mention each other; the `dbl` inside `M10` is the painted one.
+	assert preprocessed('#define dbl(x) M10(x) * x\n#define M10(x) dbl(x) + 3\ndbl(2)') == 'dbl ( 2 ) + 3 * 2'
+	// And through `#`, which is the shape macro.c asserts on.
+	assert preprocessed('#define ASSERT(x, y) assert(x, y, #y)\n#define dbl(x) M10(x) * x\n#define M10(x) dbl(x) + 3\nASSERT(10, dbl(2))') == 'assert ( 10 , dbl ( 2 ) + 3 * 2 , "dbl(2)" )'
+	// Three macros, same shape: the innermost mention is painted.
+	assert preprocessed('#define a(x) b(x)\n#define b(x) c(x)\n#define c(x) a(x)\na(1)') == 'a ( 1 )'
+}
+
+// The space written before a *macro name* in a body survives its expansion, because the
+// spacing in the output is where the tokens ended up rather than where the name was
+// written.
+//
+// `#define STR(x) #x` / `#define M13(x) STR(x)` / `#define M14(x) M13(x. M12)` with
+// `#define M12 foo` gives `"bar. foo"` — `M12` had a space before it in M14's body, so
+// `foo` has to arrive with one. Measured on chibicc's macro.c 320.
+fn test_a_macro_names_own_spacing_survives_its_expansion() {
+	// An object-like macro, which is the branch that needed the fix.
+	assert preprocessed('#define STR(x) #x\n#define M13(x) STR(x)\n#define M14(x) M13(x. M12)\n#define M12 foo\nM14(bar)') == '"bar. foo"'
+	// A function-like macro, which is the other branch and must agree.
+	assert preprocessed('#define STR(x) #x\n#define M13(x) STR(x)\n#define M14(x) M13(x. T(1))\n#define T(n) f##n\nM14(bar)') == '"bar. f1"'
+	// A macro with a space before it at the top of a line, which is the control.
+	assert preprocessed('#define A 1\n#define B(x) x\nB( A)') == '1'
 }
 

@@ -181,6 +181,19 @@ fn (mut p Preprocessor) expand(toks []ast.Token, path string) []ast.Token {
 				i++
 				continue
 			}
+			// The paint is taken *before* substitution and released after this macro's
+			// rescan, because that is the window it has to cover: `substitute` expands the
+			// arguments, which is where the paint is made, and the rescan is what has to
+			// respect it.
+			//
+			// A macro whose own substitution happens *inside* an argument's expansion does
+			// not own the paint and must not release it — the caller that invoked
+			// `expand_arg` does. Releasing at every level breaks mutual recursion: the
+			// inner macro of `#define dbl(x) M10(x) * x` / `#define M10(x) dbl(x) + 3`
+			// spent the paint meant for dbl's rescan, so `dbl(2)` became
+			// `dbl(2) + 3 * 2 + 3 * 2`. Measured on chibicc's macro.c 236.
+			owns_paint := !p.collecting_paint
+			paint_mark := p.painted.len
 			mut substituted, arg_count := p.substitute(m, parsed.list, path,
 				tok.line.disp_line)
 			if arg_count < 0 {
@@ -193,11 +206,17 @@ fn (mut p Preprocessor) expand(toks []ast.Token, path string) []ast.Token {
 			p.macros[idx].is_expanding = true
 			substituted = p.expand(stamp_line(substituted, tok.line.disp_line), path)
 			p.macros[idx].is_expanding = false
-			// The paint an argument's expansion left is spent with this macro's rescan.
-			// Leaving it set would leak into every later use of the same name in the
-			// batch, and gcc expands those normally.
-			p.painted = []string{}
-			out << substituted
+			if owns_paint {
+				p.painted.trim(paint_mark)
+			}
+			// The invocation's own spacing is carried onto the first token of what it
+			// became, because the spacing in the output is where the tokens ended up and
+			// not where the macro name was written.
+			//
+			// `#define M14(x) M13(x. M12)` with `M12` an object-like macro for `foo` has a
+			// space before `M12` in the body, and the stringified argument is `"bar. foo"`
+			// — so `foo` has to arrive with that space. Measured on chibicc's macro.c 320.
+			out << with_leading_space(substituted, tok.has_space)
 			i = parsed.close
 			continue
 		}
@@ -205,7 +224,10 @@ fn (mut p Preprocessor) expand(toks []ast.Token, path string) []ast.Token {
 		p.macros[idx].is_expanding = true
 		substituted = p.expand(stamp_line(substituted, tok.line.disp_line), path)
 		p.macros[idx].is_expanding = false
-		out << substituted
+		// The invocation's own spacing, carried onto the first token of what it became —
+		// as in the function-like branch above. An object-like macro is the common case:
+		// `M12` in `M14(x) M13(x. M12)` with `#define M12 foo` is one.
+		out << with_leading_space(substituted, tok.has_space)
 		i++
 	}
 	return out
