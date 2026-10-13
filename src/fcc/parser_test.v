@@ -645,6 +645,27 @@ fn test_a_linkage_change_is_reported_without_an_inline_specifier() {
 	assert r2.errors[0].contains('static declaration follows a non-static declaration')
 }
 
+// A function used before it was declared is a *warning*, not an error, because that is
+// what both oracles do: tcc prints `implicit declaration of function '_gmtime64_s'`
+// and exits 0, and gcc treats it as gnu11's implicit-declaration warning.
+//
+// `time.h` calls `_gmtime64_s` having declared only `_gmtime64`, so the error form kept
+// the header from compiling at all — and the call is still parsed, with `int` and
+// variadic invented as C89's assumption, so the program it produces is the program the
+// other compilers produce.
+fn test_an_implicit_declaration_is_a_warning_not_an_error() {
+	r := parsed('int f(void) { return helper(1, 2); }\n')
+	assert r.errors.len == 0, 'errors: ${r.errors}'
+	assert r.warnings.len == 1, 'warnings: ${r.warnings}'
+	assert r.warnings[0].contains('warning: implicit declaration of function "helper"')
+	// The call itself survived, with the invented declaration bound.
+	assert r.globals.len > 0
+	// A declared function produces no warning at all, which is the control.
+	r2 := parsed('int h(int x);\nint f(void) { return h(1); }\n')
+	assert r2.errors.len == 0
+	assert r2.warnings.len == 0
+}
+
 // --- initializers ---
 
 fn test_a_scalar_initializer_is_written_little_endian() {

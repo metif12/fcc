@@ -110,8 +110,9 @@ mut:
 // the preprocessor already has one of those in this module.
 pub struct ParseResult {
 pub mut:
-	globals []&ast.Obj
-	errors  []string
+	globals  []&ast.Obj
+	errors   []string
+	warnings []string
 }
 
 // Parser holds the state of one parse.
@@ -134,6 +135,7 @@ pub mut:
 	// the parser rather than by any C source.
 	builtin_alloca &ast.Obj = unsafe { nil }
 	errors         []string
+	warnings       []string
 	// quiet suppresses diagnostics while the parser speculates — looking ahead to
 	// decide whether a declaration is a function, for instance. Speculation must
 	// not report, or every lookahead would double every error.
@@ -176,15 +178,17 @@ pub fn parse_tokens(toks []ast.Token, path string, packs []PackEvent) ParseResul
 				tags: map[string]&ast.Type{}
 			},
 		]
-		globals: []&ast.Obj{}
-		locals:  []&ast.Obj{}
-		errors:  []string{}
+		globals:  []&ast.Obj{}
+		locals:   []&ast.Obj{}
+		errors:   []string{}
+		warnings: []string{}
 	}
 	p.translation_unit()
 	p.scan_globals()
 	return ParseResult{
-		globals: p.globals
-		errors:  p.errors
+		globals:  p.globals
+		errors:   p.errors
+		warnings: p.warnings
 	}
 }
 
@@ -311,11 +315,20 @@ fn (mut p Parser) error_here(msg string) {
 }
 
 // warn_at records a diagnostic that does not prevent compilation.
+//
+// It has its own list, and that is the whole point: `errors` is what the driver counts
+// to decide the exit code, so a warning folded into it would refuse a program both tcc
+// and gcc accept. `time.h` calls `_gmtime64_s` having declared only `_gmtime64`, tcc
+// prints a warning and exits 0, and gcc treats it as gnu11's implicit-declaration
+// warning — while this used to fail the translation unit.
+//
+// The `warning:` spelling is what tcc and gcc both use, and it is also what V's driver
+// looks for when deciding a warning is not a failure.
 fn (mut p Parser) warn_at(tok ast.Token, msg string) {
 	if p.quiet > 0 {
 		return
 	}
-	p.errors << 'tcc: ${p.path}:${tok.line.disp_line}: warning: ${msg}'
+	p.warnings << 'tcc: ${p.path}:${tok.line.disp_line}: warning: ${msg}'
 }
 
 // --- scopes ---
@@ -3265,10 +3278,14 @@ fn (mut p Parser) primary() &ast.Node {
 		}
 		if p.at('(') {
 			// C89 let a function be used before it was declared, and V's headers rely
-			// on it. The call itself is parsed; what is reported is the missing
-			// declaration, because the return type is a guess and a wrong guess here
-			// becomes a wrong call in generated code.
-			p.error_at(tok, 'implicit declaration of function "${tok.text}"')
+			// on it — `time.h` calls `_gmtime64_s` having declared only `_gmtime64`.
+			//
+			// A *warning*, not an error, and that is measured rather than assumed: tcc
+			// prints `implicit declaration of function '_gmtime64_s'` and exits 0, and gcc
+			// treats it as gnu11's implicit-declaration warning too. Reporting it as an
+			// error made `time.h` uncompilable, and the return type is still a guess, so
+			// the warning is what carries the risk without refusing the program.
+			p.warn_at(tok, 'implicit declaration of function "${tok.text}"')
 			// The declaration is invented so the call has a type to be checked against.
 			// It returns `int` and is variadic, which is the C89 assumption, and it is
 			// not marked as a definition so nothing is emitted for it.

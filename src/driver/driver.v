@@ -352,16 +352,36 @@ fn dump_ast(o &Options) {
 			failed = true
 		}
 		parsed := fcc.parse_tokens(pre.tokens, path, p.packs)
-		for e in parsed.errors {
-			eprintln(e)
-			failed = true
-		}
+		failed = report(parsed.errors, parsed.warnings) || failed
 		print('--- ${path}\n')
 		print(parsed.dump())
 	}
 	if failed {
 		exit(1)
 	}
+}
+
+// report prints a translation unit's diagnostics and reports whether any of them was
+// an error.
+//
+// Warnings are printed and do not stop the run, which is the whole reason they are a
+// separate list: tcc prints `implicit declaration of function '_gmtime64_s'` and exits
+// 0, and gcc treats it as gnu11's implicit-declaration warning, while folding it into
+// `errors` refused a program both of them accept. A warning's exit code is what makes
+// it a warning.
+//
+// It returns rather than taking a mutable flag because this V build rejects a mutable
+// scalar argument outright.
+fn report(errors []string, warnings []string) bool {
+	mut any := false
+	for e in errors {
+		eprintln(e)
+		any = true
+	}
+	for w in warnings {
+		eprintln(w)
+	}
+	return any
 }
 
 // emit_asm implements -S: run the front end and write the assembly text.
@@ -389,10 +409,7 @@ fn emit_asm(o &Options) {
 		// is silently empty, and an empty globals list produces a one-line assembly
 		// file that assembles and links into nothing.
 		mut parsed := fcc.parse_tokens(pre.tokens, path, p.packs)
-		for e in parsed.errors {
-			eprintln(e)
-			failed = true
-		}
+		failed = report(parsed.errors, parsed.warnings) || failed
 		if parsed.errors.len > 0 {
 			// Nothing is generated for a translation unit the front end rejected. It
 			// used to be skipped, which left a one-line file behind that the assembler
