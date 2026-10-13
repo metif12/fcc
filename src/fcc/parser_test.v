@@ -576,6 +576,75 @@ fn test_an_unknown_attribute_is_accepted_and_ignored() {
 	assert r.globals[0].name == 'f'
 }
 
+// An attribute may follow the declarator on a *declaration*, which is where mingw's
+// headers write it: `void __cdecl exit(int _Code) __MINGW_ATTRIB_NORETURN;` is
+// `void __cdecl exit(int _Code) __declspec(noreturn);`, and `__declspec(n)` is
+// `__attribute__((n))`. gcc accepts the form; so does tcc.
+//
+// It used to be read only ahead of the declarator, so the attribute became a stray token
+// after the declaration and every header using it failed with
+// `expected "{" or ";" after a function declaration`.
+fn test_an_attribute_may_follow_the_declarator() {
+	r := parsed('void __attribute__((noreturn)) exit(int x) __attribute__((noreturn));\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].name == 'exit'
+	// A definition's body is what follows the attribute, which is the shape
+	// `__CRT_INLINE __MINGW_ATTRIB_NORETURN void __cdecl _Exit(int status) { ... }`
+	// uses in mingw's assert.h.
+	r2 := parsed('__attribute__((noreturn)) void e(int s) __attribute__((noreturn)) { return; }\n')
+	assert r2.errors.len == 0, 'unexpected diagnostics: ${r2.errors}'
+	assert r2.globals[0].is_definition
+}
+
+// GNU's spellings of `inline`. mingw's `__CRT_INLINE` expands to `static __inline__`, so
+// without them every inline definition in `string.h` and `wchar.h` parses as a
+// declaration with no name — which is how `string.h` kept failing.
+//
+// They are folded-alias *keywords*, so their text is not in `type_specifier_keywords`;
+// answering `is_typename` for them is what the `.keyword` branch has to do.
+fn test_gnu_inline_spellings_are_storage_class_specifiers() {
+	for spell in ['__inline', '__inline__', '__forceinline'] {
+		r := parsed('${spell} int f(int x) { return x; }\n')
+		assert r.errors.len == 0, 'for ${spell}: ${r.errors}'
+		assert r.globals[0].name == 'f'
+	}
+	// The declaration form, which is what the headers use.
+	r := parsed('__inline int g(int x);\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].name == 'g'
+}
+
+// Microsoft calling-convention specifiers, which mingw writes on almost every
+// declaration. On this target every one of them means the same thing and none changes how
+// an argument is passed — the Microsoft x64 ABI has one convention — so reading and
+// discarding them is correct rather than a shortcut. `src/ast/abi.v` records it.
+fn test_calling_convention_specifiers_are_ignored() {
+	for spell in ['__cdecl', '__stdcall', '__fastcall', 'WINAPI', 'CALLBACK', 'APIENTRY'] {
+		r := parsed('int ${spell} f(int x) { return x; }\n')
+		assert r.errors.len == 0, 'for ${spell}: ${r.errors}'
+		assert r.globals[0].name == 'f'
+	}
+	// Both the declared and the definition form.
+	r := parsed('extern int __cdecl g(int x);\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].name == 'g'
+}
+
+// A linkage change is still reported when there is no `inline` to excuse it. That is the
+// line between "tcc's headers compile" and "every diagnostic is gone": tcc accepts all
+// three shapes here — it does not implement the constraint — but gcc rejects all three,
+// rejecting `stdio.h:259`, `tcc_libm.h:49` and `wchar.h:855` from this very include tree.
+fn test_a_linkage_change_is_reported_without_an_inline_specifier() {
+	// Exempt: an inline definition does not establish linkage the same way, and this is
+	// how a library spells a definition that cannot be inlined at the call site.
+	r := parsed('int f(int x);\n__inline__ int f(int x) { return x; }\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	// Not exempt, and still a real constraint violation.
+	r2 := parsed('int h(int x);\nstatic int h(int x) { return x; }\n')
+	assert r2.errors.len > 0, 'expected a diagnostic, got none'
+	assert r2.errors[0].contains('static declaration follows a non-static declaration')
+}
+
 // --- initializers ---
 
 fn test_a_scalar_initializer_is_written_little_endian() {

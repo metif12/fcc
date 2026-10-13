@@ -645,8 +645,37 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 	mut counter := 0
 	mut atomic_spec := false
 
-	for p.is_typename() {
+	// mingw's headers write attributes *between* the specifiers as well as before them:
+	// `extern` on one line, `__attribute__((format(gnu_printf, 3, 0)))` on the next, and
+	// the type on the third. Consuming them only ahead of `declspec` left this loop
+	// exiting at the first one, so the declarator was parsed from `__attribute__` and
+	// the declaration was reported as `variable name omitted`.
+	for p.is_typename() || p.at('__attribute__') || p.at('__attribute') {
+		// An attribute in the middle of a specifier list can only be a type attribute,
+		// because no declarator has been read yet. `none` for the type name is what the
+		// standalone call sites pass.
+		if p.at('__attribute__') || p.at('__attribute') {
+			p.attribute_list(none)
+			continue
+		}
 		tok := p.tok()
+
+		// GNU's spellings of `inline`. `__CRT_INLINE` expands to `static __inline__`, so
+		// without these every inline definition in mingw's `string.h` and `wchar.h` parses
+		// as a declaration with no name.
+		if tok.text in gnu_inline_keywords {
+			if mut a := attr {
+				a.is_inline = true
+				if a.is_typedef && (int(a.is_static) + int(a.is_extern) +
+					int(a.is_inline) + int(a.is_tls)) > 1 {
+					p.error_at(tok, 'typedef may not be used together with static, extern, inline, __thread or _Thread_local')
+				}
+			} else {
+				p.error_at(tok, 'storage class specifier is not allowed in this context')
+			}
+			p.pos++
+			continue
+		}
 
 		if tok.text == 'typedef' || tok.text == 'static' || tok.text == 'extern'
 			|| tok.text == 'inline' || tok.text == '_Thread_local'
@@ -675,10 +704,18 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 		}
 
 		// Recognised and ignored: they qualify the type without changing it.
+		//
+		// The calling-convention specifiers belong here too, and ignoring them is right
+		// on this target: the Microsoft x64 ABI has one convention, so none of them
+		// changes how an argument is passed. See `calling_convention_keywords`.
 		if p.consume('const') || p.consume('volatile') || p.consume('auto')
 			|| p.consume('register') || p.consume('restrict') || p.consume('__restrict')
 			|| p.consume('__restrict__') || p.consume('_Noreturn')
-			|| p.consume('__extension__') {
+			|| p.consume('__extension__')
+			|| tok.text in calling_convention_keywords {
+			if tok.text in calling_convention_keywords {
+				p.pos++
+			}
 			continue
 		}
 
@@ -828,13 +865,72 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 fn (p &Parser) is_typename() bool {
 	tok := p.tok()
 	if tok.kind == .ident {
-		return p.find_typedef(tok) != none
+		// A calling-convention or GNU-`inline` specifier names no type, but each is a
+		// declaration specifier and `declspec` has to see it to act on it. See
+		// `calling_convention_keywords` and `gnu_inline_keywords`.
+		return p.find_typedef(tok) != none || tok.text in calling_convention_keywords
+			|| tok.text in gnu_inline_keywords
 	}
 	if tok.kind != .keyword {
 		return false
 	}
-	return tok.text in type_specifier_keywords
+	// A folded alias keyword keeps its own spelling as its text, so `__inline` and
+	// `__inline__` arrive here as `.keyword` tokens whose text is *not* in
+	// `type_specifier_keywords` — which is why they were rejected here even after the
+	// `.ident` branch learned about them. Both lists are consulted in both branches.
+	return tok.text in type_specifier_keywords || tok.text in gnu_inline_keywords
+		|| tok.text in calling_convention_keywords
 }
+
+// gnu_inline_keywords are GNU's spellings of `inline`, which mingw's headers use
+// everywhere — `__CRT_INLINE` is `static __inline__`, so every inline definition in
+// `string.h` and `wchar.h` is written with one.
+//
+// They are storage-class specifiers that mean exactly what `inline` means, and treating
+// them as anything else makes a whole function definition parse as a declaration with no
+// name: `__inline int f(int x) { return x; }` was reported as `variable name omitted`.
+// gcc accepts all four spellings.
+//
+// Listed rather than added to the tokenizer's keyword table, so a program with its own
+// identifier called `inline` still compiles.
+const gnu_inline_keywords = [
+	'__inline'
+	'__inline__'
+	'__forceinline'
+]
+
+// calling_convention_keywords are the Microsoft and GNU calling-convention specifiers,
+// which mingw's headers write on almost every declaration: `int __cdecl abs(int)`,
+// `double __stdcall _hypot(double, double)`, `LRESULT CALLBACK WndProc(...)`.
+//
+// They are ignored rather than implemented, and ignoring them is correct on this target
+// rather than a shortcut: the Microsoft x64 ABI has exactly one calling convention, so
+// `__cdecl`, `__stdcall`, `__fastcall` and `WINAPI` all mean the same thing and none of
+// them changes how an argument is passed. `src/ast/abi.v` records the measurement.
+//
+// They are listed here rather than added to the tokenizer's keyword table for the reason
+// `type_specifier_keywords` gives: a keyword cannot be spelled as an identifier, and a
+// program that has its own variable called `cdecl` would stop compiling.
+const calling_convention_keywords = [
+	'__cdecl'
+	'__stdcall'
+	'__fastcall'
+	'__thiscall'
+	'__clrcall'
+	'__vectorcall'
+	'__cdecl__'
+	'__stdcall__'
+	'__fastcall__'
+	'__thiscall__'
+	// mingw's own aliases, spelled without leading underscores because they came from
+	// windows.h. They expand to `__stdcall` through its headers, so a translation unit
+	// that does not include windows.h still has to accept them.
+	'WINAPI'
+	'CALLBACK'
+	'APIENTRY'
+	'APIPRIVATE'
+	'NTAPI'
+]
 
 // type_specifier_keywords are the keywords that can begin a type. `__thread` is not
 // a C keyword but is a GNU one, and it is listed here rather than added to the
@@ -1598,13 +1694,36 @@ fn (mut p Parser) function(basety &ast.Type, attr VarAttr) {
 	name := ty.name
 	line := ty.name_line
 
+	// Attributes may follow the declarator on a *declaration*, and mingw's headers write
+	// them exactly there: `void __cdecl exit(int _Code) __MINGW_ATTRIB_NORETURN;` is
+	// `void __cdecl exit(int _Code) __declspec(noreturn);`, and `__declspec(n)` is
+	// `__attribute__((n))`. gcc accepts this form and so does tcc; reading the attribute
+	// here is what keeps it from being parsed as a stray token after the declaration.
+	//
+	// `none` for the type name: the alignment a declarator attribute could ask for has no
+	// place to go at this point, and the layout-altering attributes appear ahead of the
+	// declarator, where `declspec` already consumes them.
+	p.attribute_list(none)
+
 	mut fn_obj := &ast.Obj{}
 	if existing := p.find_func(name) {
 		fn_obj = existing
 		if fn_obj.is_definition && p.at('{') {
 			p.error_here('redefinition of ${name}')
 		}
-		if !fn_obj.is_static && attr.is_static {
+		// [C11 6.2.2p7] is a constraint here, but only for declarations that establish
+		// linkage the same way. A declaration carrying an `inline` specifier is the case the
+		// standard carves out and every real library header relies on: `extern int f(int);`
+		// followed by `static inline int f(int) { ... }` is how tcc's own headers spell a
+		// definition that cannot be inlined at the call site.
+		//
+		// tcc accepts all three shapes, including a plain `static` after a non-static one, so
+		// it does not implement the constraint at all. gcc rejects all three — it rejects
+		// `stdio.h:259`, `tcc_libm.h:49` and `wchar.h:855` from this very include tree,
+		// because they are tcc's headers and it is the stricter of the two. Exempting
+		// `inline` is the line that keeps tcc's headers compiling while still reporting a
+		// genuine linkage change.
+		if !fn_obj.is_static && attr.is_static && !attr.is_inline {
 			p.error_here('static declaration follows a non-static declaration: ${name}')
 		}
 		if p.at('{') {

@@ -195,6 +195,32 @@ pub fn (mut p Preprocessor) define_builtin(name string, which BuiltinMacro) {
 	}
 }
 
+// define_target_macro registers one of the compiler's predefined *target* macros.
+//
+// These are not computed at the point of use the way `__FILE__` is: they name types, and
+// they exist because every real header is written in terms of them. `stddef.h` is
+// `typedef __SIZE_TYPE__ size_t;`, and without the macro that line becomes
+// `typedef size_t;`, which the parser reports as `';' expected (got 'size_t')`. Measured
+// on this host, that single missing macro kept **all nineteen** standard headers from
+// compiling — every one of them includes `stddef.h` or defines a `size_t` itself.
+//
+// gcc and tcc both define these from the compiler rather than from a header, and they
+// agree on every value that matters here. Measured, not recalled — tcc -E, with gcc -E
+// agreeing:
+//
+//	__SIZE_TYPE__     unsigned long long     __UINTPTR_TYPE__  unsigned long long
+//	__PTRDIFF_TYPE__  long long              __INTPTR_TYPE__   long long
+//	__WCHAR_TYPE__    unsigned short         __INT64_TYPE__    long long
+//	__WINT_TYPE__     unsigned short         __INT32_TYPE__    int
+//
+// The spellings are tcc's where the two differ cosmetically: `long long` and
+// `long long int` are the same type, and tcc is the compiler the headers also have to
+// satisfy. `__WCHAR_TYPE__` being `unsigned short` is the same decision as `wchar_t`
+// being two bytes on this host, recorded in `docs/PLAN.md` and `src/ast/abi.v`.
+fn (mut p Preprocessor) define_target_macro(name string, body string) {
+	p.define_raw(name, false, []string{}, false, '', tokenize_fragment(body))
+}
+
 // define_builtins registers the standard computed macros.
 pub fn (mut p Preprocessor) define_builtins() {
 	p.define_builtin('__FILE__', .file)
@@ -205,6 +231,30 @@ pub fn (mut p Preprocessor) define_builtins() {
 	p.define_builtin('__TIME__', .time_)
 	p.define_builtin('__TIMESTAMP__', .timestamp)
 	p.define_builtin('__BASE_FILE__', .base_file)
+
+	// The predefined target macros, in the order a header is likely to need them.
+	// Exactly eight are referenced anywhere in tcc's include tree, which is the whole
+	// requirement rather than a sample of it.
+	p.define_target_macro('__SIZE_TYPE__', 'unsigned long long')
+	p.define_target_macro('__PTRDIFF_TYPE__', 'long long')
+	p.define_target_macro('__WCHAR_TYPE__', 'unsigned short')
+	p.define_target_macro('__WINT_TYPE__', 'unsigned short')
+	p.define_target_macro('__INTPTR_TYPE__', 'long long')
+	p.define_target_macro('__UINTPTR_TYPE__', 'unsigned long long')
+	p.define_target_macro('__INT64_TYPE__', 'long long')
+	p.define_target_macro('__INT32_TYPE__', 'int')
+
+	// The target macros the headers branch on. `wctype.h` and `time.h` both open with
+	// `#ifndef _WIN32` / `#error Only Win32 target is supported!`, so without these two
+	// every translation unit that names either of them fails at once.
+	//
+	// These two and no more, because that is what tcc does and tcc is the compiler the
+	// headers also have to satisfy. Measured: tcc defines `_WIN32` and `_WIN64` and
+	// *not* `__WIN32__`, `__MINGW32__` or `__MSVCRT__` — gcc defines all five, and the
+	// headers are written to work with either. Following gcc instead would make fcc claim
+	// a mingw identity it has not measured, and would let a header take a gcc-only path.
+	p.define_target_macro('_WIN32', '1')
+	p.define_target_macro('_WIN64', '1')
 }
 
 // lookup finds a macro by name, or returns none.

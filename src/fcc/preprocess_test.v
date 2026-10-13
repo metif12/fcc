@@ -46,6 +46,42 @@ fn errs(src string) []string {
 	return pp(src).errors
 }
 
+// The predefined *target* macros. Every standard header is written in terms of them, and
+// without them `typedef __SIZE_TYPE__ size_t;` collapses to `typedef size_t;` — which
+// keeps all nineteen standard headers from compiling, because every one of them defines
+// a `size_t`.
+//
+// The values are measured, not recalled: tcc -E on this host, cross-checked against
+// gcc -E. `__WCHAR_TYPE__` being `unsigned short` is the same decision as `wchar_t` being
+// two bytes, recorded in `docs/PLAN.md` and `src/ast/abi.v`.
+fn test_predefined_target_macros_have_the_measured_values() {
+	assert ppb('__SIZE_TYPE__').text == 'unsigned long long'
+	assert ppb('__PTRDIFF_TYPE__').text == 'long long'
+	assert ppb('__WCHAR_TYPE__').text == 'unsigned short'
+	assert ppb('__WINT_TYPE__').text == 'unsigned short'
+	assert ppb('__INTPTR_TYPE__').text == 'long long'
+	assert ppb('__UINTPTR_TYPE__').text == 'unsigned long long'
+	assert ppb('__INT64_TYPE__').text == 'long long'
+	assert ppb('__INT32_TYPE__').text == 'int'
+	// The real shape, which is what a header actually writes.
+	assert ppb('typedef __SIZE_TYPE__ size_t;').text == 'typedef unsigned long long size_t ;'
+}
+
+// `_WIN32` and `_WIN64` are the two the headers *branch* on: `wctype.h` and `time.h`
+// both open with `#ifndef _WIN32` / `#error Only Win32 target is supported!`.
+//
+// These two and no more, because that is what tcc defines and tcc is the compiler these
+// headers also have to satisfy. Measured: tcc defines `_WIN32` and `_WIN64` and not
+// `__WIN32__`, `__MINGW32__` or `__MSVCRT__`; gcc defines all five. Following gcc instead
+// would let a header take a gcc-only path on a compiler that has not measured one.
+fn test_the_win32_macros_are_defined() {
+	assert ppb('#ifdef _WIN32\nyes\n#endif').text == 'yes'
+	assert ppb('#ifdef _WIN64\nyes\n#endif').text == 'yes'
+	// And the ones tcc deliberately leaves out stay out.
+	assert ppb('#ifdef __MINGW32__\nyes\n#endif').text == ''
+	assert ppb('#ifdef __MSVCRT__\nyes\n#endif').text == ''
+}
+
 
 // --- object-like macros ---
 
