@@ -613,3 +613,33 @@ fn simple_escape_value(c u8) int {
 		else { -1 }
 	}
 }
+
+// A token read through `tokenize_file` names its file, so a diagnostic about a header
+// says `time.h:241` rather than the including file's name.
+//
+// Without it every diagnostic printed the translation unit's path for every line, which
+// made an error inside a header read as an error in the file that included it: a message
+// naming `dg.c:241` for a file with two lines is worse than no message, because it sends
+// the reader to a place that plainly is not wrong.
+fn test_a_token_names_the_file_it_was_read_from() {
+	f := &ast.File{
+		name:     'inc/header.h'
+		contents: 'int x;\n'
+	}
+	toks := tokenize_file('int y;\n', f)
+	for t in toks {
+		if fl := t.line.file {
+			assert fl.name == 'inc/header.h'
+		} else {
+			assert false, 'token "${t.text}" carries no file'
+		}
+	}
+	// And the plain entry point leaves it unset, so a diagnostic about a synthesized or
+	// unit-level token falls back to the translation unit's own name.
+	plain := tokenize('int y;\n')
+	for t in plain {
+		if fl := t.line.file {
+			assert false, 'token "${t.text}" unexpectedly names ${fl.name}'
+		}
+	}
+}

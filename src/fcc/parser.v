@@ -306,7 +306,24 @@ fn (mut p Parser) error_at(tok ast.Token, msg string) {
 	if p.quiet > 0 {
 		return
 	}
-	p.errors << 'tcc: ${p.path}:${tok.line.disp_line}: ${msg}'
+	p.errors << 'tcc: ${p.token_file(tok)}:${tok.line.disp_line}: ${msg}'
+}
+
+// token_file names the file a token came from, falling back to the translation unit's
+// own name.
+//
+// A token stamped with a file is one that was read out of a header, and naming the header
+// is the whole point: `time.h:241` and `time.h:234` are where the two errors are, while
+// `dg.c:241` points at a file that does not have 241 lines. gcc names the header, and so
+// does tcc.
+//
+// The fallback rather than an empty name, because a synthesized token — the parser builds
+// some while speculating — has no file of its own and still has to be reported somewhere.
+fn (p &Parser) token_file(tok ast.Token) string {
+	if fl := tok.line.file {
+		return fl.name
+	}
+	return p.path
 }
 
 // error_here records a diagnostic at the cursor.
@@ -328,7 +345,7 @@ fn (mut p Parser) warn_at(tok ast.Token, msg string) {
 	if p.quiet > 0 {
 		return
 	}
-	p.warnings << 'tcc: ${p.path}:${tok.line.disp_line}: warning: ${msg}'
+	p.warnings << 'tcc: ${p.token_file(tok)}:${tok.line.disp_line}: warning: ${msg}'
 }
 
 // --- scopes ---

@@ -306,8 +306,15 @@ pub fn (mut p Preprocessor) run(path string) Result {
 		}
 	}
 	p.base_file = path
+	// One File per translation unit, so every token carries the name a diagnostic
+	// should print. `__FILE__` keeps using the display spelling while this records it,
+	// and the two are the same string for the file that was named on the command line.
+	file := &ast.File{
+		name:     path
+		contents: src
+	}
 	return Result{
-		tokens: p.finish(strip_sentinels(p.directives(tokenize(src), path)))
+		tokens: p.finish(strip_sentinels(p.directives(tokenize_file(src, file), path)))
 		errors: p.errors.clone()
 	}
 }
@@ -873,7 +880,15 @@ fn (mut p Preprocessor) do_include(rest string, line int, path string, mut out [
 	// `disp`, not `full`: the included tokens are expanded with the spelling they were
 	// included under, which is what `__FILE__` inside them expands to. `full` is still
 	// what opened the file and what keys `#pragma once` above.
-	included := p.directives(tokenize(src), disp)
+	//
+	// The same `disp` names the file on every token, so a diagnostic about a header says
+	// `time.h:241` and not the including file's name — which is what it used to say, and
+	// which made an error inside a header read as an error in the file that included it.
+	file := &ast.File{
+		name:     disp
+		contents: src
+	}
+	included := p.directives(tokenize_file(src, file), disp)
 	for c in p.cond_stack {
 		p.errorf(c.line, 'unterminated #if in ${full}')
 		break

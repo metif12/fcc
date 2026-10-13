@@ -43,9 +43,20 @@ pub mut:
 	line_start int
 	// at_bol marks that the next token is the first on its line.
 	at_bol bool
-	// has_space marks that whitespace preceded the token, which `#` stringizing
+	// has_space marks that whitespace preceded the token, which `#` stringifying
 	// needs in order to reproduce the original spacing.
 	has_space bool
+	// file is the file being tokenized, and is stamped onto every token's line so a
+	// diagnostic can name the header a token came from. It is none only for a fragment,
+	// which has no file of its own: a macro body or a directive's argument text is
+	// spelled inside some other file and is attributed to it.
+	//
+	// A plain pointer rather than an option, because assigning `unsafe { nil }` to an
+	// option in this V build leaves the "none" flag unset, and the resulting option
+	// dereferences as a non-nil pointer to nothing. Measured: `token_file` crashed with
+	// an invalid memory access reading `fl.name` for exactly that reason. The line's own
+	// field is the option, and it is written only when there is a file to write.
+	file &ast.File = unsafe { nil }
 }
 
 // punctuators is ordered longest-first so that a greedy match yields `<<=` rather
@@ -131,10 +142,21 @@ pub const simple_escapes = {
 // The first token is treated as being at the beginning of a line, because that is
 // true of a whole file. Use `tokenize_fragment` for a piece of text lifted out of a
 // file, such as a macro body.
+//
+// A token produced here carries no file, so a diagnostic about it names the translation
+// unit. Use `tokenize_file` for text read out of a header.
 pub fn tokenize(src string) []ast.Token {
-	return tokenize_with(src, true)
+	return tokenize_with(src, true, unsafe { nil })
 }
 
+// tokenize_file is `tokenize` with the file recorded on every token, so a diagnostic can
+// name the header a token came from rather than the file that included it.
+//
+// A separate entry point rather than a defaulted parameter, because a defaulted
+// `?&ast.File = unsafe { nil }` is rejected by this V build as a type-only parameter.
+pub fn tokenize_file(src string, file &ast.File) []ast.Token {
+	return tokenize_with(src, true, file)
+}
 // tokenize_fragment is `tokenize` for text that is not a whole file: a macro body,
 // a directive's argument text, or a `#if` expression.
 //
@@ -142,16 +164,20 @@ pub fn tokenize(src string) []ast.Token {
 // of a line begins a directive, so `#define S(x) #x` re-tokenized as a body would
 // turn `#x` into a directive token and the stringize operator would vanish. A
 // fragment's leading `#` is an operator.
+//
+// A fragment takes no file, because it has none: its text is spelled inside the file
+// whose directive or macro body produced it, and that is where its tokens belong.
 pub fn tokenize_fragment(src string) []ast.Token {
-	return tokenize_with(src, false)
+	return tokenize_with(src, false, unsafe { nil })
 }
 
-fn tokenize_with(src string, first_at_bol bool) []ast.Token {
+fn tokenize_with(src string, first_at_bol bool, file &ast.File) []ast.Token {
 	mut t := Tokenizer{
 		src:    src
 		pos:    0
 		line:   1
 		at_bol: first_at_bol
+		file:   file
 	}
 	mut out := []ast.Token{}
 	for {
@@ -190,14 +216,18 @@ fn tokenize_with(src string, first_at_bol bool) []ast.Token {
 			t.pos++
 		}
 	}
+	mut eof_line := ast.Line{
+		disp_line: t.line
+		disp_col:  1
+	}
+	if t.file != unsafe { nil } {
+		eof_line.file = t.file
+	}
 	out << ast.Token{
 		kind:   .eof
 		text:   ''
 		loc:    ast.Pos(t.src.len)
-		line:   ast.Line{
-			disp_line: t.line
-			disp_col:  1
-		}
+		line:   eof_line
 		at_bol: true
 	}
 	return out
@@ -274,10 +304,17 @@ fn (t &Tokenizer) peek_at(offset int) u8 {
 }
 
 fn (t &Tokenizer) make_line() ast.Line {
-	return ast.Line{
+	mut line := ast.Line{
 		disp_line: t.line
 		disp_col:  t.pos - t.line_start + 1
 	}
+	// Written only when there is one. An option field left untouched is properly `none`;
+	// one assigned `unsafe { nil }` is not, in this V build, and reads back as a pointer
+	// to nothing.
+	if t.file != unsafe { nil } {
+		line.file = t.file
+	}
+	return line
 }
 
 fn (mut t Tokenizer) next_token() ast.Token {

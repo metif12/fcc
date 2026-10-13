@@ -10,6 +10,13 @@ pub type Pos = i32
 
 pub const invalid_pos = Pos(-1)
 
+// File is one source file.
+//
+// `@[heap` for the same reason as `Obj` and `Type`: a token refers to it by pointer from
+// its `Line`, and a token may outlive the frame that read the file. Declaring it on the
+// stack makes the reference unassignable outside an `unsafe` block in this V build, which
+// is how the first attempt at naming a diagnostic's file failed to compile.
+@[heap]
 pub struct File {
 pub mut:
 	name string
