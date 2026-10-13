@@ -426,10 +426,32 @@ fn test_a_statement_expression_is_a_block() {
 	assert stmt_expr.ty.kind == .basic
 }
 
-fn test_an_asm_statement_is_reported() {
-	r := parsed_src('int f(void) { asm("nop"); return 0; }\n')
-	// An asm statement's meaning is in its string, so there is nothing to honour from a
-	// tree. Reporting beats emitting a call to nothing.
-	assert r.errors.len > 0
-	assert r.errors[0].contains('asm statements are not supported')
+// `__asm__` is supported, and the operands and template survive the parse: `math.h`
+// needs `rint` implemented in inline asm, and the template's `%N` substitutes are the
+// backend's business, so what a parser test can pin is that the operands were read in
+// order and the constraint's modifier was stripped.
+fn test_an_asm_statement_keeps_its_operands() {
+	stmt := find_stmt(fn_with_body('void f(double x) { double r; asm("fldl %1" "fstpl %0" : "=m" (r) : "m" (x)); }\n').body,
+		.asm)
+	assert stmt != unsafe { nil }
+	// Two operands, outputs before inputs, which is the order `%N` numbers them in.
+	assert stmt.asm_ops.len == 2
+	// The template is the joined run, not one piece of it.
+	assert stmt.asm_template == 'fldl %1fstpl %0'
+	// The modifier is stripped, so both `"=m"` and `"m"` answer the same thing.
+	assert stmt.asm_constraints == ['m', 'm']
+	// The operands are the named variables, in source order.
+	assert stmt.asm_ops[0].kind == .var_ref
+	assert stmt.asm_ops[1].kind == .var_ref
 }
+
+// An unsupported *constraint* is reported rather than guessed at, because a wrong
+// constraint is a silently wrong program. `"=m"` is the only one modelled — it is the
+// whole of what `tcc/tcc_libm.h` uses — so a register constraint still reaches the
+// error.
+fn test_an_unsupported_asm_constraint_is_reported() {
+	r := parsed_src('void f(int x) { int r; asm("mov %1, %0" : "=r" (r) : "r" (x)); }\n')
+	assert r.errors.len > 0, 'expected a diagnostic, got none'
+	assert r.errors[0].contains('asm constraint "=r" is not supported')
+}
+

@@ -97,6 +97,11 @@ pub enum NodeKind {
 	// parser can record what it saw and keep going instead of aborting, which is
 	// what makes the corpus sweep in phase 1 possible at all.
 	generic
+	// asm is a GNU `__asm__` statement. Only the memory-operand form is modelled —
+	// `"m" (x)` and `"=m" (y)` — which is the whole of what `tcc/tcc_libm.h` uses. A
+	// register or SSE constraint reaches `gen_stmt`'s `else` and is reported rather
+	// than guessed at, because a wrong constraint is a silently wrong program.
+	asm
 }
 
 // Obj is a named object: a variable, a function, or a string literal.
@@ -243,4 +248,17 @@ pub mut:
 	// GNU case 1 ... 5: has the two ends of its range.
 	begin i64
 	end   i64
+
+	// asm_template is the joined text of an `__asm__` statement, with `%N` still in
+	// place: the backend substitutes the operand references, because only it knows the
+	// memory locations. asm_ops holds the operand *expressions* in source order —
+	// outputs first, then inputs — and asm_constraints is parallel to it, each entry
+	// the constraint string without its `=`/`+`/`&` modifier, which is what decides
+	// whether the operand is read, written or clobbered.
+	//
+	// The three are parallel slices rather than one slice of a struct because a Node is
+	// flat by design and this is the only place more than one list is needed.
+	asm_template     string
+	asm_ops          []&Node
+	asm_constraints  []string
 }

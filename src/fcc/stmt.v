@@ -50,8 +50,11 @@ fn (mut p Parser) stmt() &ast.Node {
 		return node
 	}
 
-	if p.at('if') {
-		p.pos++
+	if p.at('__asm__') || p.at('asm') || p.at('__asm') {
+		return p.asm_stmt()
+	}
+
+	if p.at('if') {		p.pos++
 		mut node := p.new_node(.if_, tok)
 		p.expect('(')
 		mut cond := p.expr()
@@ -372,6 +375,102 @@ fn (mut p Parser) compound_stmt() &ast.Node {
 
 	p.expect('}')
 	node.body = stmts
+	return node
+}
+
+// asm_stmt parses a GNU `__asm__` statement.
+//
+//	asm-stmt = ("asm" | "__asm__") ["volatile" | "__volatile__"] "(" temps [":" outs [":" ins [":" clobbers]]] ")"
+//
+// Each of `outs`, `ins` and `clobbers` is a comma-separated list, and the first two hold
+// a constraint string in parentheses followed by an expression in parentheses. Operands
+// are collected as one list — outputs then inputs, which is the order `%N` numbers them
+// in — with the constraint's modifier stripped so the backend can tell a write from a
+// read without re-parsing it.
+//
+// Only the memory constraint is modelled. `tcc/tcc_libm.h` uses `"=m"` and `"m"` and
+// nothing else, which is what `math.h` and `tgmath.h` are blocked on; a register
+// constraint is reported as unsupported rather than guessed at, because a wrong
+// constraint is a silently wrong program rather than a visible failure.
+fn (mut p Parser) asm_stmt() &ast.Node {
+	tok := p.tok()
+	p.pos++
+	// `volatile` is a promise the optimiser has not been written to keep, so it is read
+	// and discarded: an `__asm__` in this generator is never removed and never
+	// reordered relative to the statements around it either way.
+	for p.at('volatile') || p.at('__volatile__') {
+		p.pos++
+	}
+	p.expect('(')
+
+	// The template. Adjacent string literals are one template, as everywhere else in
+	// C — `"fldl %1\n" "fistpl %0"` is one string, so it has to be read as one run.
+	t := p.tok()
+	if t.kind != .str_ {
+		p.error_at(t, 'expected a string literal in __asm__')
+		p.skip_to_decl_end()
+		return p.new_node(.null_stmt, tok)
+	}
+	mut tmpl := ''
+	for piece in p.string_run() {
+		tmpl += piece.str_data.bytestr()
+	}
+
+	mut ops := []&ast.Node{}
+	mut constraints := []string{}
+
+	// Group 0 is the outputs, group 1 the inputs, group 2 the clobbers.
+	for p.at(':') {
+		p.pos++
+		for !p.at(':') && !p.at(')') {
+			if p.consume(',') {
+				continue
+			}
+			c := p.tok()
+			if c.kind != .str_ {
+				p.error_at(c, 'expected a constraint string in __asm__')
+				p.skip_to_decl_end()
+				return p.new_node(.null_stmt, tok)
+			}
+			cs := c.str_data.bytestr()
+			p.pos++
+			// A clobber names a register, not an expression, so it has no operand.
+			if cs == 'memory' || cs == 'cc' {
+				continue
+			}
+			p.expect('(')
+			mut exp := p.assign()
+			add_type(mut exp)
+			p.expect(')')
+			// The modifier is stripped so the backend sees `m` for both `"=m"` and
+			// `"+m"` and can decide what it means from whether the operand is an output.
+			//
+			// Stripped by a loop rather than `trim_string_left`, because a multi-character
+			// cutset does not trim anything in this V build: measured, `"=m"` with a
+			// `"=+&%"` cutset comes back unchanged, while one character at a time works.
+			mut bare := cs
+			for bare.len > 0 {
+				m0 := bare[0]
+				if m0 == `=` || m0 == `+` || m0 == `&` || m0 == `%` {
+					bare = bare[1..]
+				} else {
+					break
+				}
+			}
+			if bare != 'm' {
+				p.error_at(c, 'asm constraint "${cs}" is not supported; only "m" is')
+			}
+			constraints << bare
+			ops << exp
+		}
+	}
+	p.expect(')')
+	p.expect(';')
+
+	mut node := p.new_node(.asm, tok)
+	node.asm_template = tmpl
+	node.asm_ops = ops
+	node.asm_constraints = constraints
 	return node
 }
 

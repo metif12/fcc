@@ -1262,6 +1262,10 @@ fn (mut g AsmGen) gen_stmt(node &ast.Node) {
 			g.gen_return(node)
 			return
 		}
+		.asm {
+			g.gen_asm(node)
+			return
+		}
 		.expr_stmt {
 			// `va_start(ap, last);` and `va_end(ap);` are the statements the parser
 			// produces for the two variadic builtins that have no value. They are
@@ -1282,6 +1286,47 @@ fn (mut g AsmGen) gen_stmt(node &ast.Node) {
 		else {}
 	}
 	g.errors << 'statement at line ${node.tok.line.disp_line} is not a statement this generator emits'
+}
+
+// gen_asm emits a GNU `__asm__` statement.
+//
+// Each operand's address is materialised into its own scratch register, and `%N` is
+// replaced by that register as a memory operand. A register rather than a stack slot,
+// because the template spells `%N` where a *memory reference* belongs: `fldl %1` has to
+// load x's value, so `%1` must become `(%rcx)` holding x's address — not a slot holding
+// that address, which would load the address itself as a double. That is what the first
+// attempt did, and it made `lrint(2.7)` return 247 instead of 3.
+//
+// The scratch registers are all caller-saved on this target, which is the only reason
+// using them is safe: nothing in this generator's contract holds a live value in one
+// across a statement, the value stack being in memory. An asm template that clobbers
+// them is therefore clobbering something nothing was relying on. The count is capped so
+// that running out is a report rather than a silently dropped operand.
+const asm_scratch = ['%rcx', '%rdx', '%r8', '%r9', '%r10', '%r11']
+
+fn (mut g AsmGen) gen_asm(node &ast.Node) {
+	if node.asm_ops.len > asm_scratch.len {
+		g.errors << 'asm at line ${node.tok.line.disp_line} has ${node.asm_ops.len} operands; this generator stages at most ${asm_scratch.len}'
+		return
+	}
+	for i in 0 .. node.asm_ops.len {
+		g.gen_addr(node.asm_ops[i])
+		g.line('  mov %rax, ${asm_scratch[i]}')
+	}
+
+	// Substitute from the highest operand number down, so an earlier substitution's text
+	// can never be read as part of a later one: `%10` contains `%1` and would otherwise
+	// become `(%rcx)0`.
+	mut out := node.asm_template
+	for i := node.asm_ops.len - 1; i >= 0; i-- {
+		out = out.replace('%${i}', '(${asm_scratch[i]})')
+	}
+	for line in out.split_into_lines() {
+		t := line.trim_space()
+		if t != '' {
+			g.line('  ${t}')
+		}
+	}
 }
 
 // gen_return emits a `return`, which is a jump to the one epilogue.
