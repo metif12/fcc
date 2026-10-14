@@ -920,3 +920,25 @@ several calls, not in the minimal one, and `gen.v:947` adjusts `g.depth` by
 that has not been read to the bottom. **It is a lead, not a finding**, and it must be
 reproduced on a two-line program — one variadic call and one following statement —
 before any change is made to `gen.v`.
+
+**`printf` of a wide double loses the last digits.** gcc prints `2^63` as
+`9223372036854775808.0`; fcc prints `9223372036854775800.0`. Every formatter on
+every platform agrees on the smaller magnitudes — `%.1f` of `1.5` and of
+`123456789.5` both match gcc — and the fault is bound to how many significant
+digits a value needs, not to which ones.
+
+This is in the stdio formatting, not in the cast, and the two were separated
+before anyone opened the formatter. `(double)0x8000000000000001ULL` compares
+equal to `9223372036854775808.0` under both compilers, and halving it and halving
+again gives `2.0` under both: the conversion is exact. Only the printing
+disagrees. Both programs go through the same `_vsnprintf`, so the value reaching
+the formatter is right and what the formatter does with it is not. The smallest
+reproduction is three lines: one `double` initialised to `9223372036854775808.0`
+and one `printf("%.1f\n", c)`.
+
+`tests/endtoend/u64_wide_cast.c` therefore compares by equality and prints only
+values the formatters agree on, which keeps the cast measurable while this is
+open. The instruction sequence there had also been working in `%rdi`, which is
+non-volatile on this target — five unwritten-for writes of a register nothing had
+saved, emitted in the middle of arbitrary expressions. It now works in `%rcx`,
+from the same caller-saved scratch set the inline-asm operands use.

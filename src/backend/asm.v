@@ -474,8 +474,16 @@ const cast_instructions = {
 	// which reads the input as signed. The fix is to halve it and double the
 	// result, which is exact for every value that is not representable, and the
 	// branch is what keeps it exact for the ones that are.
+	//
+	// The slow path works in `%rcx`, not `%rdi`. This sequence is emitted as a
+	// raw instruction line in the middle of an arbitrary expression, so whatever
+	// it clobbers the caller loses — and `%rdi` is non-volatile on this target,
+	// where Linux keeps only RBX, RBP and R12-R15. The register was chosen from
+	// the same caller-saved scratch set `gen_asm` uses for inline-asm operands,
+	// and it is free here: `%rax` holds the value being converted and `%xmm0` the
+	// result, which is the whole of what lives at this point.
 	'u64f32': 'cvtsi2ssq %rax, %xmm0'
-	'u64f64': 'test %rax,%rax; js 1f; pxor %xmm0,%xmm0; cvtsi2sd %rax,%xmm0; jmp 2f; 1: mov %rax,%rdi; and $1,%eax; pxor %xmm0,%xmm0; shr %rdi; or %rax,%rdi; cvtsi2sd %rdi,%xmm0; addsd %xmm0,%xmm0; 2:'
+	'u64f64': 'test %rax,%rax; js 1f; pxor %xmm0,%xmm0; cvtsi2sd %rax,%xmm0; jmp 2f; 1: mov %rax,%rcx; and $1,%eax; pxor %xmm0,%xmm0; shr %rcx; or %rax,%rcx; cvtsi2sd %rcx,%xmm0; addsd %xmm0,%xmm0; 2:'
 	'u64f80': 'mov %rax, -8(%rsp); fildq -8(%rsp); test %rax, %rax; jns 1f; mov $1602224128, %eax; mov %eax, -4(%rsp); fadds -4(%rsp); 1:'
 	'f32i8':  'cvttss2sil %xmm0, %eax; movsbl %al, %eax'
 	'f32u8':  'cvttss2sil %xmm0, %eax; movzbl %al, %eax'
