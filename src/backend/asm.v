@@ -288,7 +288,14 @@ fn (mut g AsmGen) load(ty &ast.Type) {
 
 // store writes %rax through the address the stack top holds.
 fn (mut g AsmGen) store(ty &ast.Type) {
-	g.pop('%rdi')
+	// `%rcx`, not `%rdi`. RDI is non-volatile on this target — Windows x64 keeps
+	// RBX, RBP, RDI, RSI and R12-R15 across a call, where Linux keeps only RBX, RBP
+	// and R12-R15 — so a callee that parks a live value in `%rdi` loses it to any
+	// function that pops its store address there. The symptom lands in the caller,
+	// not in the function that did it, which is what makes it hard to find: a
+	// comparator written this way computes the right answer and then takes libc's
+	// `qsort` down with it, because `qsort` held a value in `%rdi` across the call.
+	g.pop('%rcx')
 	match ty.kind {
 		.struct_, .union_ {
 			// A struct is copied a byte at a time. A `mov` of the whole thing
@@ -296,27 +303,27 @@ fn (mut g AsmGen) store(ty &ast.Type) {
 			// store is what the reference does.
 			for i in 0 .. ty.size {
 				g.line('  mov ${i}(%rax), %r8b')
-				g.line('  mov %r8b, ${i}(%rdi)')
+				g.line('  mov %r8b, ${i}(%rcx)')
 			}
 			return
 		}
 		.basic {
 			if ty.basic == .float_ {
-				g.line('  movss %xmm0, (%rdi)')
+				g.line('  movss %xmm0, (%rcx)')
 				return
 			}
 			if ty.basic == .double_ {
-				g.line('  movsd %xmm0, (%rdi)')
+				g.line('  movsd %xmm0, (%rcx)')
 				return
 			}
 			if ty.basic == .ldouble_ {
-				g.line('  fstpt (%rdi)')
+				g.line('  fstpt (%rcx)')
 				return
 			}
 		}
 		else {}
 	}
-	g.line('  mov ${reg_ax(ty.size)}, (%rdi)')
+	g.line('  mov ${reg_ax(ty.size)}, (%rcx)')
 }
 
 // cmp_zero compares the value against zero, for a condition.

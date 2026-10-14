@@ -311,13 +311,16 @@ fn (mut g AsmGen) copy_struct_reg() {
 	ty := g.return_type()
 	mut gp := 0
 	mut fp := 0
-	g.line('  mov %rax, %rdi')
+	// The hidden buffer's address goes in a volatile register: `%rdi` is
+	// non-volatile on this target, and this runs in the caller immediately after a
+	// call, so the caller's own `%rdi` still has to be intact when this returns.
+	g.line('  mov %rax, %rcx')
 
 	if has_flonum(ty, 0, 8, 0) {
 		if ty.size == 4 {
-			g.line('  movss (%rdi), %xmm0')
+			g.line('  movss (%rcx), %xmm0')
 		} else {
-			g.line('  movsd (%rdi), %xmm0')
+			g.line('  movsd (%rcx), %xmm0')
 		}
 		fp++
 	} else {
@@ -326,7 +329,7 @@ fn (mut g AsmGen) copy_struct_reg() {
 		mut i := imin(8, ty.size) - 1
 		for i >= 0 {
 			g.line('  shl $8, %rax')
-			g.line('  mov ${i}(%rdi), %al')
+			g.line('  mov ${i}(%rcx), %al')
 			i--
 		}
 		gp++
@@ -335,9 +338,9 @@ fn (mut g AsmGen) copy_struct_reg() {
 	if ty.size > 8 {
 		if has_flonum(ty, 8, 16, 0) {
 			if ty.size == 4 {
-				g.line('  movss 8(%rdi), %xmm${fp}')
+				g.line('  movss 8(%rcx), %xmm${fp}')
 			} else {
-				g.line('  movsd 8(%rdi), %xmm${fp}')
+				g.line('  movsd 8(%rcx), %xmm${fp}')
 			}
 		} else {
 			r1 := if gp == 0 { '%al' } else { '%dl' }
@@ -346,7 +349,7 @@ fn (mut g AsmGen) copy_struct_reg() {
 			mut i := imin(16, ty.size) - 1
 			for i >= 8 {
 				g.line('  shl $8, ${r2}')
-				g.line('  mov ${i}(%rdi), ${r1}')
+				g.line('  mov ${i}(%rcx), ${r1}')
 				i--
 			}
 		}
@@ -357,10 +360,12 @@ fn (mut g AsmGen) copy_struct_reg() {
 // as the first argument.
 fn (mut g AsmGen) copy_struct_mem() {
 	ty := g.return_type()
-	g.line('  mov ${g.current_fn.params[0].offset}(%rbp), %rdi')
+	// `%rcx` for the destination, not `%rdi`: the destination register has to be
+	// one the caller can lose, and `%rdi` is not one on Windows x64.
+	g.line('  mov ${g.current_fn.params[0].offset}(%rbp), %rcx')
 	for i in 0 .. ty.size {
 		g.line('  mov ${i}(%rax), %dl')
-		g.line('  mov %dl, ${i}(%rdi)')
+		g.line('  mov %dl, ${i}(%rcx)')
 	}
 }
 
@@ -371,14 +376,19 @@ fn (mut g AsmGen) copy_struct_mem() {
 // requested size and the high-water mark moves with it, so that a `return` can
 // give the space back.
 fn (mut g AsmGen) builtin_alloca() {
-	g.line('  add $15, %rdi')
-	g.line('  and $0xfffffff0, %edi')
+	// `%r11`, not `%rdi`, for the rounded size. `%rdi` is non-volatile on this
+	// target, so using it here would destroy a value the caller's own caller was
+	// promised it could rely on. `%r11` is in the same caller-saved scratch set
+	// `gen_asm` uses, and nothing else in this routine touches it: `%rcx` is the
+	// copy count, `%rdx` the destination and `%rax` the source.
+	g.line('  add $15, %r11')
+	g.line('  and $0xfffffff0, %r11d')
 
 	bottom := g.current_fn.alloca_bottom.offset
 	g.line('  mov ${bottom}(%rbp), %rcx')
 	g.line('  sub %rsp, %rcx')
 	g.line('  mov %rsp, %rax')
-	g.line('  sub %rdi, %rsp')
+	g.line('  sub %r11, %rsp')
 	g.line('  mov %rsp, %rdx')
 	g.line('1:')
 	g.line('  cmp $0, %rcx')
@@ -392,7 +402,7 @@ fn (mut g AsmGen) builtin_alloca() {
 	g.line('2:')
 
 	g.line('  mov ${bottom}(%rbp), %rax')
-	g.line('  sub %rdi, %rax')
+	g.line('  sub %r11, %rax')
 	g.line('  mov %rax, ${bottom}(%rbp)')
 }
 
@@ -516,12 +526,17 @@ fn (mut g AsmGen) gen_expr(node &ast.Node) {
 			return
 		}
 		.memzero {
-			// `rep stosb` is memset(%rdi, %al, %rcx), and the object's size is known
-			// here, so the whole clear is four instructions instead of one per element.
+			// `rep stosb` takes its destination only in `%rdi` — that is the
+			// instruction, not a choice — and `%rdi` is non-volatile on this target, so
+			// the caller's own copy is saved and restored around the four instructions
+			// this needs. The alternative, a byte-at-a-time loop into a volatile
+			// register, would work and would be slower for every aggregate local.
+			g.line('  push %rdi')
 			g.line('  mov $${node.var.ty.size}, %rcx')
 			g.line('  lea ${node.var.offset}(%rbp), %rdi')
 			g.line('  mov $0, %al')
 			g.line('  rep stosb')
+			g.line('  pop %rdi')
 			return
 		}
 		.cond_expr {
@@ -793,20 +808,21 @@ fn bitfield_of(lhs &ast.Node) ?ast.Member {
 fn (mut g AsmGen) gen_assign_bitfield(node &ast.Node, m ast.Member) {
 	g.line('  mov %rax, %r8')
 	mask := (i64(1) << m.bit_width) - 1
-	g.line('  mov %rax, %rdi')
+	// `%r10` for the value being merged, not `%rdi`: `%rdi` is non-volatile on this
+	// target, and this runs in the middle of an arbitrary expression, so the value
+	// the caller's own caller relied on would be gone. `%rcx` is unavailable too —
+	// `store` below pops the destination address into it — and `%r8`, `%r9`, `%r11`
+	// and `%rax` are each already holding something here.
+	g.line('  mov %rax, %r10')
 	// The mask is staged through a register rather than used as an immediate, because
 	// `and` only accepts a sign-extended 32-bit one and this is a 64-bit value: for a
 	// 40-bit field it is `1099511627775`, and `and $1099511627775, %rdi` is rejected by
 	// GNU as with `operand type mismatch for 'and'`. `mov` does take the full width —
 	// that is what `movabs` is — so the value is loaded and then the `and` is between
 	// registers.
-	//
-	// `%r11` is one of this generator's caller-saved scratch registers, the same set
-	// `gen_asm` uses for inline-asm operands, and is not holding anything at this point:
-	// `%rax` and `%rdi` hold the two values and `%r8` the one the epilogue returns.
 	g.line('  mov $${mask}, %r11')
-	g.line('  and %r11, %rdi')
-	g.line('  shl $${m.bit_offset}, %rdi')
+	g.line('  and %r11, %r10')
+	g.line('  shl $${m.bit_offset}, %r10')
 
 	// The address is on the stack, under the new value.
 	g.line('  mov (%rsp), %rax')
@@ -815,7 +831,7 @@ fn (mut g AsmGen) gen_assign_bitfield(node &ast.Node, m ast.Member) {
 	keep := ~(mask << m.bit_offset)
 	g.line('  mov $${keep}, %r9')
 	g.line('  and %r9, %rax')
-	g.line('  or %rdi, %rax')
+	g.line('  or %r10, %rax')
 	g.store(node.ty)
 	g.line('  mov %r8, %rax')
 }
@@ -826,13 +842,13 @@ fn (mut g AsmGen) gen_assign_bitfield(node &ast.Node, m ast.Member) {
 // because %r10 is not an argument register and so survives loading the arguments
 // into theirs.
 fn (mut g AsmGen) gen_funcall(node &ast.Node) {
-	// The VLA allocator is not a function, so it is emitted here rather than called.
-	if node.lhs.kind == .var_ref && node.lhs.var.name == 'alloca' {
-		g.gen_expr(node.args[0])
-		g.line('  mov %rax, %rdi')
-		g.builtin_alloca()
-		return
-	}
+		// The VLA allocator is not a function, so it is emitted here rather than called.
+		if node.lhs.kind == .var_ref && node.lhs.var.name == 'alloca' {
+			g.gen_expr(node.args[0])
+			g.line('  mov %rax, %r11')
+			g.builtin_alloca()
+			return
+		}
 
 	_, classes := g.classify_args(node)
 	stack_args := g.push_args(node, classes)
@@ -1005,14 +1021,27 @@ fn (mut g AsmGen) gen_binary(node &ast.Node) {
 	g.gen_expr(node.rhs)
 	g.push()
 	g.gen_expr(node.lhs)
-	g.pop('%rdi')
+	// The right operand is popped into a *volatile* register. `%rdi` is not one on
+	// this target: Windows x64 keeps RBX, RBP, RDI, RSI and R12-R15 across a call,
+	// where Linux keeps only RBX, RBP and R12-R15. Popping into `%rdi` therefore
+	// destroys a value the *callee* had been promised it could rely on, and the
+	// symptom is not in the function that did it — a comparator built this way
+	// returns a correct comparison and then takes libc's `qsort` down with it,
+	// because `qsort` was holding one of those registers across the call. Every
+	// unit test stayed green, because none of them called a function that depends
+	// on the register surviving.
+	//
+	// `%rcx` is already in `asm_scratch` below as one of this generator's
+	// caller-saved scratch registers, so it is the same class of choice. Using it
+	// here also removes the `mov %rdi, %rcx` that the shifts needed to reach `%cl`.
+	g.pop('%rcx')
 
 	// A pointer or an eight-byte value needs the wide registers. The test is the
 	// width rather than the type being `long`, because a `long` is four bytes on
 	// this target — one of the three places the measured ABI differs from chibicc's.
 	wide := lt.size == 8 || lt.base != unsafe { nil }
 	ax := if wide { '%rax' } else { '%eax' }
-	di := if wide { '%rdi' } else { '%edi' }
+	di := if wide { '%rcx' } else { '%ecx' }
 	dx := if wide { '%rdx' } else { '%edx' }
 
 	match node.kind {
@@ -1080,11 +1109,10 @@ fn (mut g AsmGen) gen_binary(node &ast.Node) {
 			g.line('  movzb %al, %rax')
 		}
 		.shl {
-			g.line('  mov %rdi, %rcx')
+			// The operand is already in `%rcx`, so the count is in `%cl` with no move.
 			g.line('  shl %cl, ${ax}')
 		}
 		.shr {
-			g.line('  mov %rdi, %rcx')
 			if lt.is_unsigned {
 				g.line('  shr %cl, ${ax}')
 			} else {
@@ -1224,7 +1252,9 @@ fn (mut g AsmGen) gen_stmt(node &ast.Node) {
 			// compare, because a chain of equality tests would not cover one.
 			w := node.cond.ty.size == 8
 			ax := if w { '%rax' } else { '%eax' }
-			di := if w { '%rdi' } else { '%edi' }
+			// `%rcx`, not `%rdi` — RDI is non-volatile on this target, and a range
+			// comparison is arithmetic a caller may have depending registers round.
+			di := if w { '%rcx' } else { '%ecx' }
 			for c in node.cases {
 				if c.begin == c.end {
 					g.line('  cmp $${c.begin}, ${ax}')
