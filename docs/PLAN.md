@@ -858,42 +858,65 @@ that program is the test.
 
 ## Open defects, recorded rather than worked on
 
-Two were found by exercising real programs against the boundary, and neither is
-worked on here. Each has a reproducer, because an open defect without one is a
-story rather than a bug.
+Each has a reproducer, because an open defect without one is a story rather than a
+bug. The second one is a correction of something written here earlier, which is why
+the wrong claim is quoted alongside the right one.
 
-**A vcc-compiled comparator passed to libc's `qsort` hangs.** The reproducer is a
-call whose four arguments are a base pointer, a count, an element size and a
-function pointer:
+**A wide bitfield produced assembly GNU `as` rejected outright** — fixed in `4fb556e`,
+kept here only because the reasoning is what makes `bitfield_wide.c` worth having. A
+field wider than an int needs `(1 << 40) - 1`, and the generator emitted it as
+`and $1099511627775, %rdi`. `and` accepts only a sign-extended 32-bit immediate,
+while `mov` takes the full width — which is what `movabs` is for. GNU `as` refused the
+whole translation unit, so this shape did not compute wrong, it did not assemble, and
+the diagnostic named the assembler rather than anything leading back to the bitfield.
+A 4-bit field's mask fits an immediate, which is why the narrow form was fine and the
+wide one was never reached.
+
+**A vcc-built function pointer passed to libc's `qsort` never returns.** The
+reproducer is a comparator and a call:
 
 ```c
 #include <stdlib.h>
-int cmp_ext(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
+#include <stdio.h>
+static int g_calls = 0;
+static int cmpA(const void *a, const void *b) { g_calls++; return 0; }
 int main(void) {
   int a[5] = {5, 3, 1, 4, 2};
-  qsort(a, 5, 4, cmp_ext);
-  printf("done\n");
+  qsort(a, 5, 4, cmpA);
 }
 ```
 
-gcc answers `done`; fcc exits `-1073741819` (access violation), or hangs when the
-comparator returns a constant. The stack ordering of the four arguments is
-correct — the address, the count, the size, then the comparator — and the
-comparator *is* reached, so this is inside the callback or inside what libc
-expects of it, and not a marshalling failure. Established by isolating it: the
-same call with a null comparator returns, and with a one-element array qsort
-never calls the comparator at all, so a shape that avoids the call also avoids
-the fault. A twelve-block program built out of individually-correct blocks hangs
-too, which is the same defect through a longer path.
+gcc answers `exit 0`; fcc hangs. This is measured, not inferred, and the shape
+matters: the comparator increments a static counter and returns a constant, so it
+holds no pointers, dereferences nothing and computes nothing. Two facts isolate where
+the fault is, and both came from linking objects built by different compilers rather
+than from reading the assembly:
 
-**A wide bitfield produced assembly GNU `as` rejected outright.** A field wider
-than an int needs the mask `(1 << 40) - 1`, and the generator emitted it as
-`and $1099511627775, %rdi`. `and` only accepts a sign-extended 32-bit immediate,
-while `mov` takes the full width — which is what `movabs` is for. GNU `as`
-refused the whole translation unit with `operand type mismatch for 'and'`, so
-this shape did not compute wrong, it did not assemble. Measured: the same
-program with a 4-bit field was fine, which is what made the wide one invisible.
+- fcc's comparator with gcc's `main` hangs; **gcc's comparator with fcc's `main`
+  returns 0.** So the four arguments are marshalled correctly — `qsort(a, 5, 4, cmp)`
+  from fcc works with the real comparator — and the defect is in what fcc emits for
+  the callee.
+- a real comparator, `return *(const int *)a - *(const int *)b;`, is reached with
+  correct arguments. It printed `*a=3 *b=5` from inside itself before the program
+  died. So the body is right, and the failure is on return or in what the callee
+  leaves behind.
 
-The mask is staged through a caller-saved register now, so the `and` is between
-registers. `tests/endtoend/bitfield_wide.c` covers it, and the broken version
-still produces the assembler error, which is the control.
+An earlier note here said the defect was "inside the callback or in what libc expects
+of it" and that the marshalling was sound. The second half is confirmed; the first
+half is too vague to act on, and one measurement on which it rested was wrong: a build
+labelled `both_g` and used as a gcc control was compiled by fcc, because the script
+that produced it passed `$fcc` for every case in its loop. The control was not a
+control. Both conclusions are re-derived above from links whose producers are known.
+
+**What is not yet known, and must be recorded as unknown rather than guessed:** the
+callee's frame is `push %rbp; mov %rsp, %rbp; sub $32, %rsp`, the locals land inside
+that frame, and the push/pop pairs are balanced to zero — so nothing about the
+function reads as wrong, which is why it was not fixed here. One unproven observation
+belongs in the same category: around a variadic `fprintf` call the generator emits
+`sub $32, %rsp` before the `call` and `add $64, %rsp` after it, which is not symmetric
+and would leave `%rsp` 32 bytes above where it was. That was seen in a program with
+several calls, not in the minimal one, and `gen.v:947` adjusts `g.depth` by
+`stack_args + spill`, so the asymmetry may be the intended shape under a depth model
+that has not been read to the bottom. **It is a lead, not a finding**, and it must be
+reproduced on a two-line program — one variadic call and one following statement —
+before any change is made to `gen.v`.
