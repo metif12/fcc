@@ -856,3 +856,44 @@ the first acceptance test is the smallest one that crosses the boundary: a fcc p
 that calls `printf` and prints one line. It currently dies with an access violation, and
 that program is the test.
 
+## Open defects, recorded rather than worked on
+
+Two were found by exercising real programs against the boundary, and neither is
+worked on here. Each has a reproducer, because an open defect without one is a
+story rather than a bug.
+
+**A vcc-compiled comparator passed to libc's `qsort` hangs.** The reproducer is a
+call whose four arguments are a base pointer, a count, an element size and a
+function pointer:
+
+```c
+#include <stdlib.h>
+int cmp_ext(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
+int main(void) {
+  int a[5] = {5, 3, 1, 4, 2};
+  qsort(a, 5, 4, cmp_ext);
+  printf("done\n");
+}
+```
+
+gcc answers `done`; fcc exits `-1073741819` (access violation), or hangs when the
+comparator returns a constant. The stack ordering of the four arguments is
+correct — the address, the count, the size, then the comparator — and the
+comparator *is* reached, so this is inside the callback or inside what libc
+expects of it, and not a marshalling failure. Established by isolating it: the
+same call with a null comparator returns, and with a one-element array qsort
+never calls the comparator at all, so a shape that avoids the call also avoids
+the fault. A twelve-block program built out of individually-correct blocks hangs
+too, which is the same defect through a longer path.
+
+**A wide bitfield produced assembly GNU `as` rejected outright.** A field wider
+than an int needs the mask `(1 << 40) - 1`, and the generator emitted it as
+`and $1099511627775, %rdi`. `and` only accepts a sign-extended 32-bit immediate,
+while `mov` takes the full width — which is what `movabs` is for. GNU `as`
+refused the whole translation unit with `operand type mismatch for 'and'`, so
+this shape did not compute wrong, it did not assemble. Measured: the same
+program with a 4-bit field was fine, which is what made the wide one invisible.
+
+The mask is staged through a caller-saved register now, so the `and` is between
+registers. `tests/endtoend/bitfield_wide.c` covers it, and the broken version
+still produces the assembler error, which is the control.

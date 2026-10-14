@@ -794,7 +794,18 @@ fn (mut g AsmGen) gen_assign_bitfield(node &ast.Node, m ast.Member) {
 	g.line('  mov %rax, %r8')
 	mask := (i64(1) << m.bit_width) - 1
 	g.line('  mov %rax, %rdi')
-	g.line('  and $${mask}, %rdi')
+	// The mask is staged through a register rather than used as an immediate, because
+	// `and` only accepts a sign-extended 32-bit one and this is a 64-bit value: for a
+	// 40-bit field it is `1099511627775`, and `and $1099511627775, %rdi` is rejected by
+	// GNU as with `operand type mismatch for 'and'`. `mov` does take the full width —
+	// that is what `movabs` is — so the value is loaded and then the `and` is between
+	// registers.
+	//
+	// `%r11` is one of this generator's caller-saved scratch registers, the same set
+	// `gen_asm` uses for inline-asm operands, and is not holding anything at this point:
+	// `%rax` and `%rdi` hold the two values and `%r8` the one the epilogue returns.
+	g.line('  mov $${mask}, %r11')
+	g.line('  and %r11, %rdi')
 	g.line('  shl $${m.bit_offset}, %rdi')
 
 	// The address is on the stack, under the new value.

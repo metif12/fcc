@@ -75,11 +75,9 @@ fn main() {
 		//
 		// A program *both* refuse is still BLOCKED, because that is a statement about
 		// the program and not about vcc.
-		mut oracle := tcc
 		mut oracle_name := 'tcc'
 		mut oracle_exe := os.join_path(probe_dir, base + '_cmp_tcc.exe')
 		if os.exec([tcc, '-I', tcc_include, '-o', oracle_exe, src]).exit_code != 0 {
-			oracle = gcc
 			oracle_name = 'gcc'
 			oracle_exe = os.join_path(probe_dir, base + '_cmp_gcc.exe')
 			if os.exec([gcc, '-o', oracle_exe, src]).exit_code != 0 {
