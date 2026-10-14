@@ -942,3 +942,33 @@ open. The instruction sequence there had also been working in `%rdi`, which is
 non-volatile on this target — five unwritten-for writes of a register nothing had
 saved, emitted in the middle of arbitrary expressions. It now works in `%rcx`,
 from the same caller-saved scratch set the inline-asm operands use.
+
+**`printf` of a wide double gives different last digits, and the cause is two
+different printf implementations, not a formatting defect.** The earlier note in
+this section said this was a defect in fcc's stdio formatting and that the value
+reaching the formatter was correct, so what it did with the value was not. The
+first half was right and the second half was never established — and it was wrong.
+
+What is measured:
+
+- the value is right. `%a` prints `0x1p+63` under gcc and `0x1.000000p+63` under
+  fcc, which is the same number written two ways, and `%.1f` of every smaller
+  magnitude agrees.
+- the two programs are running different printf code. The single most telling
+  fact is the exponent-adjacent one: gcc's binary has a `printf` of its own, with
+  `.text` five times the size of fcc's, while fcc's binary imports one. This is
+  mingw's statically-linked printf against msvcrt's dynamic one, and msvcrt's
+  `%f` keeps about seventeen significant digits where mingw's prints the exact
+  decimal.
+
+So the earlier reasoning failed at the step where it said both programs reach the
+same formatter. They do not, and the tell was in the data already collected —
+`9.2233720368547758e+18` against `9.2233720368547758e+018` is not a rounding
+difference but a different exponent-width policy, which no two code paths inside
+one library produce.
+
+The consequence for this suite is that **any `printf` of a value needing more than
+seventeen significant digits will diverge from gcc**, for the same reason. That is
+an oracle artefact and belongs with the measured-but-not-defective list, alongside
+`long` and `wchar_t`. `tests/endtoend/u64_wide_cast.c` is written to avoid it: it
+compares by equality and prints only values every formatter agrees on.
