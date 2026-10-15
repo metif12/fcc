@@ -1077,3 +1077,36 @@ literals are being typed `double`, and the missing piece is the conversion.
 The fix is therefore to emit the `f64f80` cast on the assignment, not to touch the
 store — and the fact that `f64f80` already exists and already does the right thing is
 what makes this a one-line change rather than a rewrite of the `long double` path.
+
+**The `long double` literals are typed and encoded correctly now, and the value
+still does not arrive.** This is a partial fix recorded as partial, because the
+remaining half is a different defect and guessing it would undo this one.
+
+Three things were wrong, and two of them are fixed:
+
+- `1.0L` was typed `double`. `type_of_num` returned `ty_double` for any float
+  spelling without checking the suffix, so `long double a = 1.0L / 3.0L;` computed
+  a `double` division with `divsd` and then stored it with an x87 `fstpt` that pops
+  a stack the value was never on. It now returns `ty_ldouble` for an `l`/`L`
+  suffix, and the division is `fdivrp` as the rest of the `long double` path
+  expects.
+- `f80_bytes` converted instead of reinterpreting. `u64(d)` turns 1.0 into 1, and
+  the subnormal path below then shifts that 1 left 52 times — which is exactly the
+  `lo=4503599627370496, hi=30618` the generated file used to hold, proved by
+  arithmetic rather than asserted. It now reinterprets like `f32_bits` and `f64_bits`
+  already did.
+- `f80_bytes` packed the sign and exponent backwards: `(biased << 1) | sign` puts
+  the sign in bit 0 and shifts the exponent out of place, where the format wants
+  `(sign << 15) | biased`. Fixed alongside.
+
+The generated file confirms both: the literals arrive as `lo=0x8000000000000000,
+hi=0x3FFF` for 1.0L and `lo=0xC000..., hi=0x4000` for 3.0L, and the division is x87
+throughout. But `printf("%.15Lf\n", a)` still prints zero, including for a plain
+`long double a = 1.0L` with no arithmetic at all — so the store or the
+marshalling, not the computation, is where the value is lost.
+
+The prime suspect is the size. `ty_ldouble` is declared 8 bytes while `fldt` and
+`fstpt` move 10, so every `long double` local is two bytes short of what the
+instructions that fill it assume. That is a different defect from the two fixed
+here — it is about layout, not about encoding — and it needs its own measurement
+before anyone changes a size.

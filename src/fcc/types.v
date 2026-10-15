@@ -541,8 +541,17 @@ pub fn numeric_type(tok &ast.Token) &ast.Type {
 		return ty_float
 	}
 	// A hexadecimal float always carries a `p` exponent, and an unsuffixed
-	// floating constant of any other base is a double.
+	// floating constant of any other base is a double. A floating constant with
+	// an `l` or `L` suffix is a long double — C11 6.4.4.2 — and this has to be
+	// checked here, not in the integer `long` handling below, because the spelling
+	// has already decided this is a float. `1.0L` was previously typed `double`,
+	// which made `long double a = 1.0L / 3.0L;` compute a `double` division and
+	// then store it with an x87 `fstpt` that pops a register stack the value was
+	// never pushed onto — the local got whatever the empty x87 stack held.
 	if is_hex_float(tok.text) || is_float_spelling(tok.text) {
+		if suffix.contains('l') || suffix.contains('L') {
+			return ty_ldouble
+		}
 		return ty_double
 	}
 	unsigned := suffix.contains('u') || suffix.contains('U')

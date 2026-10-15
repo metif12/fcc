@@ -685,7 +685,12 @@ fn (mut g AsmGen) gen_num(node &ast.Node) {
 // is measured at 8 bytes while x86's 80-bit format is what `fldt` loads, so the
 // two only agree above 2^63.
 fn f80_bytes(d f64) []u8 {
-	bits := u64(d)
+	// The bit pattern, not the value: `u64(d)` would convert 1.0 to 1 and then
+	// the subnormal path below would shift that 1 left 52 times, producing a
+	// mantissa of 2^48 and an exponent to match — which is exactly the garbage
+	// `long double` literals used to load as. `f32_bits` and `f64_bits` just above
+	// reinterpret for the same reason.
+	bits := unsafe { *(&u64(&d)) }
 	mut sign := u64(0)
 	if d < 0 {
 		sign = 1
@@ -721,7 +726,10 @@ fn f80_bytes(d f64) []u8 {
 		out[i] = u8(mant >> (8 * i))
 	}
 	for i in 0 .. 2 {
-		out[8 + i] = u8((biased << 1 | sign) >> (8 * i))
+		// The sign lives in bit 15 of the last two bytes and the exponent in
+		// bits 14:0 — `(biased << 1) | sign` had them backwards, putting the
+		// sign in bit 0 and shifting the exponent out of place.
+		out[8 + i] = u8(((sign << 15) | biased) >> (8 * i))
 	}
 	return out
 }
