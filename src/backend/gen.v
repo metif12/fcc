@@ -66,7 +66,12 @@ fn (mut g AsmGen) classify_args(node &ast.Node) (int, []ArgClass) {
 				}
 			}
 		} else if ty.kind == .basic {
-			if ty.basic == .float_ || ty.basic == .double_ {
+			// A `long double` classifies as a `double` — 8 bytes, measured against
+			// tcc, which passes one exactly as it passes a `double`. The by-reference
+			// rule below used to apply here, for a sixteen-byte value that this
+			// target never had; it spilled the value and passed a pointer, which is
+			// what made `printf("%.15Lf\n", x)` read an address as a number.
+			if ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_ {
 				// [MS x64 3.2] A floating-point argument to a *variadic* function is
 				// passed in an SSE register **and** in the general register that its
 				// position among all the arguments selects, because the callee's variadic
@@ -89,22 +94,6 @@ fn (mut g AsmGen) classify_args(node &ast.Node) (int, []ArgClass) {
 					stack++
 				}
 				fp++
-			} else if ty.basic == .ldouble_ {
-				// [MS x64 2.2.5] An argument larger than eight bytes that is not a
-				// structure is passed by *reference*: the caller spills it and puts the
-				// address in the next integer register. x87 has no register class here
-				// either, and the psABI's two-stack-slot x87 argument does not exist on
-				// this target — gcc does `fstpt` to its own frame and `movq` the address.
-				//
-				// So it is classified exactly like a pointer: one general register, whose
-				// value is an address. `push_args_pass` spills the value and pushes that
-				// address, which is what makes the ordinary `pop arg_regs[gp]` below load
-				// it.
-				if gp >= gp_max {
-					c.by_stack = true
-					stack++
-				}
-				gp++
 			} else {
 				if gp >= gp_max {
 					c.by_stack = true
@@ -162,16 +151,14 @@ fn (mut g AsmGen) push_args(node &ast.Node, classes []ArgClass) int {
 		if !c.by_stack {
 			continue
 		}
-		// The argument area is counted in eight-byte slots, not in arguments: a
-		// `long double` is pushed as two of them (`sub $16, %rsp; fstpt (%rsp)`), and an
-		// aggregate larger than two eightbytes is pushed by `push_struct`, which reserves
-		// its whole size. Counting one slot for either made the caller's own cleanup short
-		// by the difference — `sprintf(buf, "%Lf", x)` left one value on the stack, and
-		// passing a 32-byte struct left three.
+		// The argument area is counted in eight-byte slots, not in arguments. An
+		// aggregate larger than two eightbytes is pushed by `push_struct`, which
+		// reserves its whole size; counting one slot for it made the caller's own
+		// cleanup short by the difference. A `long double` is one slot — 8 bytes,
+		// measured against tcc — not two; the two-slot count belonged to the
+		// sixteen-byte value this target never had.
 		ty := node.args[i].ty
-		if ty.kind == .basic && ty.basic == .ldouble_ {
-			total += 2
-		} else if ty.kind == .struct_ || ty.kind == .union_ {
+		if ty.kind == .struct_ || ty.kind == .union_ {
 			total += align_to(ty.size, 8) / 8
 		} else {
 			total++
@@ -235,25 +222,17 @@ fn (mut g AsmGen) push_args_pass(node &ast.Node, classes []ArgClass, first_pass 
 }
 
 // push_one puts one argument's value onto the stack in the form the callee expects to
-// find it: an aggregate copied out of `%rax`, an SSE value in `%xmm0`, a `long double`
-// spilled with its address left on top, and everything else as a word in `%rax`.
+// find it: an aggregate copied out of `%rax`, an SSE value in `%xmm0` (which is
+// what a `long double` is on this target — 8 bytes, measured against tcc), and
+// everything else as a word in `%rax`.
 fn (mut g AsmGen) push_one(arg &ast.Node) {
 	g.gen_expr(arg)
 	ty := arg.ty
 	if ty.kind == .struct_ || ty.kind == .union_ {
 		g.push_struct(ty)
-	} else if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_) {
+	} else if ty.kind == .basic
+		&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_) {
 		g.pushf()
-	} else if ty.kind == .basic && ty.basic == .ldouble_ {
-		// Spill the value where it will survive the call, then push its *address* so
-		// the rest of the machinery treats it as the pointer-sized argument it now is.
-		// The 16 bytes stay on the stack until the call returns, which is exactly the
-		// window the callee has to read them.
-		g.line('  sub $16, %rsp')
-		g.line('  fstpt (%rsp)')
-		g.depth += 2
-		g.line('  mov %rsp, %rax')
-		g.push()
 	} else {
 		g.push()
 	}
@@ -649,89 +628,17 @@ fn (mut g AsmGen) gen_num(node &ast.Node) {
 			g.line('  movq %rax, %xmm0')
 			return
 		}
-		if ty.basic == .double_ {
+		if ty.basic == .double_ || ty.basic == .ldouble_ {
+			// A `long double` is a `double` on this target — 8 bytes, measured
+			// against tcc — so it loads exactly as one does. The 80-bit `fldt`
+			// path below the old code took here is not reached; it assumed a
+			// ten-byte value that the eight-byte layout never held.
 			g.line('  mov $${f64_bits(node.fval)}, %rax')
 			g.line('  movq %rax, %xmm0')
 			return
 		}
-		if ty.basic == .ldouble_ {
-			// An 80-bit value is ten bytes and the instruction wants it in memory, so
-			// it is written into the red zone below %rsp and loaded from there.
-			bytes := f80_bytes(lit.fval)
-			mut lo := u64(0)
-			for i in 0 .. 8 {
-				lo |= u64(bytes[i]) << (8 * i)
-			}
-			mut hi := u64(0)
-			for i in 8 .. 10 {
-				hi |= u64(bytes[i]) << (8 * (i - 8))
-			}
-			g.line('  mov $${lo}, %rax')
-			g.line('  mov %rax, -16(%rsp)')
-			g.line('  mov $${hi}, %rax')
-			g.line('  mov %rax, -8(%rsp)')
-			g.line('  fldt -16(%rsp)')
-			return
-		}
 	}
 	g.line('  mov $${node.num}, %rax')
-}
-
-// f80_bytes is the 80-bit extended encoding of a double, little-endian.
-//
-// The extended format has a 15-bit exponent biased by 16383 and an *explicit*
-// integer bit, which a double's eight bytes do not have, so the conversion is
-// arithmetic rather than a copy. This matters because the target's `long double`
-// is measured at 8 bytes while x86's 80-bit format is what `fldt` loads, so the
-// two only agree above 2^63.
-fn f80_bytes(d f64) []u8 {
-	// The bit pattern, not the value: `u64(d)` would convert 1.0 to 1 and then
-	// the subnormal path below would shift that 1 left 52 times, producing a
-	// mantissa of 2^48 and an exponent to match — which is exactly the garbage
-	// `long double` literals used to load as. `f32_bits` and `f64_bits` just above
-	// reinterpret for the same reason.
-	bits := unsafe { *(&u64(&d)) }
-	mut sign := u64(0)
-	if d < 0 {
-		sign = 1
-	}
-	exp := (bits >> 52) & 0x7ff
-	mut frac := bits & 0xfffffffffffff
-	mut mant := u64(0)
-	mut biased := u64(0)
-	if exp == 0 {
-		if frac == 0 {
-			// Zero: the mantissa and the exponent are already right.
-		} else {
-			// A subnormal double has no normal extended form. It is shifted left
-			// until its leading bit emerges and the exponent records how far it moved.
-			mut e := 0
-			for frac & 0x0010000000000000 == 0 {
-				frac <<= 1
-				e++
-			}
-			mant = frac
-			biased = u64(16383 - 1022 - e)
-		}
-	} else if exp == 0x7ff {
-		// An infinity or a NaN, both of which have the maximum exponent.
-		mant = 0x8000000000000000 | (frac << 11)
-		biased = 0x7fff
-	} else {
-		mant = 0x8000000000000000 | (frac << 11)
-		biased = exp - 1023 + 16383
-	}
-	mut out := []u8{len: 10, init: 0}
-	for i in 0 .. 8 {
-		out[i] = u8(mant >> (8 * i))
-	}
-	for i in 0 .. 2 {
-		// The sign lives in bit 15 of the last two bytes and the exponent in
-		// bits 14:0 — `(biased << 1) | sign` had them backwards, putting the
-		// sign in bit 0 and shifting the exponent out of place.
-		out[8 + i] = u8(((sign << 15) | biased) >> (8 * i))
-	}
-	return out
 }
 
 // gen_neg negates the accumulator.
@@ -747,15 +654,14 @@ fn (mut g AsmGen) gen_neg(ty &ast.Type) {
 			g.line('  xorps %xmm1, %xmm0')
 			return
 		}
-		if ty.basic == .double_ {
+		if ty.basic == .double_ || ty.basic == .ldouble_ {
+			// A `long double` negates as a `double` — 8 bytes in `%xmm0`. The `fchs`
+			// that used to be here negated whatever the x87 stack held, which was
+			// not the value.
 			g.line('  mov $1, %rax')
 			g.line('  shl $63, %rax')
 			g.line('  movq %rax, %xmm1')
 			g.line('  xorpd %xmm1, %xmm0')
-			return
-		}
-		if ty.basic == .ldouble_ {
-			g.line('  fchs')
 			return
 		}
 	}
@@ -895,16 +801,8 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 			}
 			continue
 		}
-		if ty.kind == .basic && ty.basic == .ldouble_ {
-			// The address `push_args_pass` pushed is loaded like any other pointer-sized
-			// argument, which is what it now is.
-			if !c.by_stack && gp < gp_max {
-				g.pop(arg_regs[gp])
-				gp++
-			}
-			continue
-		}
-		if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_) {
+		if ty.kind == .basic
+			&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_) {
 			is_variadic := node.func_ty != unsafe { nil } && node.func_ty.is_variadic
 			if !c.by_stack && fp < fp_max {
 				g.popf(fp)
@@ -957,18 +855,12 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 	// ABI, which has no such save area.
 	g.line('  sub $${shadow_space}, %rsp')
 	g.line('  call *%r10')
-	// The by-reference spill is released here too. It is not part of `stack_args` — those
-	// are the arguments the *callee* pops — so without this the frame would grow by 16
-	// bytes at every call passing a `long double`, and the function would end with a
-	// depth it could never account for.
-	mut spill := 0
-	for i, arg in node.args {
-		if arg.ty.kind == .basic && arg.ty.basic == .ldouble_ && !classes[i].by_stack {
-			spill += 2
-		}
-	}
-	g.line('  add $${shadow_space + (stack_args + spill) * 8}, %rsp')
-	g.depth -= stack_args + spill
+	// A `long double` used to spill sixteen bytes here that had to be released
+	// alongside the shadow space. It no longer spills — it is eight bytes and
+	// travels as a `double` does — so there is nothing beyond `stack_args` to
+	// account for.
+	g.line('  add $${shadow_space + stack_args * 8}, %rsp')
+	g.depth -= stack_args
 
 	// A narrow return type leaves the upper bits of %rax undefined and the next
 	// operation would read them, so they are cleared here rather than at every use.
@@ -1017,12 +909,12 @@ fn (mut g AsmGen) gen_binary(node &ast.Node) {
 	}
 	lt := lhs.ty
 
-	if lt.kind == .basic && (lt.basic == .float_ || lt.basic == .double_) {
+	if lt.kind == .basic && (lt.basic == .float_ || lt.basic == .double_ || lt.basic == .ldouble_) {
+		// A `long double` computes as a `double` — 8 bytes, measured against tcc.
+		// The x87 `gen_f80_binary` below assumed a ten-byte value that the
+		// eight-byte layout never held; routing here keeps the arithmetic in the
+		// SSE registers where every producer in this generator leaves it.
 		g.gen_float_binary(node, lt)
-		return
-	}
-	if lt.kind == .basic && lt.basic == .ldouble_ {
-		g.gen_f80_binary(node)
 		return
 	}
 
@@ -1169,31 +1061,6 @@ fn (mut g AsmGen) gen_float_binary(node &ast.Node, lt &ast.Type) {
 		}
 		else {
 			g.errors << 'operator at line ${node.tok.line.disp_line} is not a floating operator this generator emits'
-		}
-	}
-}
-
-fn (mut g AsmGen) gen_f80_binary(node &ast.Node) {
-	g.gen_expr(node.lhs)
-	g.gen_expr(node.rhs)
-	match node.kind {
-		.add { g.line('  faddp') }
-		.sub { g.line('  fsubrp') }
-		.mul { g.line('  fmulp') }
-		.div { g.line('  fdivrp') }
-		.eq, .ne, .lt, .le {
-			g.line('  fcomip')
-			g.line('  fstp %st(0)')
-			match node.kind {
-				.eq { g.line('  sete %al') }
-				.ne { g.line('  setne %al') }
-				.lt { g.line('  seta %al') }
-				else { g.line('  setae %al') }
-			}
-			g.line('  movzb %al, %rax')
-		}
-		else {
-			g.errors << 'operator at line ${node.tok.line.disp_line} is not an extended-precision operator this generator emits'
 		}
 	}
 }
@@ -1536,8 +1403,10 @@ fn (mut g AsmGen) gen_va_start(node &ast.Node) {
 fn (mut g AsmGen) gen_va_arg(node &ast.Node) {
 	ty := node.ty
 	sz := ty.size
-	is_ldouble := ty.kind == .basic && ty.basic == .ldouble_
-	by_ref := sz > 16 || is_ldouble
+	// A `long double` is eight bytes and travels as a `double` does, so it is read
+	// like one — `g.load` below emits `movsd` for it. The by-reference rule used to
+	// name it explicitly, for a sixteen-byte value this target never had.
+	by_ref := sz > 16
 
 	// `%r11` holds the address of the `va_list` object and `%rax` walks the slots.
 	// They have to be kept apart: the advance writes *through the object's address*
@@ -1556,9 +1425,6 @@ fn (mut g AsmGen) gen_va_arg(node &ast.Node) {
 
 	if by_ref {
 		g.line('  mov (%rax), %rax') // the slot holds the address of the object
-		if is_ldouble {
-			g.line('  fldt (%rax)')
-		}
 		g.line('  addq $8, (%r11)')
 		return
 	}
@@ -1631,21 +1497,14 @@ fn (mut g AsmGen) spill_params(fun &ast.Obj) {
 			}
 			continue
 		}
-		if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_) {
+		if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_) {
+			// A `long double` spills exactly as a `double` does — 8 bytes from its
+			// XMM register to the frame slot. The `fldt`/`fstpt` through an address
+			// that used to be here treated the register as a pointer to sixteen
+			// bytes the caller never laid out; on this target the caller passes the
+			// 64-bit value itself, measured against tcc.
 			g.store_fp(fp, param.offset, ty.size)
 			fp++
-			continue
-		}
-		if ty.kind == .basic && ty.basic == .ldouble_ {
-			// The register holds the *address* of the caller's 16 bytes, not the value,
-			// so the value is loaded through it and then written to the frame slot. This
-			// is the same two instructions the psABI needed in the other direction, which
-			// is how the mistake is easy to make: `fldt` from the register, `fstpt` to
-			// the slot, and the general-register spill is not used at all.
-			reg := arg_regs[gp]
-			g.line('  fldt (${reg})')
-			g.line('  fstpt ${param.offset}(%rbp)')
-			gp++
 			continue
 		}
 		g.store_gp(gp, param.offset, ty.size)

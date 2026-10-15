@@ -275,39 +275,40 @@ fn test_a_symbol_without_a_dollar_sign_is_not_quoted() {
 	assert text.contains('lea q(%rip), %rax'), 'an ordinary symbol should not be quoted'
 }
 
-fn test_a_long_double_argument_is_passed_by_address() {
-	// [MS x64 2.2.5] Anything wider than eight bytes that is not a structure is passed by
-	// reference. gcc does `fstpt` to its own frame and `movq` the address into a general
-	// register; there is no x87 argument on the stack on this target at all. The previous
-	// version of this test asserted the psABI's two stack slots and had to be rewritten.
+fn test_a_long_double_argument_travels_as_a_double() {
+	// A `long double` is eight bytes on this target — measured against tcc, which
+	// passes one exactly as it passes a `double` — so it rides the `double` path
+	// everywhere: spilled to the stack slot like any float argument, mirrored
+	// into the SSE register and the general register the variadic callee walks.
+	// The previous version of this test asserted the by-reference spill
+	// (`fstpt (%rsp)` plus the address in `%rdx`), which passed an address where
+	// msvcrt's `printf` read a number.
 	text, errs := generated('int f(char *b, char *g, ...); int h(void) { char b[8]; return f(b, "", (long double)1.5); }')
 	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
-	assert text.contains('  fstpt (%rsp)'), 'the value was not spilled'
-	// Then the address is pushed, so the ordinary pop loads it like a pointer.
-	assert text.contains('  mov %rsp, %rax'), 'the address of the spill was not taken'
-	assert text.contains('  pop %rdx'), 'the address did not reach the second integer register'
+	assert !text.contains('fstpt'), 'the value must not touch the x87 stack'
+	assert text.contains('  movsd (%rsp), %xmm0'), 'the float copy did not reach its SSE register'
+	assert text.contains('  movq %xmm0, %r8'), 'the address did not reach the third integer register'
 }
 
-fn test_the_by_reference_spill_is_released_after_the_call() {
-	// The spill is not one of `stack_args` — those are what the *callee* pops — so
-	// without adding it to the cleanup the frame grew 16 bytes at every such call and the
-	// function ended with a depth it could never account for.
+fn test_a_long_double_call_cleans_only_the_shadow_space() {
+	// There is no sixteen-byte by-reference spill anymore, so the cleanup is the
+	// 32 bytes of home area and nothing else — the `add $48` this test used to
+	// assert released stack the call never took out.
 	text, errs := generated('int f(...); int h(void) { return f((long double)1.5); }')
 	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
-	// 32 of home area plus the 16-byte spill, which is 48 and not a multiple of 16 on its
-	// own because the spill is below the area and was already accounted for in the depth.
-	assert text.contains('  add $48, %rsp'), 'got: ' + text
+	assert text.contains('  add $32, %rsp'), 'got: ' + text
+	assert !text.contains('  add $48, %rsp'), 'the phantom spill is still being released'
 }
 
-fn test_a_long_double_parameter_is_loaded_through_its_address() {
-	// The callee receives an address, so the value is `fldt`-ed from the register and
-	// `fstpt`-ed to the frame slot. The general-register spill is not used at all, which
-	// is what makes this easy to get backwards: it is the psABI's pair with the operands
-	// swapped, and swapping it back is the bug this replaced.
+fn test_a_long_double_parameter_spills_from_its_xmm_register() {
+	// The callee receives the 64-bit value in its XMM register like any `double`,
+	// so it spills that register to the frame slot. The `fldt` from a register
+	// used to treat the register as an address, loading whatever sixteen bytes it
+	// pointed at.
 	text, errs := generated('long double f(long double x) { return x + x; }')
 	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
-	assert text.contains('  fldt (%rcx)'), 'the parameter was not loaded through its address'
-	assert text.contains('  fstpt'), 'the parameter was not written to its frame slot'
+	assert text.contains('  movsd %xmm0, -8(%rbp)'), 'the parameter was not spilled from its SSE register'
+	assert !text.contains('fldt'), 'the parameter is still loaded through an address'
 }
 
 fn test_an_ordinary_stack_argument_is_still_one_slot() {

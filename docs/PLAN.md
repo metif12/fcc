@@ -1169,3 +1169,39 @@ That is as far as measurement goes. The value is proven right and the handoff is
 proven wrong, and they are separated by the integer readback above, so the next
 step is not to re-measure the value. It is to find what `printf` reads that is
 not the stack slot both compilers fill.
+
+**`long double` is a `double` in every path, and the two reproducers now print
+gcc's answer.** The previous entry left the value proven right and the variadic
+handoff proven wrong, with the size as the prime suspect. The size was a
+red herring for the crash: the defect was that one type took two different code
+paths depending on which function looked at it.
+
+tcc reports `sizeof` and `_Alignof` as 8 and 8 on this host, measured, and passes
+a `long double` exactly as it passes a `double` — the 64-bit value itself in a
+general register for a variadic call, which is what msvcrt's `printf` reads for
+`%Lf`. gcc reports 16 and 16 and spills an 80-bit value, which only its own
+statically-linked `printf` reads. Since tcc is the primary oracle — same headers,
+same objects, same C library — this generator agrees with tcc throughout:
+
+- `gen_num`, `load`, `store`, `gen_binary`, the callee spill, the argument
+  classifier, `push_one`, and `cmp_zero` all treat `.ldouble_` as `.double_`.
+- the classifier's old by-reference rule is gone, with it the sixteen-byte
+  `push_args` spill, the `spill` accounting in the call cleanup, and the
+  `fldt`-through-an-address in the callee prologue.
+- `cast` needs no special case at all: `type_id` maps `.ldouble_` to `type_f64`,
+  so a conversion between the two is a no-op and every other conversion is what
+  it would be from a `double`.
+- `gen_f80_binary`, `f80_bytes`, and the `type_f80` constant are deleted — the
+  first had no callers left, the second no callers at all, the third flagged by
+  the compiler itself.
+
+The `1.0L`-suffix typing fix and the two `f80_bytes` encoding fixes from the
+previous commit stay, because they were measured right on their own: the division
+is `fdivrp`-class SSE now and the literals encode correctly.
+
+Two controls kept this honest. `a == 0.3333333333333333L` answers 1 under fcc
+where gcc answers 0 — and under tcc it answers 1 as well, because tcc also
+computes in double precision. That is agreement with the primary oracle, not a
+divergence. And `tests/endtoend/long_double.c` prints only magnitudes every
+formatter agrees on, so the msvcrt-vs-mingw wide-digit difference cannot hide in
+it.

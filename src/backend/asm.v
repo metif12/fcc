@@ -258,12 +258,11 @@ fn (mut g AsmGen) load(ty &ast.Type) {
 				g.line('  movss (%rax), %xmm0')
 				return
 			}
-			if ty.basic == .double_ {
+			// A `long double` loads as a `double` — 8 bytes, measured against tcc.
+			// The `fldt` that used to be here read ten bytes from an eight-byte
+			// slot, taking the exponent from past its end.
+			if ty.basic == .double_ || ty.basic == .ldouble_ {
 				g.line('  movsd (%rax), %xmm0')
-				return
-			}
-			if ty.basic == .ldouble_ {
-				g.line('  fldt (%rax)')
 				return
 			}
 		}
@@ -312,14 +311,13 @@ fn (mut g AsmGen) store(ty &ast.Type) {
 				g.line('  movss %xmm0, (%rcx)')
 				return
 			}
-			if ty.basic == .double_ {
-				g.line('  movsd %xmm0, (%rcx)')
-				return
-			}
-			if ty.basic == .ldouble_ {
-				g.line('  fstpt (%rcx)')
-				return
-			}
+  if ty.basic == .double_ || ty.basic == .ldouble_ {
+  // A `long double` stores as a `double` — 8 bytes. The `fstpt` that used to be
+  // here popped the x87 stack, which held whatever was there rather than the
+  // value in `%xmm0` that every other path in this generator produces.
+  g.line('  movsd %xmm0, (%rcx)')
+  return
+  }
 		}
 		else {}
 	}
@@ -339,17 +337,14 @@ fn (mut g AsmGen) cmp_zero(ty &ast.Type) {
 				g.line('  ucomiss %xmm1, %xmm0')
 				return
 			}
-			if ty.basic == .double_ {
-				g.line('  xorpd %xmm1, %xmm1')
-				g.line('  ucomisd %xmm1, %xmm0')
-				return
-			}
-			if ty.basic == .ldouble_ {
-				g.line('  fldz')
-				g.line('  fucomip')
-				g.line('  fstp %st(0)')
-				return
-			}
+  if ty.basic == .double_ || ty.basic == .ldouble_ {
+  // A `long double` compares as a `double` — 8 bytes in `%xmm0`. The `fldz` /
+  // `fucomip` sequence that used to be here compared the value against whatever
+  // the x87 stack held, which was not it.
+  g.line('  xorpd %xmm1, %xmm1')
+  g.line('  ucomisd %xmm1, %xmm0')
+  return
+  }
 		}
 		else {}
 	}
@@ -369,9 +364,11 @@ const type_u8 = 4
 const type_u16 = 5
 const type_u32 = 6
 const type_u64 = 7
-const type_f32 = 8
-const type_f64 = 9
-const type_f80 = 10
+  const type_f32 = 8
+  const type_f64 = 9
+  // There is no `type_f80`: a `long double` maps to `type_f64` in `type_id`,
+  // because it is eight bytes on this target. The `f80` rows still present in
+  // the tables below are unreachable through it.
 
 fn type_id(ty &ast.Type) int {
 	if ty.kind != .basic {
@@ -393,9 +390,8 @@ fn type_id(ty &ast.Type) int {
 		.long_, .llong_ {
 			if ty.is_unsigned { type_u64 } else { type_i64 }
 		}
-		.float_ { type_f32 }
-		.double_ { type_f64 }
-		.ldouble_ { type_f80 }
+	.float_ { type_f32 }
+	.double_, .ldouble_ { type_f64 }
 		else { type_u64 }
 	}
 }
