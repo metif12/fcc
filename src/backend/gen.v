@@ -1410,7 +1410,36 @@ fn (mut g AsmGen) emit_text(globals []&ast.Obj) {
 
 		g.line('  push %rbp')
 		g.line('  mov %rsp, %rbp')
-		if fun.stack_size > 0 {
+		// A frame larger than a page has to be reached one page at a time. `sub $N,
+		// %rsp` on its own moves the stack pointer past the guard page, and the
+		// first store into the frame lands on a page the system has never
+		// committed — an access violation, not a slow path. Windows x64 names the
+		// probe as a requirement rather than an optimisation, and the reference
+		// reaches for `___chkstk_ms` exactly here.
+		//
+		// It is done inline instead of by calling out, because that symbol is in
+		// libgcc and this generator cannot assume it was linked. The cost is the
+		// same instruction per page, and the frames it applies to are the ones
+		// where a store into the frame is going to be a `rep stosb` over kilobytes
+		// anyway.
+		//
+		// The descent is by whole pages and the remainder afterwards, so the final
+		// %rsp is the same as `sub $N` would leave for any N — including one that
+		// is not a multiple of 16, where the remainder is what keeps it aligned.
+		if fun.stack_size > 4096 {
+			pid := g.next_label()
+			g.line('  mov $${fun.stack_size}, %rax')
+			g.line('.L.probe.${pid}:')
+			g.line('  cmp $4096, %rax')
+			g.line('  jbe .L.probe.last.${pid}')
+			g.line('  sub $4096, %rsp')
+			g.line('  movq $0, (%rsp)')
+			g.line('  sub $4096, %rax')
+			g.line('  jmp .L.probe.${pid}')
+			g.line('.L.probe.last.${pid}:')
+			g.line('  sub %rax, %rsp')
+			g.line('  movq $0, (%rsp)')
+		} else if fun.stack_size > 0 {
 			g.line('  sub $${fun.stack_size}, %rsp')
 		}
 		if fun.alloca_bottom != unsafe { nil } {

@@ -87,6 +87,30 @@ fn main() {
 			}
 		}
 
+		// A tcc binary that *links* is not yet an oracle that answers. tcc reaches
+		// for `__chkstk` on any frame over a page, the same requirement fcc had to
+		// learn, and on this host that symbol is not linked into a standalone exe —
+		// so the binary builds and then dies with an NTSTATUS before printing
+		// anything. That is a statement about the oracle, not about fcc, and gcc
+		// answers the same question without the dependency.
+		//
+		// It is gated on the oracle having produced nothing, so a program that
+		// crashes the oracle *after* printing is still reported as it stands: that
+		// is a real difference and must not be swept up. And the comparison still
+		// happens, against gcc, so a defect in fcc shows up exactly as before.
+		if oracle_name == 'tcc' {
+			mut probe := os.exec([oracle_exe])
+			if probe.output.trim_space() == '' && probe.exit_code != 0 {
+				oracle_name = 'gcc'
+				oracle_exe = os.join_path(probe_dir, base + '_cmp_gcc.exe')
+				if os.exec([gcc, '-o', oracle_exe, src]).exit_code != 0 {
+					println('BLOCKED ${name}: tcc cannot run it and gcc refused it')
+					blocked++
+					continue
+				}
+			}
+		}
+
 		s_path := os.join_path(probe_dir, base + '_cmp_vcc.s')
 		vcc_exe := os.join_path(probe_dir, base + '_cmp_fcc.exe')
 		mut rc := os.exec([vcc, '-I', tcc_include, '-S', '-o', s_path, src])

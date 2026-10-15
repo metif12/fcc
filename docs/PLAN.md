@@ -972,3 +972,29 @@ seventeen significant digits will diverge from gcc**, for the same reason. That 
 an oracle artefact and belongs with the measured-but-not-defective list, alongside
 `long` and `wchar_t`. `tests/endtoend/u64_wide_cast.c` is written to avoid it: it
 compares by equality and prints only values every formatter agrees on.
+
+**A frame over a page needs a guard probe, and tcc on this host cannot be its
+oracle.** Windows x64 requires that a frame larger than one page be reached one page
+at a time, and this is not an optimisation: `sub $N, %rsp` on its own moves the
+stack pointer past the guard page, and the first store into the frame lands on a
+page the system never committed. A single function with one 64KB local and no
+recursion access-violated under fcc while gcc answered `frame-only=3`, which is the
+whole defect with nothing else in the picture. Every local in the suite and in
+`tests/endtoend/` was below the threshold, which is why it was never seen.
+
+fcc now emits the descent inline: whole pages, then the remainder, so the final
+`%rsp` is what `sub $N` would have left. The reference reaches for `___chkstk_ms`
+at exactly this point, but that symbol lives in libgcc and a generator cannot assume
+it was linked, so this is done without one. The threshold is exactly 4096 and the
+remainder path keeps a frame that is not a whole number of pages aligned.
+
+**The oracle turned out to have the same appetite.** tcc also emits a `__chkstk`
+call for a frame over a page, it links, and then the binary dies with `0xC00000FD`
+before printing anything — because on this host the symbol is not linked into a
+standalone exe either. So a tcc binary that built was not yet an oracle that
+answered, and `stack_probe.c` compared fcc's correct answer against a crash. The
+probe now falls back to gcc when the oracle produces nothing and exits non-zero,
+and it is gated on both conditions together: a program that crashes the oracle
+*after* printing is still reported as it stands, because that is a real difference.
+The comparison still happens, against gcc, so a defect in fcc shows up as before.
+Only `stack_probe.c` switched oracle; the other seventeen still report against tcc.
