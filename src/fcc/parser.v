@@ -306,7 +306,38 @@ fn (mut p Parser) error_at(tok ast.Token, msg string) {
 	if p.quiet > 0 {
 		return
 	}
-	p.errors << 'tcc: ${p.token_file(tok)}:${tok.line.disp_line}: ${msg}'
+	p.errors << p.render(tok, msg, '')
+}
+
+// error_at_help records a diagnostic with a `help:` follow-up, for the errors
+// whose fix is known — a missing `;`, a mistyped suffix. Most call sites use
+// `error_at`: a help that guesses is worse than none, so only patterns with a
+// single plausible fix get one.
+fn (mut p Parser) error_at_help(tok ast.Token, msg string, help string) {
+	if p.quiet > 0 {
+		return
+	}
+	p.errors << p.render(tok, msg, help)
+}
+
+// render builds the full diagnostic text: the terse first line, byte-identical
+// to what this compiler always emitted (`tcc: file:line: message`, which is
+// what V's driver keys on), followed by the V-style source block and the
+// macro-expansion notes, when there is source to show. The column rides along
+// only when the token has one — a synthesized location reports none, and
+// printing `:0:` for it would be a lie about precision.
+fn (mut p Parser) render(tok ast.Token, msg string, help string) string {
+	mut s := 'tcc: ${p.token_file(tok)}:${tok.line.disp_line}'
+	if tok.line.disp_col >= 1 {
+		s += ':${tok.line.disp_col}'
+	}
+	s += ': ${msg}'
+	s += diag_block(tok)
+	if help != '' {
+		s += '\n     = help: ${help}'
+	}
+	s += diag_notes(tok)
+	return s
 }
 
 // token_file names the file a token came from, falling back to the translation unit's
@@ -345,7 +376,21 @@ fn (mut p Parser) warn_at(tok ast.Token, msg string) {
 	if p.quiet > 0 {
 		return
 	}
-	p.warnings << 'tcc: ${p.token_file(tok)}:${tok.line.disp_line}: warning: ${msg}'
+	p.warnings << p.render_warn(tok, msg)
+}
+
+// render_warn builds a warning the same way `render` builds an error, with the
+// `warning:` spelling tcc and gcc both use — and V's driver looks for when
+// deciding a warning is not a failure.
+fn (mut p Parser) render_warn(tok ast.Token, msg string) string {
+	mut s := 'tcc: ${p.token_file(tok)}:${tok.line.disp_line}'
+	if tok.line.disp_col >= 1 {
+		s += ':${tok.line.disp_col}'
+	}
+	s += ': warning: ${msg}'
+	s += diag_block(tok)
+	s += diag_notes(tok)
+	return s
 }
 
 // --- scopes ---
@@ -1887,7 +1932,7 @@ fn (mut p Parser) consume_decl_comma() bool {
 	if tok.kind == .eof || p.at('}') {
 		return false
 	}
-	p.error_at(tok, "';' expected (got '${tok.text}')")
+	p.error_at_help(tok, "';' expected (got '${tok.text}')", 'a declaration or statement ends with `;` — one is missing before this token')
 	return false
 }
 
@@ -3315,7 +3360,7 @@ fn (mut p Parser) primary() &ast.Node {
 			obj.is_static = false
 			return p.new_var_node(obj, tok)
 		}
-		p.error_at(tok, 'undefined variable "${tok.text}"')
+		p.error_at_help(tok, 'undefined variable "${tok.text}"', 'it was never declared in this scope — check the spelling against its declaration')
 		return p.unsupported_expression()
 	}
 
@@ -3338,8 +3383,8 @@ fn (mut p Parser) primary() &ast.Node {
 		if tok.text.len > 0 && is_number_start(tok.text[0]) {
 			bad := invalid_numeric_suffix(tok.text)
 			if bad != '' {
-				kind := if is_flonum(ty) { 'floating' } else { 'integer' }
-				p.error_at(tok, "invalid suffix '${bad}' on ${kind} constant")
+		kind := if is_flonum(ty) { 'floating' } else { 'integer' }
+		p.error_at_help(tok, "invalid suffix '${bad}' on ${kind} constant", 'integer suffixes are u/U, l/L and ll/LL; floating suffixes are f/F and l/L')
 			}
 		}
 		if is_flonum(ty) {
