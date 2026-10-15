@@ -1110,3 +1110,16 @@ The prime suspect is the size. `ty_ldouble` is declared 8 bytes while `fldt` and
 instructions that fill it assume. That is a different defect from the two fixed
 here — it is about layout, not about encoding — and it needs its own measurement
 before anyone changes a size.
+
+**The remaining `long double` failure is overlap, measured in the frame.** Two
+`long double` locals land at `-16(%rbp)` and `-24(%rbp)` — eight bytes apart —
+while `fldt` and `fstpt` move ten. Writing `b` covers `[rbp-24, rbp-14)`, which
+reaches into `a`'s slot at `[rbp-16, rbp-8)`. And even a single local is short:
+its two exponent bytes live past the eight bytes the layout gave it, so a read
+gets them from whatever happens to be above. That is why the answer is zero
+rather than a wrong number — the mantissa arrives and the exponent does not.
+
+So `ty_ldouble` at 8 bytes and x87 ten-byte accesses cannot both stand. gcc keeps
+the 80-bit value in 16 bytes. Changing the size moves every frame, struct and
+array stride that contains one, which is why it is recorded here and not done
+here.
