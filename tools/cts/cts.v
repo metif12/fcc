@@ -127,9 +127,13 @@ fn main() {
 
 // run_guarded runs a binary and returns its merged output, exit code, and whether
 // the watchdog fired. A hung test is a report line, never the end of the run.
+// The binary runs with the scratch directory as its working directory, because
+// some tests write files beside themselves and those artifacts must not land in
+// the tree the runner was started from.
 fn run_guarded(exe string) (string, int, bool) {
 	mut p := os.new_process(exe)
 	p.set_redirect_stdio()
+	p.set_work_folder(os.dir(exe))
 	p.run()
 	deadline := time.now().add(per_test_ms * time.millisecond)
 	for p.is_alive() {
