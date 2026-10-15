@@ -1035,3 +1035,45 @@ Not fixed here. The value is worth more than the tempo: the smallest reproducers
 are three lines each and both are recorded above, so the work left is to make one
 of them print gcc's answer and then to check the other, rather than to find out
 that it is real.
+
+**The `long double` argument defect has a cause, and it is one line of generated
+assembly.** Recorded above as an open item with two symptoms; this is what the
+generated file actually says. For `long double a = 1.0L / 3.0L;` followed by
+`printf("%.15Lf\n", a)`:
+
+```
+  mov  $4613937818241073152, %rax   ; 3.0 — a double, in %xmm0
+  mov  $4607182418800017408, %rax   ; 1.0
+  divsd %xmm1, %xmm0                ; SSE: the division is computed in %xmm0
+  pop  %rcx                         ; %rcx = &a
+  fstpt (%rcx)                      ; x87: the store pops the x87 stack
+```
+
+The division is a `double` division and the store is an x87 store. `asm.v:266` loads
+a `long double` with `fldt`, `gen_f80_binary` divides with `fdivrp`, and `asm.v:320`
+stores with `fstpt` — the whole `long double` path is x87 and internally consistent
+— but the value arrives in `%xmm0` and is then stored by an instruction that pops a
+stack it was never pushed onto. The store does not read wrong data, it reads an empty
+register stack, which is why the answer is `0.000000000000000` rather than a wrong
+number, and why passing a `long double` to a function then access-violates: the
+caller and the callee disagree about where the value lives.
+
+So the defect is one of two upstream things, and they need telling apart before any
+change is made:
+
+- either `1.0L` is being typed `double`, in which case the implicit conversion to
+  `long double` is missing and `'f64f80'` in `cast_instructions` — which already
+  exists and already does `movsd %xmm0, -8(%rsp); fldl -8(%rsp)` — is simply not
+  emitted; or
+- the literals are `long double` and the code generator is loading them through the
+  `double` literal path, which would be a different defect in a different place.
+
+The second is checkable from the generated file alone, without a compiler rebuild: a
+`long double` literal loaded through the x87 path appears as `fldt` or a store into
+memory followed by `fldl`, and neither appears here — both constants arrive with
+`mov $imm64, %rax; movq %rax, %xmm0`, which is the `double` literal path. So the
+literals are being typed `double`, and the missing piece is the conversion.
+
+The fix is therefore to emit the `f64f80` cast on the assignment, not to touch the
+store — and the fact that `f64f80` already exists and already does the right thing is
+what makes this a one-line change rather than a rewrite of the `long double` path.
