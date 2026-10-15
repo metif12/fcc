@@ -1213,11 +1213,17 @@ fn (mut p Parser) parse_suffix() Suffix {
 fn (mut p Parser) build_decl(base &ast.Type, d &Decl) &ast.Type {
 	mut t := base
 	if nested := d.nested {
-		for i := d.suffixes.len - 1; i >= 0; i-- {
-			t = p.apply_suffix(t, d.suffixes[i])
-		}
+		// Pointers before suffixes, as in the non-nested case below: in
+		// `int *(*p)(int)` the outer `*` belongs to the return type (`int *`),
+		// and the `(int)` makes `(*p)` a function returning it. Doing suffixes
+		// first put the pointer outside the function — `p` came out as
+		// pointer-to-pointer instead of pointer-to-function — and a call
+		// through it dereferenced the function's own code bytes.
 		for _ in 0 .. d.ptrs {
 			t = pointer_to(t)
+		}
+		for i := d.suffixes.len - 1; i >= 0; i-- {
+			t = p.apply_suffix(t, d.suffixes[i])
 		}
 		return p.build_decl(t, nested)
 	}

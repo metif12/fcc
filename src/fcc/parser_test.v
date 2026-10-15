@@ -153,6 +153,33 @@ fn test_function_pointer_declarator() {
 	assert !r.globals[0].ty.base.is_variadic
 }
 
+fn test_nested_function_pointer_declarator() {
+	// `int *(*p)(int)` is a pointer to a function taking an int and returning a
+	// pointer to int — the outer `*` belongs to the return type, not to another
+	// level of pointer. Reading it inside-out the other way gives
+	// pointer-to-pointer-to-function, and a call through it then dereferences the
+	// function's own code bytes instead of calling it.
+	r := parsed('int *(*p)(int);\n')
+	assert r.errors.len == 0
+	assert r.globals[0].ty.kind == .pointer
+	assert r.globals[0].ty.base.kind == .func
+	assert r.globals[0].ty.base.ret_type.kind == .pointer
+	assert r.globals[0].ty.base.ret_type.base == ty_int
+}
+
+fn test_function_returning_function_pointer_declarator() {
+	// `int (*(*p)(int))(int)` is a pointer to a function taking an int and
+	// returning a pointer to a function taking an int and returning an int.
+	r := parsed('int (*(*p)(int))(int);\n')
+	assert r.errors.len == 0
+	assert r.globals[0].ty.kind == .pointer
+	assert r.globals[0].ty.base.kind == .func
+	inner := r.globals[0].ty.base.ret_type
+	assert inner.kind == .pointer
+	assert inner.base.kind == .func
+	assert inner.base.ret_type == ty_int
+}
+
 fn test_a_variadic_function_is_marked() {
 	r := parsed('int printf_like(const char *fmt, ...);\n')
 	assert r.errors.len == 0

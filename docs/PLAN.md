@@ -1267,3 +1267,25 @@ violations where tcc matches expected, three silent wrong answers, one link
 failure. The 00124 nested-function-pointer crash is characterized in the log
 with its two-instruction control but not yet fixed; it is the next item, not
 this commit.
+
+**Nested function declarators built inside-out backwards, and a call through one
+dereferenced its own code.** c-testsuite 00124 — `(*(*p)(0, 2))(2, 2)` where `p`
+is a pointer to a function returning a pointer to a function — access-violated
+while tcc returned 0.
+
+In `int *(*p)(int)` the outer `*` belongs to the return type (`int *`), and the
+`(int)` makes `(*p)` a function returning it. `build_decl` applied suffixes
+before pointers for a nested declarator — the reverse of its own non-nested
+order — so `p` came out as pointer-to-pointer-to-function instead of
+pointer-to-function-returning-pointer. A call through it then emitted a load of
+the callee's first eight code bytes and jumped there.
+
+Proven by removing that one `mov (%rax), %rax` from the generated file by hand:
+the same program then printed both answers and exited 0, before any compiler
+change. The minimal trigger is narrower than the test that found it: any call
+through a function pointer returning a pointer crashes, while one returning an
+`int` works — `(*fp)(21)` always worked, `(*p)(0, 2)` returning `int *` never did.
+
+Two type-level unit tests pin the shapes (`int *(*p)(int)` and the full
+`int (*(*p)(int))(int)`), and `tests/endtoend/func_ptr_ret.c` covers the split
+and nested calls end to end against tcc.
