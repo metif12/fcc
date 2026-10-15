@@ -998,3 +998,40 @@ and it is gated on both conditions together: a program that crashes the oracle
 *after* printing is still reported as it stands, because that is a real difference.
 The comparison still happens, against gcc, so a defect in fcc shows up as before.
 Only `stack_probe.c` switched oracle; the other seventeen still report against tcc.
+
+**A `long double` argument does not survive being passed.** Two symptoms, both
+reproducible, and they are different enough that they are probably one upstream
+cause in the spill machinery rather than two defects:
+
+```c
+#include <stdio.h>
+static long double add_ld(long double a, long double b) { return a + b; }
+int main(void) { printf("%.15Lf\n", add_ld(1.0L / 3.0L, 0.0L)); }
+```
+
+- Passing a `long double` to a **non-variadic** function access-violates. The
+  program above prints nothing and exits `0xC0000005`. Reducing it further: the
+  callee that returns a `double` from a `long double` parameter also dies, so it is
+  the argument, not the return.
+- Passing one to a **variadic** function prints zero. `printf("%.15Lf\n", a)` where
+  `a` is `1.0L / 3.0L` gives `0.000000000000000` under fcc and
+  `0.333333333333333` under gcc.
+
+It is not the arithmetic and not the header. `fprintf(stderr, ...)` with a
+`long double` division between the two markers completes, and `(double)a` printed
+from the same expression `%.15f` is correct. gcc and fcc agree about what the
+marshalling looks like — both spill the 80-bit value with `fldt`/`fstpt`, both put a
+pointer to it in `%rdx`, and both leave the value itself at `[rsp+32]` at the `call`
+— so the fault is in what is written or where, not in the shape.
+
+The machinery has a history here. `asm.v:651` and `gen.v:169` both record that
+`sprintf(buf, "%Lf", x)` never worked and that it left a value on the stack, which
+is the same argument, and the `spill` counter in `push_args` exists to account for
+a `long double` being spilled rather than passed in a register. That counter is
+also the reason this needs measuring rather than reasoning about: it was already
+adjusted once for a symptom of this path.
+
+Not fixed here. The value is worth more than the tempo: the smallest reproducers
+are three lines each and both are recorded above, so the work left is to make one
+of them print gcc's answer and then to check the other, rather than to find out
+that it is real.
