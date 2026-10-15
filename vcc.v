@@ -7,7 +7,7 @@ import src.driver
 // that the V compiler uses as its default backend on Windows.
 //
 // The program is a thin shell on purpose: everything that matters lives under
-// src/vcc and src/backend, so the compiler can be tested as a library before it
+// src/fcc and src/backend, so the compiler can be tested as a library before it
 // is trusted as a program.
 
 fn main() {
