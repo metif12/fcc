@@ -1147,3 +1147,25 @@ right; the handoff is not.
 `ty_ldouble` is now 16 bytes with 16 alignment, matching gcc's measured 16 and 16
 on this host. The classifier already handles `.ldouble_` by kind rather than by
 size, so argument classification does not move.
+
+**The `long double` value is bit-identical to gcc's; only the variadic handoff
+fails.** Read back as integers through a pointer, `1.0L / 3.0L` gives
+`lo=aaaaaaaaaaaaaaab hi=3ffd` under both compilers, and `1.0L` gives
+`lo=8000000000000000` with the low sixteen bits of `hi` as `3fff` under both —
+gcc's upper bits there are whatever followed the variable, because it reads eight
+bytes where only two are the exponent. So the literal typing, the 80-bit
+encoding, the store, and the arithmetic are all right, and a local compared
+against its own literal answers correctly.
+
+What does not work is passing that same correct local to a variadic function.
+`printf("%.15Lf\n", a)` prints zero while the bytes it should read are right.
+Bypassing the spill changes nothing: passing `&local` directly, exactly as gcc's
+own output does, still prints zero. Forcing `%xmm0` to a known double changes
+nothing either, so the callee is not reading the register. The spill slot, the
+pointer in `%rdx`, and the value at `[rsp+32]` at the `call` are all where gcc
+puts them — and yet the answer differs.
+
+That is as far as measurement goes. The value is proven right and the handoff is
+proven wrong, and they are separated by the integer readback above, so the next
+step is not to re-measure the value. It is to find what `printf` reads that is
+not the stack slot both compilers fill.
