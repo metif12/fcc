@@ -82,6 +82,15 @@ fn test_the_win32_macros_are_defined() {
 	assert ppb('#ifdef __MSVCRT__\nyes\n#endif').text == ''
 }
 
+// `__LLP64__` is the data model tcc declares: short 2, int 4, long 4, pointer 8.
+// Neither `__LP64__` nor `__ILP32__` is defined, and a conformance test that
+// branches on the model falls through to its `#else` without it.
+fn test_the_llp64_macro_is_defined() {
+	assert ppb('#ifdef __LLP64__\nyes\n#endif').text == 'yes'
+	assert ppb('#ifdef __LP64__\nyes\n#endif').text == ''
+	assert ppb('#ifdef __ILP32__\nyes\n#endif').text == ''
+}
+
 
 // --- object-like macros ---
 
@@ -101,6 +110,21 @@ fn test_redefinition_replaces_the_earlier_definition() {
 
 fn test_undef_removes_a_macro() {
 	assert preprocessed('#define A 1\n#undef A\nA') == 'A'
+}
+
+fn test_push_macro_restores_the_pushed_definition() {
+	assert preprocessed('#define A 1\n#pragma push_macro("A")\n#define A 2\n#pragma pop_macro("A")\nA') == '1'
+}
+
+fn test_pop_macro_restores_absence() {
+	// Popping a name that was undefined when pushed must undefine, not leave
+	// the intervening definition behind.
+	assert preprocessed('#pragma push_macro("A")\n#define A 2\n#pragma pop_macro("A")\nA') == 'A'
+}
+
+fn test_push_macro_nests() {
+	src := '#define A 1\n#pragma push_macro("A")\n#define A 2\n#pragma push_macro("A")\n#define A 3\n#pragma pop_macro("A")\n#pragma pop_macro("A")\nA'
+	assert preprocessed(src) == '1'
 }
 
 fn test_macro_is_not_expanded_inside_itself() {

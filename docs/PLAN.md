@@ -1240,3 +1240,30 @@ relabelled. The remaining 22, all tcc-controlled: twelve frontend refusals tcc
 takes (including one compiler-internal crash in `add_type`), three access
 violations where tcc matches expected, five silent wrong answers, one link
 failure. Each is the next work queue, not this commit.
+
+**Three more CTS cases fixed, all with oracle controls: `__LLP64__`,
+`push_macro`/`pop_macro`, and the runner's own honesty.**
+
+`00212` branches on the data-model macros and fell through to `#else` because
+fcc defined none of them. tcc defines `__LLP64__` (short 2, int 4, long 4,
+pointer 8 — the Windows model) and neither `__LP64__` nor `__ILP32__`, measured
+with `-dM`. One `define_target_macro` alongside `_WIN32`/`_WIN64`, with the same
+comment discipline about what was measured and what was deliberately left out.
+
+`00206` exercises `#pragma push_macro` / `pop_macro` across three nested
+definitions and fcc printed the innermost one three times — the pop restored
+nothing. There was no macro stack at all. There is now: one entry per name
+holding the definition in force when pushed, or none when the name was
+undefined, so popping an undefined name undefines rather than leaving the
+intervening body behind. Nesting falls out of the per-name stack.
+
+Both fixes carry unit tests in the existing style (`preprocessed` spellings for
+the stack including the absence-restores-absence case, `ppb` for the model
+macro), and both CTS cases match.
+
+The triage re-run: 200 match, 20 differ, 0 blocked — up two. The remaining
+twenty, all tcc-controlled: thirteen frontend refusals tcc takes, three access
+violations where tcc matches expected, three silent wrong answers, one link
+failure. The 00124 nested-function-pointer crash is characterized in the log
+with its two-instruction control but not yet fixed; it is the next item, not
+this commit.

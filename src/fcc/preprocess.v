@@ -50,6 +50,11 @@ pub mut:
 	// change took effect so the parser can ask what was in force at a given line.
 	pack_stack []int
 	packs      []PackEvent
+	// macro_saved is the `#pragma push_macro` stack, one entry per name. Each
+	// entry holds the definition in force when pushed, or none when the name
+	// was not defined — so `pop_macro` restores absence as faithfully as it
+	// restores a body.
+	macro_saved map[string][]?Macro
 	// errors collects diagnostics instead of stopping.
 	errors []string
 	// counter names `__COUNTER__`.
@@ -149,6 +154,7 @@ pub fn preprocessor(quote_paths []string, angle_paths []string) &Preprocessor {
 		quote_paths: quote_paths.clone()
 		angle_paths: angle_paths.clone()
 		pragma_once: map[string]bool{}
+		macro_saved: map[string][]?Macro{}
 		errors:      []string{}
 	}
 }
@@ -255,7 +261,12 @@ pub fn (mut p Preprocessor) define_builtins() {
 	// a mingw identity it has not measured, and would let a header take a gcc-only path.
 	p.define_target_macro('_WIN32', '1')
 	p.define_target_macro('_WIN64', '1')
-}
+	// The data model, measured the same way: tcc defines `__LLP64__` (short 2, int 4,
+	// long 4, pointer 8 — the Windows 64-bit model) and neither `__LP64__` nor
+	// `__ILP32__`. Without it a conformance test that branches on the model falls
+	// through to its `#else` and reports the compiler as unknown.
+	p.define_target_macro('__LLP64__', '1')
+	}
 
 // lookup finds a macro by name, or returns none.
 pub fn (p &Preprocessor) lookup(name string) ?Macro {
@@ -713,7 +724,46 @@ fn (mut p Preprocessor) do_pragma(rest string, line int, path string) {
 		p.pragma_once[os.real_path(path)] = true
 		return
 	}
+	push_name, is_push := pragma_macro_arg(rest, 'push_macro')
+	if is_push {
+		// Save what is in force, including absence: popping an undefined name
+		// must undefine, not leave the intervening definition behind.
+		p.macro_saved[push_name] << p.lookup(push_name)
+		return
+	}
+	pop_name, is_pop := pragma_macro_arg(rest, 'pop_macro')
+	if is_pop {
+		mut stack := p.macro_saved[pop_name]
+		if stack.len == 0 {
+			return
+		}
+		saved := stack.last()
+		stack.delete_last()
+		p.macro_saved[pop_name] = stack
+		if m := saved {
+			p.macros = p.macros.filter(it.name != pop_name)
+			p.macros << m
+		} else {
+			p.undefine(pop_name)
+		}
+		return
+	}
 	p.do_pragma_pack(rest.trim_space(), line)
+}
+
+// pragma_macro_arg reads `#pragma push_macro("x")` / `pop_macro("x")`, returning
+// the macro name. Anything else is not one of these pragmas.
+fn pragma_macro_arg(rest string, word string) (string, bool) {
+	t := rest.trim_space()
+	if !t.starts_with(word) {
+		return '', false
+	}
+	inner := strip_outer_parens(t[word.len..].trim_space())
+	mut name := inner.trim_space().trim('"')
+	if name == '' {
+		return '', false
+	}
+	return name, true
 }
 
 // do_pragma_pack records a `#pragma pack` directive.
