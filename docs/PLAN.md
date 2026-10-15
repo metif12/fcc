@@ -1123,3 +1123,27 @@ So `ty_ldouble` at 8 bytes and x87 ten-byte accesses cannot both stand. gcc keep
 the 80-bit value in 16 bytes. Changing the size moves every frame, struct and
 array stride that contains one, which is why it is recorded here and not done
 here.
+
+**`long double` locals hold the right value; `printf` does not receive it.** The
+size change is in and verified in the generated file — two `long double` locals
+now sit sixteen bytes apart instead of eight — and a local compared against its
+own literal answers correctly under both compilers:
+
+```
+long double a = 1.0L;
+printf("eq=%d\n", a == 1.0L);   // 1 under both
+printf("gt=%d\n", a > 0.5L);   // 1 under both
+```
+
+So the literal typing, the 80-bit encoding, the store into the local, and the
+comparison all work. What does not work is passing that same local to a variadic
+function: `printf("%.15Lf\n", a)` prints zero.
+
+That separates the remaining defect cleanly from the three already fixed. It is in
+the `spill` path of `push_args` — the `sub $16, %rsp; fstpt (%rsp)` that stages the
+value and the pointer passed in `%rdx` — and not in the value itself. The value is
+right; the handoff is not.
+
+`ty_ldouble` is now 16 bytes with 16 alignment, matching gcc's measured 16 and 16
+on this host. The classifier already handles `.ldouble_` by kind rather than by
+size, so argument classification does not move.

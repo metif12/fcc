@@ -49,7 +49,14 @@ pub const ty_ulong = &ast.Type{ kind: .basic, basic: .long_, size: 4, align: 4, 
 pub const ty_ullong = &ast.Type{ kind: .basic, basic: .llong_, size: 8, align: 8, is_unsigned: true }
 pub const ty_float = &ast.Type{ kind: .basic, basic: .float_, size: 4, align: 4 }
 pub const ty_double = &ast.Type{ kind: .basic, basic: .double_, size: 8, align: 8 }
-pub const ty_ldouble = &ast.Type{ kind: .basic, basic: .ldouble_, size: 8, align: 8 }
+// A `long double` is sixteen bytes, not eight, and not ten. The x87 format it is
+// loaded and stored with (`fldt`/`fstpt`) moves ten bytes, so an eight-byte slot
+// leaves the two exponent bytes outside whatever the layout gave the variable —
+// adjacent `long double` locals eight bytes apart then overwrite each other's
+// exponent, and a lone one reads its exponent from past its own end. gcc reports
+// 16 and 16 for the size and the alignment on this host, measured, and a struct
+// member or an array element has to agree with that or every stride is wrong.
+pub const ty_ldouble = &ast.Type{ kind: .basic, basic: .ldouble_, size: 16, align: 16 }
 
 // ty_size_t is what `sizeof` and `_Alignof` evaluate to.
 //
