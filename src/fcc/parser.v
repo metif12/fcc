@@ -3578,10 +3578,22 @@ fn (mut p Parser) pointee_size(ty &ast.Type, tok ast.Token) &ast.Node {
 // new_sub builds `lhs - rhs`, scaling by the pointee's size when the left side is a
 // pointer. `int - pointer` is left to `add_type` to reject, because it is a type error
 // rather than an arithmetic one.
+//
+// When both sides are pointers, C11 6.5.6p9 requires the byte difference divided
+// by the element size, with type `ptrdiff_t` — which is `long long` on this
+// target, measured from tcc and gcc. Without the division `&x[1] - &x[0]` answers
+// 4 for an `int` array, and the symptom is a wrong comparison two statements
+// later rather than anything at the subtraction itself.
 fn (mut p Parser) new_sub(mut lhs &ast.Node, mut rhs &ast.Node, tok ast.Token) &ast.Node {
 	add_type(mut lhs)
 	add_type(mut rhs)
 	mut node := p.new_binary(.sub, lhs, rhs, tok)
+	if lhs.ty.base != unsafe { nil } && rhs.ty.base != unsafe { nil } {
+		mut scaled := p.new_binary(.div, node, p.pointee_size(lhs.ty, tok), tok)
+		add_type(mut scaled)
+		scaled.ty = ty_llong
+		return scaled
+	}
 	if lhs.ty.base != unsafe { nil } && rhs.ty.base == unsafe { nil } {
 		mut scaled := p.new_binary(.mul, rhs, p.pointee_size(lhs.ty, tok), tok)
 		add_type(mut scaled)

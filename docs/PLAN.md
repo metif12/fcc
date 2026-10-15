@@ -1205,3 +1205,38 @@ computes in double precision. That is agreement with the primary oracle, not a
 divergence. And `tests/endtoend/long_double.c` prints only magnitudes every
 formatter agrees on, so the msvcrt-vs-mingw wide-digit difference cannot hide in
 it.
+
+**c-testsuite single-exec is now the conformance suite, and the first defect it
+found is fixed.** 220 cases, each a single C file with a `.expected` file holding
+the stdout+stderr it must produce and exit 0. The runner is `tools/cts/cts.v`,
+modeled on `tools/probe/probe.v`: `fcc -S`, then `gcc -c`, then link, then run
+with a 30-second watchdog, because a hung test is a report line rather than the
+end of the run. Nothing is vendored — the checkout is read from `$VCC_CTS_DIR`,
+the way chibicc already lives outside the tree.
+
+Every DIFFER carries its oracle control, run only on mismatch. tcc builds and
+runs the same source, and the line says which of the three pair up: tcc matching
+expected means a real defect, fcc and tcc agreeing against expected means the
+test or the platform. A frontend refusal gets the same treatment — a refusal tcc
+also makes is BLOCKED, one tcc takes is a DIFFER — because the first triage run
+showed thirteen refusals all of which tcc accepts, filed as BLOCKED, which was a
+misclassification this runner no longer makes.
+
+Baseline on the first full run, before the fix below: 197 match, 10 differ,
+13 blocked. Every one of the 23 non-matching lines had its tcc control attached.
+
+**`&x[1] - &x[0]` answered 4 for an `int` array.** C11 6.5.6p9 requires the byte
+difference divided by the element size, with type `ptrdiff_t`. `new_sub` scaled
+`ptr - int` but left `ptr - ptr` as a raw `sub`, so the answer was the byte
+difference and the symptom was a wrong comparison two statements later. The fix
+wraps the subtraction in a division by the pointee size with type `long long`,
+which is `ptrdiff_t` on this target, measured. `char` arrays were unaffected —
+dividing by one is the identity — which is why this survived every probe: the
+only pointer subtractions in `tests/endtoend/` were over bytes.
+
+c-testsuite 00037 covers exactly this shape and now matches. The full re-run:
+198 match, 22 differ, 0 blocked — the one fixed case plus the thirteen honestly
+relabelled. The remaining 22, all tcc-controlled: twelve frontend refusals tcc
+takes (including one compiler-internal crash in `add_type`), three access
+violations where tcc matches expected, five silent wrong answers, one link
+failure. Each is the next work queue, not this commit.
