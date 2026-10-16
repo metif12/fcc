@@ -3300,6 +3300,18 @@ fn (mut p Parser) primary() &ast.Node {
 		p.expect(')')
 		return p.new_num(i64(int(is_const_expr(mut node))), tok)
 	}
+	// `__builtin_expect` is a branch-prediction hint: its value is its first
+	// argument, and the second only tells the optimizer which way the branch
+	// usually goes. Evaluating to the first argument is the whole semantics,
+	// so the second is parsed and dropped.
+	if tok.text == '__builtin_expect' {
+		p.pos += 2
+		node := p.assign()
+		p.expect(',')
+		p.assign()
+		p.expect(')')
+		return node
+	}
 	// `va_start` and `va_end` are statements in practice: C spells them as macros, and
 	// every use of them is one. Emitting them as expressions that leave a value on the
 	// stack is not a technicality — the generator counts the values a function leaves

@@ -699,6 +699,13 @@ fn (mut g AsmGen) gen_assign(node &ast.Node) {
 		g.gen_assign_bitfield(node, m)
 		return
 	}
+	// Convert the value to the target's type before storing. Without this a
+	// `double` computed into `%xmm0` lands in a `float` slot via a bare `movss`,
+	// which keeps the low 32 bits instead of converting — so `float a = 12.34 +
+	// 56.78` stored garbage and every later read of `a` was wrong, while a
+	// `float` computed as a `float` worked and hid it. Same-type pairs are a
+	// no-op in the table, so this is free where nothing needs doing.
+	g.cast(node.rhs.ty, node.ty)
 	g.store(node.ty)
 }
 
