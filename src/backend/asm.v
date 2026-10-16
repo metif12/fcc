@@ -549,8 +549,11 @@ pub fn has_flonum(ty &ast.Type, lo int, hi int, offset int) bool {
 		return true
 	}
 	// A byte outside the range being asked about is not evidence either way.
+	// A `long double` member is floating-point — 8 bytes in `%xmm0` like a
+	// `double` on this target. Leaving it out classified a struct holding one
+	// as integer, so caller and callee disagreed about which register carried it.
 	return offset < lo || hi <= offset || (ty.kind == .basic
-		&& (ty.basic == .float_ || ty.basic == .double_))
+		&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_))
 }
 
 // va_slots_for is how many eight-byte slots one argument occupies in the run a
@@ -645,16 +648,23 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			// than eight bytes by reference. Listing it with the floating-point types is
 			// what put it on the stack on the caller side as well, which is the other
 			// half of why `sprintf(buf, "%Lf", x)` never worked.
-			is_float := ty.kind == .basic
-				&& (ty.basic == .float_ || ty.basic == .double_)
-			if !passed && is_float && fp < fp_max {
-				fp++
-				passed = true
-			}
-			if !passed && !is_float && gp < gp_max {
-				gp++
-				passed = true
-			}
+	is_float := ty.kind == .basic
+		&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_)
+	if !passed && is_float && fp < fp_max {
+		fp++
+		passed = true
+	}
+	// A struct or union that reaches here did not fit in registers above —
+	// either it is wider than sixteen bytes or the registers were already taken
+	// — and it must go on the stack. Letting it fall into the general-register
+	// path below gives it an in-frame slot and spills registers into it, while
+	// the caller laid it out on the stack: the callee then reads registers for
+	// a value that was never there, which is an access violation rather than a
+	// wrong answer.
+	if !passed && !is_float && ty.kind != .struct_ && ty.kind != .union_ && gp < gp_max {
+		gp++
+		passed = true
+	}
 
 			if passed {
 				if fun.ty.is_variadic {

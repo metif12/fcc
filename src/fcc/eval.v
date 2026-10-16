@@ -605,7 +605,10 @@ fn (mut p Parser) write_gvar_data(mut rels []ast.Relocation, init &Initializer,
 		write_float(mut buf, offset, f32(eval_double(mut init.expr)))
 		return
 	}
-	if ty.kind == .basic && ty.basic == .double_ {
+	if ty.kind == .basic && (ty.basic == .double_ || ty.basic == .ldouble_) {
+		// A `long double` initializes as a `double` — 8 bytes, measured against
+		// tcc. Falling through to the integer path below wrote the truncated
+		// integer value instead, so `= { 31.1L }` laid down 31.
 		write_double(mut buf, offset, eval_double(mut init.expr))
 		return
 	}
