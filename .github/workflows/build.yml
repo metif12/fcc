@@ -21,9 +21,9 @@ jobs:
         # day the tree moves to a newer V, this pin moves with it.
         shell: powershell
         run: |
-          git clone https://github.com/vlang/v.git "$env:RUNNER_TEMP\vhome"
+          git clone --depth 50 https://github.com/vlang/v.git "$env:RUNNER_TEMP\vhome"
           cd "$env:RUNNER_TEMP\vhome"
-          git checkout ffcc9928252d2a3ebb53bffe4201b7d8f19a5c5c
+          git checkout weekly.2026.41
           .\make.bat -m32
           "V=$env:RUNNER_TEMP\vhome" | Out-File -FilePath $env:GITHUB_PATH -Append
           cd "$env:GITHUB_WORKSPACE"
