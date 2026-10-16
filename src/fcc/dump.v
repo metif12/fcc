@@ -49,7 +49,6 @@ fn spell(ty &ast.Type, name string) string {
 			}
 			return if name != '' { name } else { kind_name(ty) }
 		}
-		else { return '?' }
 	}
 }
 

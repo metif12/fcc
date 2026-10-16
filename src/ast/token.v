@@ -80,8 +80,8 @@ pub fn (t &Token) is_ident() bool {
 // str returns the spelling. For a macro-expanded token the spelling must come from
 // the origin, so that a diagnostic quotes what the programmer wrote.
 pub fn (t &Token) str() string {
-	if t.origin != none {
-		return t.origin!.str()
+	if o := t.origin {
+		return o.str()
 	}
 	return t.text
 }

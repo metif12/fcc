@@ -256,8 +256,9 @@ fn (mut e CondEval) equality() Eval {
 			left = bool_eval(left.v != right.v)
 			continue
 		}
-		return left
+		break
 	}
+	return left
 }
 
 fn (mut e CondEval) relational() Eval {
@@ -317,8 +318,9 @@ fn (mut e CondEval) shift() Eval {
 			left = arith(left.v >> right.v, left.is_unsigned)
 			continue
 		}
-		return left
+		break
 	}
+	return left
 }
 
 fn (mut e CondEval) additive() Eval {
@@ -334,8 +336,9 @@ fn (mut e CondEval) additive() Eval {
 			left = arith(left.v - right.v, left.is_unsigned || right.is_unsigned)
 			continue
 		}
-		return left
+		break
 	}
+	return left
 }
 
 fn (mut e CondEval) multiplicative() Eval {
@@ -364,8 +367,9 @@ fn (mut e CondEval) multiplicative() Eval {
 			left = arith(left.v % right.v, left.is_unsigned || right.is_unsigned)
 			continue
 		}
-		return left
+		break
 	}
+	return left
 }
 
 fn (mut e CondEval) unary() Eval {
