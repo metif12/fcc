@@ -24,9 +24,10 @@ jobs:
           git clone https://github.com/vlang/v.git "$env:RUNNER_TEMP\vhome"
           cd "$env:RUNNER_TEMP\vhome"
           git checkout weekly.2026.41
-          dir "$env:RUNNER_TEMP\vhome" | ForEach-Object { $_.Name }
-          if (-not (Test-Path "$env:RUNNER_TEMP\vhome\make.bat")) { throw 'make.bat missing after checkout' }
-          & "$env:RUNNER_TEMP\vhome\make.bat" -m32
+          # `make.bat` does not exist at this tag; the Windows entry point is
+          # `makev.bat` (it became `make.bat` again later — do not "fix" this
+          # to `make.bat` without checking the tag first).
+          & "$env:RUNNER_TEMP\vhome\makev.bat"
           "V=$env:RUNNER_TEMP\vhome" | Out-File -FilePath $env:GITHUB_PATH -Append
           cd "$env:GITHUB_WORKSPACE"
 
