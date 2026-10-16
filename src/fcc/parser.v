@@ -1441,6 +1441,7 @@ fn (mut p Parser) enum_specifier() &ast.Type {
 	p.expect('{')
 	mut next := i64(0)
 	mut seen := 0
+	mut has_negative := false
 	for !p.consume_end() {
 		if p.tok().kind == .eof {
 			break
@@ -1458,15 +1459,27 @@ fn (mut p Parser) enum_specifier() &ast.Type {
 			p.pos++
 			continue
 		}
-		name := tok.text
+	name := tok.text
 		p.pos++
 		if p.consume('=') {
 			next = p.const_expr()
+		}
+		if next < 0 {
+			has_negative = true
 		}
 		mut sc := p.push_scope(name)
 		sc.enum_ty = ty
 		sc.enum_val = next
 		next++
+	}
+	// An enum with no negative values is unsigned: measured against gcc and
+	// tcc, which both answer false for `(enum tree_code)-1 < 0` when every
+	// enumerator is non-negative. The bitfield extractor reads this flag, so
+	// an 8-bit field holding a value with bit 7 set zero-extends instead of
+	// sign-extending — which is what c-testsuite 00218 checks.
+	if !has_negative {
+		ty = copy_type(ty)
+		ty.is_unsigned = true
 	}
 	if tag != '' {
 		p.push_tag_scope(tag, ty)

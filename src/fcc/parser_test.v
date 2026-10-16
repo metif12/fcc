@@ -394,6 +394,18 @@ fn test_an_enum_is_four_bytes() {
 	assert r.globals[0].ty.align == 4
 }
 
+fn test_an_enum_without_negatives_is_unsigned() {
+	// Measured against gcc and tcc: `(enum tree_code)-1 < 0` is false when every
+	// enumerator is non-negative, so the bitfield extractor zero-extends instead
+	// of sign-extending. An enum with a negative member stays signed.
+	r := parsed('enum E { A = 148, B };\nenum E e;\n')
+	assert r.errors.len == 0
+	assert r.globals[0].ty.is_unsigned
+	s := parsed('enum F { NEG = -1, ZERO = 0 };\nenum F f;\n')
+	assert s.errors.len == 0
+	assert !s.globals[0].ty.is_unsigned
+}
+
 fn test_a_trailing_comma_in_an_enum_is_allowed() {
 	r := parsed('enum E { A, B, };\n')
 	assert r.errors.len == 0
