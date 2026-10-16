@@ -24,6 +24,15 @@ const hashhash = '##'
 // name is found, substitute its arguments into its body and rescan the result. The
 // one subtlety is the recursion guard, below.
 
+/// next_counter returns the current `__COUNTER__` value and increments it.
+/// A standalone function rather than statements in the `match` arm, because
+/// newer V rejects a bare identifier as a match-arm result.
+fn (mut p Preprocessor) next_counter() string {
+	v := p.counter.str()
+	p.counter++
+	return v
+}
+
 /// builtin_token builds the token for a computed macro such as `__LINE__`.
 fn (mut p Preprocessor) builtin_token(m Macro, tok ast.Token, path string) ast.Token {
 	value := match m.builtin {
@@ -33,9 +42,7 @@ fn (mut p Preprocessor) builtin_token(m Macro, tok ast.Token, path string) ast.T
 		// integer constant ... beginning with 0". Incrementing *before* reading — which
 		// this did — made the first use 1, and chibicc's macro.c asserts on 0, 1, 2.
 		.counter {
-			value := p.counter.str()
-			p.counter++
-			value
+			p.next_counter()
 		}
 		// [C11 6.10.8p1] `__STDC__` is the integer constant 1, and the decimal spelling
 		// of the implementation's conformance. gcc prints a bare `1` with no quotes, and
