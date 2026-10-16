@@ -203,7 +203,8 @@ fn (mut g AsmGen) gen_addr(node &ast.Node) {
 		}
 		.member {
 			g.gen_addr(node.lhs)
-			m := node.member or {
+			mem := node.member
+			m := mem or {
 				g.errors << 'member access with no member at ${node.tok.line.disp_line}'
 				return
 			}

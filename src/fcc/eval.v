@@ -191,7 +191,8 @@ fn eval2(mut node &ast.Node) ConstValue {
 		}
 		.addr { return eval_rval(mut node.lhs) }
 		.member {
-			m := node.member or { return ConstValue{} }
+			mem := node.member
+			m := mem or { return ConstValue{} }
 			// The address of a field is only meaningful for an array, where the element's
 			// address is the field's address. For anything else there is no constant
 			// value, and returning the offset alone would be a plausible wrong answer
@@ -254,7 +255,8 @@ fn eval_rval(mut node &ast.Node) ConstValue {
 		}
 		.deref { return eval2(mut node.lhs) }
 		.member {
-			m := node.member or { return ConstValue{} }
+			mem := node.member
+			m := mem or { return ConstValue{} }
 			mut out := eval_rval(mut node.lhs)
 			out.value += i64(m.offset)
 			return out
@@ -573,7 +575,7 @@ fn (mut p Parser) write_gvar_data(mut rels []ast.Relocation, init &Initializer,
 			if i >= init.children.len {
 				break
 			}
-			child := init.children[i]
+			mut child := init.children[i]
 			if mem.is_bitfield {
 				// Skipped rather than stopped at: a zero-width bitfield takes no
 				// initializer, and a named one the source omitted leaves its bits zero.
@@ -602,14 +604,16 @@ fn (mut p Parser) write_gvar_data(mut rels []ast.Relocation, init &Initializer,
 	}
 
 	if ty.kind == .basic && ty.basic == .float_ {
-		write_float(mut buf, offset, f32(eval_double(mut init.expr)))
+		mut e := init.expr
+		write_float(mut buf, offset, f32(eval_double(mut e)))
 		return
 	}
 	if ty.kind == .basic && (ty.basic == .double_ || ty.basic == .ldouble_) {
 		// A `long double` initializes as a `double` — 8 bytes, measured against
 		// tcc. Falling through to the integer path below wrote the truncated
 		// integer value instead, so `= { 31.1L }` laid down 31.
-		write_double(mut buf, offset, eval_double(mut init.expr))
+		mut e := init.expr
+		write_double(mut buf, offset, eval_double(mut e))
 		return
 	}
 
@@ -618,9 +622,13 @@ fn (mut p Parser) write_gvar_data(mut rels []ast.Relocation, init &Initializer,
 	// would write a plausible and wrong byte image, so what it could not evaluate is
 	// reported. tcc says `initializer element is not constant` for both a call and a
 	// plain read of another variable, and accepts `&table[3]`.
-	mut value := eval2(mut init.expr)
-	if !is_const_expr(mut init.expr) && !(value.has_label && is_address_form(mut init.expr)) {
-		p.error_at(init.expr.tok, 'initializer element is not constant')
+	//
+	// `init.expr` is bound to a local rather than passed in place three times: these
+	// calls need a mutable reference, and a field of an immutable parameter is not one.
+	mut e := init.expr
+	mut value := eval2(mut e)
+	if !is_const_expr(mut e) && !(value.has_label && is_address_form(mut e)) {
+		p.error_at(e.tok, 'initializer element is not constant')
 	}
 	if !value.has_label {
 		write_int(mut buf, offset, u64(value.value), ty.size)

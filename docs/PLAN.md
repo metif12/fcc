@@ -1351,3 +1351,62 @@ from `##`, `#line` with a macro argument) and the 00204 crash (struct copying
 of every size, struct return, globals, HFA and variadic struct args all work
 in isolation; the trigger is in `movi`/`opi` 64-bit patterns or their
 combination).
+
+## Ported to stock V (0.5.2)
+
+The toolchain CI installs is stock V; the tree was written against a local
+`metif12/v` build. Stock V reported **18 errors** across 4 files. All 18 are fixed
+and `v -o fcc.exe .` now succeeds under stock V, with the same source still
+passing 10/10 under the local build — so the port changed no behaviour.
+
+Every fix was measured against **both** compilers before it was written, with the
+failing shape reproduced first and the proposed replacement checked beside it.
+The four rules that covered all 18:
+
+- **A field of a `const`-backed pointer is not writable.** `ty_int` and its
+  siblings are `const`s holding one shared `&ast.Type` (`types.v:43`), so a
+  variable that has held one keeps that aliasing even after being pointed at a
+  fresh copy. Reproduced exactly (`const ty_int = &Type{...}` then
+  `ty = copy_type(ty); ty.is_atomic = true` fails, a fresh mutable local passes),
+  and `copy_type`'s own deref-copy was ruled out by measurement first — the first
+  two explanations were both wrong.
+- **A mutable reference cannot be formed from an immutable parameter.** Fixed by
+  binding the field to a mutable local. This one has a real semantic edge: the
+  original passed `&init.expr`, so a callee that *reassigned* its parameter would
+  have written back into the initializer. Checked rather than assumed — `eval2`,
+  `is_const_expr`, `is_address_form` and `add_type` write fields but never
+  reassign, so the copy is equivalent.
+- **A conditionless `for` no longer counts as a function that cannot fall off its
+  end.** `postfix` and `struct_ref` return from every path in the loop; the
+  trailing return is now spelled out.
+- **`mut` on a parameter is not a fix.** It is rejected at every `unsafe { nil }`
+  call site by *both* compilers, which is why `Tokenizer.file` became a
+  write-once non-mut field instead — it is only ever read after construction.
+
+One latent bug fell out: `driver.v` compared the result of `os.write_file` with
+`-1`, but that function returns `!` — no value. The check had never run. It now
+uses `or { ... }`, so a failed write is reported.
+
+### Two defects in stock V's own output
+
+Both are recorded rather than worked around, because the evidence points at the
+compiler rather than at this tree:
+
+- **`v test src/backend` faults compiling `&table[3]`.** Narrowed by ladder:
+  `int g;`, `int g = 42;`, `static int table[8];` and `int *p = &g;` all pass;
+  `static int table[8];` followed by `int *p = &table[3];` faults inside
+  `parse_tokens`, before any code generation. The same source built as `fcc.exe`
+  emits assembly **byte-identical** to the local build's `fcc.exe` for that input,
+  so the parser is correct and the fault is in the test binary's compilation.
+- **`_Generic` qualifier stripping regresses.** `test_a_generic_selection_strips_top_level_qualifiers`
+  takes the `default` branch (3) where it must take `int` (1). The suspect is the
+  origin-unwrapping loop in `is_exact_type_match` (`types.v:314`), which is one of
+  the sites stock V flags as "cannot have a mutable reference to an immutable
+  object" — a notice here, an error at the same construct elsewhere.
+
+A third stock-V codegen defect was found and *was* worked around, because it had a
+one-line shape: `or` on an option **field** of a mutable reference emits
+`&node->member` where the receiver is `Node**`, needing `&(*node)->member`. It is
+build-context dependent — the same construct is correct in `fcc.exe` — so reading
+the option into a local first is applied at every such site rather than only the
+two the test build happened to hit.

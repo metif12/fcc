@@ -571,7 +571,8 @@ pub fn add_type(mut node &ast.Node) {
 		}
 		.comma { node.ty = node.rhs.ty }
 		.member {
-			m := node.member or { return }
+			mem := node.member
+			m := mem or { return }
 			node.ty = m.ty
 		}
 		.addr {

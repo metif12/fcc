@@ -1209,7 +1209,8 @@ fn test_a_field_of_an_anonymous_member_is_reached_through_it() {
 	assert n.kind == .member, 'got ${n.kind}'
 	// The access is a member of the anonymous member, which is itself a member.
 	assert n.lhs.kind == .member, 'got ${n.lhs.kind}'
-	m := n.member or {
+	mem_opt := n.member
+	m := mem_opt or {
 		assert false, 'the field access has no member'
 		return
 	}
@@ -1229,7 +1230,8 @@ fn test_an_anonymous_union_member_contributes_its_fields_too() {
 fn test_a_named_member_still_resolves_without_descending() {
 	n := returned('int f(void) { struct { int e; } y; return y.e; }')
 	assert n.kind == .member, 'got ${n.kind}'
-	m := n.member or {
+	mem_opt := n.member
+	m := mem_opt or {
 		assert false, 'the field access has no member'
 		return
 	}

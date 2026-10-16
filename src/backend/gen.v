@@ -674,7 +674,8 @@ fn (mut g AsmGen) gen_neg(ty &ast.Type) {
 // the top of the register and brought back down — the only way to sign- or
 // zero-extend it in one pair of shifts.
 fn (mut g AsmGen) gen_bitfield_extract(node &ast.Node) {
-	m := node.member or { return }
+	mem := node.member
+	m := mem or { return }
 	if !m.is_bitfield {
 		return
 	}
@@ -714,7 +715,8 @@ fn bitfield_of(lhs &ast.Node) ?ast.Member {
 	if lhs.kind != .member {
 		return none
 	}
-	m := lhs.member or { return none }
+	mem := lhs.member
+	m := mem or { return none }
 	if !m.is_bitfield {
 		return none
 	}

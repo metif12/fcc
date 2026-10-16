@@ -315,7 +315,11 @@ fn test_a_compound_assignment_to_a_member_takes_the_address_of_the_struct() {
 	assert store.kind == .assign
 	mem_node := find_kind(store, .member)
 	assert mem_node != unsafe { nil }
-	mem := mem_node.member or { ast.Member{} }
+	mem_opt := mem_node.member
+	mut mem := ast.Member{}
+	if mem_opt != none {
+		mem = mem_opt
+	}
 	assert mem.name == 'a'
 }
 

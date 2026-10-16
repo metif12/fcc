@@ -587,7 +587,7 @@ fn (mut p Parser) new_alloca(sz &ast.Node, tok ast.Token) &ast.Node {
 		tok:     tok
 		lhs:     p.new_var_node(p.builtin_alloca, tok)
 		func_ty: ty
-		args:    [&sz]
+		args:    [sz]
 	}
 }
 
@@ -934,17 +934,25 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 		p.pos++
 	}
 
+	// A qualifier gets a fresh copy of the type, because the built-in types are
+	// `const`s holding one shared `&ast.Type` and a qualifier written on one would
+	// otherwise land on the singleton every other declaration reads. The copy is
+	// bound to a mutable local because a field of a `const`-backed pointer is not
+	// something V's aliasing checker will let be written, even after the copy.
 	if atomic_spec {
-		ty = copy_type(ty)
-		ty.is_atomic = true
+		mut qualified := copy_type(ty)
+		qualified.is_atomic = true
+		ty = qualified
 	}
 	if const_spec {
-		ty = copy_type(ty)
-		ty.is_const = true
+		mut qualified := copy_type(ty)
+		qualified.is_const = true
+		ty = qualified
 	}
 	if volatile_spec {
-		ty = copy_type(ty)
-		ty.is_volatile = true
+		mut qualified := copy_type(ty)
+		qualified.is_volatile = true
+		ty = qualified
 	}
 	return ty
 }
@@ -1324,9 +1332,19 @@ fn decl_name(d &Decl) (string, int) {
 
 fn (mut p Parser) declarator(ty &ast.Type) &ast.Type {
 	d := p.parse_decl_shape(true)
-	mut built := p.build_decl(ty, d)
-	built = copy_type(built)
-	built.name, built.name_line = decl_name(d)
+	// The name is unpacked into locals rather than assigned as a tuple to the two
+	// fields: a multi-assign whose targets are fields of a pointer is a mutable
+	// reference to `built`, and V will not form one here.
+	//
+	// The copy is bound in the declaration rather than assigned afterwards, because
+	// `ty` is frequently a `const`-backed built-in type and a variable that has held
+	// one keeps its aliasing even after being pointed at a fresh copy.
+	mut name := ''
+	mut name_line := 0
+	name, name_line = decl_name(d)
+	mut built := copy_type(p.build_decl(ty, d))
+	built.name = name
+	built.name_line = name_line
 	return built
 }
 
@@ -1602,7 +1620,7 @@ fn (mut p Parser) struct_members(mut ty &ast.Type, body_line int) {
 			if p.at(';') || p.at('}') {
 				continue
 			}
-			mty := p.declarator(basety)
+			mut mty := p.declarator(basety)
 			mut mem := ast.Member{
 				name:  mty.name
 				ty:    mty
@@ -3171,7 +3189,8 @@ fn (mut p Parser) unary() &ast.Node {
 		mut operand := p.cast_expr()
 		add_type(mut operand)
 		if operand.kind == .member {
-			if m := operand.member {
+			mem := operand.member
+			if m := mem {
 				if m.is_bitfield {
 					p.error_at(tok, 'cannot take the address of a bitfield')
 				}
@@ -3289,6 +3308,10 @@ fn (mut p Parser) postfix() &ast.Node {
 		}
 		return node
 	}
+	// The loop above only continues or returns, so nothing reaches here. It is spelled
+	// out because V's checker no longer treats a conditionless `for` as a function that
+	// cannot fall off its end, and without it `postfix` reads as missing a return.
+	return node
 }
 
 // struct_ref parses `.name` on a node and returns the member access.
@@ -3335,6 +3358,10 @@ fn (mut p Parser) struct_ref(mut node &ast.Node) &ast.Node {
 			return base
 		}
 	}
+	// As in `postfix`: the loop returns from every path, and the return is spelled out
+	// because V's checker no longer treats a conditionless `for` as one that cannot
+	// fall off the end.
+	return base
 }
 
 // primary parses the leaves: literals, names, parenthesised expressions and the

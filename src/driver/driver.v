@@ -284,7 +284,7 @@ const options_that_consume_an_operand = [
 
 fn need_value(args []string, i int, flag string) string {
 	if i >= args.len {
-		return panic('option ${flag} requires an argument')
+		panic('option ${flag} requires an argument')
 	}
 	return args[i]
 }
@@ -438,9 +438,14 @@ fn emit_asm(o &Options) {
 	text := all.join('\n')
 	if o.output == '' {
 		print(text)
-	} else if os.write_file(o.output, text) or { -1 } != 0 {
-		eprintln('fcc: cannot write ${o.output}')
-		exit(1)
+	} else {
+		// `os.write_file` returns a result, so the failure is caught with `or` rather
+		// than compared: there is no value to compare, and the earlier spelling that
+		// compared one was never a working check.
+		os.write_file(o.output, text) or {
+			eprintln('fcc: cannot write ${o.output}')
+			exit(1)
+		}
 	}
 }
 // preprocess_only mirrors `-E`: run the preprocessor and print the resulting

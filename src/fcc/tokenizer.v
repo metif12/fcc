@@ -46,6 +46,7 @@ pub mut:
 	// has_space marks that whitespace preceded the token, which `#` stringifying
 	// needs in order to reproduce the original spacing.
 	has_space bool
+pub:
 	// file is the file being tokenized, and is stamped onto every token's line so a
 	// diagnostic can name the header a token came from. It is none only for a fragment,
 	// which has no file of its own: a macro body or a directive's argument text is
@@ -56,6 +57,12 @@ pub mut:
 	// dereferences as a non-nil pointer to nothing. Measured: `token_file` crashed with
 	// an invalid memory access reading `fl.name` for exactly that reason. The line's own
 	// field is the option, and it is written only when there is a file to write.
+	//
+	// Declared outside the `mut` block because it is written once, at construction, and
+	// only read afterwards (`eof_line.file` and the line stamped on each token). A
+	// `mut` field would have to be handed a mutable reference, which an immutable
+	// `&ast.File` parameter is not; keeping it immutable says the file is recorded, not
+	// edited, and lets the caller's reference be stored without a cast away.
 	file &ast.File = unsafe { nil }
 }
 
