@@ -1352,6 +1352,13 @@ of every size, struct return, globals, HFA and variadic struct args all work
 in isolation; the trigger is in `movi`/`opi` 64-bit patterns or their
 combination).
 
+CI now proves the port rather than this file asserting it: the `Build` step is
+**green** on stock V. It was not compiling at all before -- the workflow wrote
+`V=<path>` into `GITHUB_PATH`, which takes bare paths, so the Build step failed
+with `v is not recognized`. That was the real reason CI was red, and it had been
+attributed to the code. `Unit tests` is 8 passed, 2 failed, and the two are the
+defects below, reproduced on the runner as well as locally.
+
 ## Ported to stock V (0.5.2)
 
 The toolchain CI installs is stock V; the tree was written against a local
