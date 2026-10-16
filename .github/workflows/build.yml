@@ -24,6 +24,7 @@ jobs:
           git clone https://github.com/vlang/v.git "$env:RUNNER_TEMP\vhome"
           cd "$env:RUNNER_TEMP\vhome"
           git checkout weekly.2026.41
+          dir "$env:RUNNER_TEMP\vhome" | Select-Object -First 10 | ForEach-Object { $_.Name }
           & "$env:RUNNER_TEMP\vhome\make.bat" -m32
           "V=$env:RUNNER_TEMP\vhome" | Out-File -FilePath $env:GITHUB_PATH -Append
           cd "$env:GITHUB_WORKSPACE"
