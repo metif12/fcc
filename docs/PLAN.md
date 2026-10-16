@@ -1324,3 +1324,30 @@ all four harnesses, and shows the diagnostic format. `site/index.html` is a
 single static page with no build step: what it is, the honest status table,
 quick start, and the design paragraph. It ships on `gh-pages`, not mixed into
 `docs/`, so the dev log stays a dev log.
+
+**Current state: 209 match, 11 differ, 0 blocked (c-testsuite).** Full re-run
+after the short-circuit and unsigned-enum fixes. The eleven are ten frontend
+refusals tcc takes and one access violation (00204).
+
+Fixed since the 206/14 baseline, all with oracle controls and regression tests
+where the shape allows:
+
+- `#if` short-circuit (`&&`, `||`, `?:` skip the untaken side quietly and
+  normalize to 1/0 — leaving `-1` in place made `1 != (-1 || ...)` true).
+- Enums without negative values are unsigned (gcc and tcc agree
+  `(enum tree_code)-1 < 0` is false), so 8-bit enum bitfields zero-extend.
+- `00145` (short-circuit), `00218` (enum sign), `00092` (designated
+  initializers in flexible arrays: the counter did not consume `[`, and the
+  array did not grow past what the count found).
+- `parser_test.v`'s `parsed` helper had lost its body at some point, leaving an
+  unclosed function that only surfaced when the file was next compiled from
+  scratch; restored from the `preprocessed` helper beside it. A test that only
+  passes from cache is not a passing test.
+
+Remaining, each with a reproducer and a tcc control in the log above:
+ten frontend refusals (incomplete `enum`, multi-declarators, abstract
+declarators, `expected an expression` in four shapes, `undefined variable`
+from `##`, `#line` with a macro argument) and the 00204 crash (struct copying
+of every size, struct return, globals, HFA and variadic struct args all work
+in isolation; the trigger is in `movi`/`opi` 64-bit patterns or their
+combination).
