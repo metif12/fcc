@@ -1289,3 +1289,28 @@ through a function pointer returning a pointer crashes, while one returning an
 Two type-level unit tests pin the shapes (`int *(*p)(int)` and the full
 `int (*(*p)(int))(int)`), and `tests/endtoend/func_ptr_ret.c` covers the split
 and nested calls end to end against tcc.
+
+**`_Generic` now strips top-level qualifiers and tells `char` from `signed char`.**
+Two CTS cases fixed with oracle controls, both about what "the same type" means.
+
+A `const int` controlling expression matches `int` and never `const int`,
+whatever the order — and a lone `const int` association falls through to
+`default`. Measured against gcc and tcc, which agree on all five orderings of
+`{int, const int, default}`. `is_const` and `is_volatile` join the type,
+recorded in `declspec` and per pointer level in declarators, and compared in
+`is_exact_type_match` before unwrapping origins (the previous order followed the
+origin first, which points at the unqualified type the copy was made from).
+`generic_selection` strips the control and skips qualified associations, which
+can never match a stripped control.
+
+`char` vs `signed char` needed the same treatment one level down: same
+representation, but C11 6.2.5p15 lists them as distinct types and `_Generic`
+tells them apart, so `signed char` gets its own shared type and the matcher
+compares the flag. A `const char *` control now picks `const char *`, not
+`const signed char *`.
+
+c-testsuite 00219 matches line for line. Full re-run: 206 match, 14 differ,
+0 blocked — up from 200/20/0, with 00089 also resolved (its `add_type` crash no
+longer reproduces, likely via the declarator work). The remaining fourteen:
+twelve frontend refusals tcc takes, one access violation (00204), one silent
+wrong answer (00218).
