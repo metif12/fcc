@@ -1314,3 +1314,13 @@ c-testsuite 00219 matches line for line. Full re-run: 206 match, 14 differ,
 longer reproduces, likely via the declarator work). The remaining fourteen:
 twelve frontend refusals tcc takes, one access violation (00204), one silent
 wrong answer (00218).
+
+**Public surface: README numbers, a static site, and 208/12 confirmed.** The
+full c-testsuite re-run after the enum-signedness fix holds at 208 match, 12
+differ, 0 blocked — the twelve are eleven frontend refusals tcc takes plus the
+00204 access violation, each with its tcc control from the runner. README now
+states the measured numbers (20/20 endtoend, 208/12 CTS, 10/10 units), documents
+all four harnesses, and shows the diagnostic format. `site/index.html` is a
+single static page with no build step: what it is, the honest status table,
+quick start, and the design paragraph. It ships on `gh-pages`, not mixed into
+`docs/`, so the dev log stays a dev log.

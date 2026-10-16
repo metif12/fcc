@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fcc — a fast C compiler in pure V</title>
+<style>
+  :root { --fg: #1a1a1a; --muted: #5a5a5a; --accent: #0b5fff; --bg: #ffffff; --code-bg: #f4f4f4; --line: #e0e0e0; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #e8e8e8; --muted: #a0a0a0; --accent: #6ea8ff; --bg: #161616; --code-bg: #222; --line: #333; } }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: var(--fg); background: var(--bg); margin: 0; line-height: 1.6; }
+  main { max-width: 760px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: 2rem; margin-bottom: .25rem; }
+  .tagline { color: var(--muted); font-size: 1.1rem; margin-top: 0; }
+  h2 { margin-top: 2.5rem; border-bottom: 1px solid var(--line); padding-bottom: .4rem; }
+  code, pre { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  pre { background: var(--code-bg); padding: 1rem; overflow-x: auto; border-radius: 6px; font-size: .85rem; }
+  code.inline { background: var(--code-bg); padding: .1em .35em; border-radius: 4px; font-size: .9em; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  a { color: var(--accent); }
+  .badges a { text-decoration: none; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .9rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>fcc</h1>
+<p class="tagline">A fast C compiler written in pure V, aimed at replacing the bundled TinyCC that <a href="https://github.com/vlang/v">vlang/v</a> uses as its default C backend on Windows.</p>
+
+<p class="badges">
+<a href="https://github.com/metif12/vcc/actions"><img alt="build" src="https://github.com/metif12/vcc/actions/workflows/build.yml/badge.svg"></a>
+<a href="https://github.com/metif12/vcc/blob/master/LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-green"></a>
+</p>
+
+<h2>Status</h2>
+<p>Phase 2 is done: the compiler translates whole C programs to x86-64 assembly through a real Windows x64 ABI — variadic calls, callee-saved registers, stack probes for frames over a page, struct returns, bitfields, and floating point.</p>
+<table>
+<tr><th>Suite</th><th>Result</th></tr>
+<tr><td>Differential end-to-end (<code>tests/endtoend/</code>)</td><td><strong>20 of 20 match</strong> tcc/gcc</td></tr>
+<tr><td><a href="https://github.com/c-testsuite/c-testsuite">c-testsuite</a> single-exec (220 cases)</td><td><strong>208 match</strong>, 12 differ with tcc control each</td></tr>
+<tr><td>chibicc suite</td><td>9 of 18 (9 are host-ABI divergences, not defects)</td></tr>
+<tr><td>Unit tests (<code>v test .</code>)</td><td><strong>10 of 10</strong></td></tr>
+</table>
+<p>Every differ carries its tcc oracle control, so a defect in fcc is distinguished from a gap tcc shares. Open items and their reproducers live in <a href="https://github.com/metif12/vcc/blob/master/docs/PLAN.md"><code>docs/PLAN.md</code></a>.</p>
+
+<h2>Diagnostics</h2>
+<p>Errors keep the terse <code>tcc:</code> first line the V driver keys on, followed by a source block with file, line, column, a caret span, and <code>= help:</code> hints where the fix is known:</p>
+<pre>tcc: foo.c:12:9: expected ";", found "bar"
+ --&gt; foo.c:12:9
+  |
+12 | int x = 5  bar = 6;
+  |              ^^^
+  |
+  = help: a declaration or statement ends with `;` — one is missing before this token</pre>
+
+<h2>Quick start</h2>
+<p>Prerequisites: the <a href="https://github.com/vlang/v">V toolchain</a> plus a checkout of it (fcc takes its oracle <code>tcc</code> and its linker <code>gcc</code> from there).</p>
+<pre>$env:VCC_V_ROOT = 'C:\path\to\v'
+$env:TMPDIR = "$env:LOCALAPPDATA\Temp\opencode\vccbuild"
+v -o fcc.exe .
+v test .
+$env:VCC_PROBE_DIR = "$env:LOCALAPPDATA\Temp\opencode\va-probe"
+v run tools/probe/probe.v     # differential programs vs tcc/gcc</pre>
+
+<h2>Design in one paragraph</h2>
+<p>The code generator sits behind a swappable backend interface. Phase 2 emits text assembly validated against three independent oracles; a future phase swaps in a machine-code emitter behind the same interface. The front end is written once. Nothing is trusted without a cross-boundary test: a calling convention or data layout that is wrong in a way two fcc-compiled functions agree on is invisible to any test that never leaves the compiler.</p>
+
+<h2>Links</h2>
+<ul>
+<li><a href="https://github.com/metif12/vcc">Repository</a> (MIT)</li>
+<li><a href="https://github.com/metif12/vcc/blob/master/docs/PLAN.md">Phased plan and session log</a></li>
+<li><a href="https://github.com/metif12/vcc/blob/master/docs/RESEARCH.md">Survey of existing projects</a></li>
+</ul>
+
+<footer>Built with V. Tested against tcc and gcc, line by line.</footer>
+</main>
+</body>
+</html>

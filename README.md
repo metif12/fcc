@@ -23,16 +23,16 @@ probes for frames over a page, struct returns, bitfields, and floating point.
 - `fcc -S` writes AT&T assembly for whole translation units: the data section,
   the expression and statement walk, the frame layout, and the ABI's argument
   passing. The output assembles with GNU `as` and links with gcc.
-- 19 differential end-to-end programs in `tests/endtoend/`, each compared
+- 20 differential end-to-end programs in `tests/endtoend/`, each compared
   against what tcc (or gcc, where tcc refuses) computes for the same program:
-  **19 of 19 match**.
+  **20 of 20 match**.
 - The [c-testsuite](https://github.com/c-testsuite/c-testsuite) single-exec
   suite (220 cases, run from an external checkout via `tools/cts/cts.v`):
-  **198 match, 22 differ, 0 blocked** — and every differ carries its tcc
+  **208 match, 12 differ, 0 blocked** — and every differ carries its tcc
   control, so a defect in fcc is distinguished from a gap tcc shares.
 - The chibicc suite: 9 of 18 pass; the 9 failures are host-ABI divergences
   (`long`=4, `wchar_t`=2 on this target), not defects.
-- `v test .`: 9 of 9.
+- `v test .`: 10 of 10.
 
 `fcc --preprocess` prints the token stream. `fcc --dump-ast` prints every global
 and function with its layout, initial data, relocations and frame, and every
@@ -83,10 +83,29 @@ scratch space and at a
 $env:VCC_PROBE_DIR = "$env:LOCALAPPDATA\Temp\opencode\va-probe"
 $env:VCC_CTS_DIR = "$env:LOCALAPPDATA\Temp\opencode\c-testsuite"
 
-v run tools/probe/probe.v     # 19 differential programs vs tcc/gcc
+v run tools/probe/probe.v     # 20 differential programs vs tcc/gcc
 v run tools/suite/suite.v     # chibicc suite
 v run tools/cts/cts.v         # c-testsuite single-exec (220 cases)
 ```
+
+## Diagnostics
+
+Errors print the terse first line the V driver keys on, followed by a
+V-style source block — file, line, column, a caret span as wide as the token,
+and `= help:` / `= note:` follow-ups where the fix is known:
+
+```
+tcc: foo.c:12:9: expected ";", found "bar"
+ --> foo.c:12:9
+  |
+12 | int x = 5  bar = 6;
+  |              ^^^
+  |
+  = help: a declaration or statement ends with `;` — one is missing before this token
+```
+
+Macro expansions add a `note: expanded from here` with the definition's own
+snippet, so a diagnostic never points at an expansion without naming the macro.
 
 ## One name, two spellings — and why the diagnostics are still prefixed `tcc:`
 
