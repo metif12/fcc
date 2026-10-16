@@ -2554,6 +2554,18 @@ fn (mut p Parser) array_initializer1(mut init &Initializer) {
 		// the following values continue from there, leaving the ones in between zero.
 		if p.at('[') {
 			begin, end := p.array_designator(init.ty)
+			// A flexible array learns its length from the initializer, so a
+			// designator past the elements seen so far grows it: `[2] = 2`
+			// in `{5, [2] = 2, 3}` needs four slots, not the one the
+			// pre-count found. Fixed-size arrays keep their bounds check in
+			// `array_designator` instead.
+			if init.ty.array_len < 0 {
+				for init.children.len <= end {
+					init.children << p.new_initializer(init.ty.base, false)
+				}
+				init.ty.array_len = init.children.len
+				init.ty.size = init.ty.base.size * init.children.len
+			}
 			for j in begin .. end + 1 {
 				mut child := init.children[j]
 				p.designation(mut child)
@@ -2635,12 +2647,40 @@ fn (mut p Parser) count_array_init_elements(base &ast.Type) int {
 		}
 		first = false
 		if p.at('[') {
+			// Consume the `[`: `const_expr` starts after it, the way
+			// `array_designator` does with `expect`. Without this the
+			// expression parser starts on the bracket itself and runs to the
+			// closing brace, so the count — and the size that follows from
+			// it — is wrong for every flexible array with a designator.
+			p.pos++
 			i = int(p.const_expr())
 			if p.consume('...') {
 				i = int(p.const_expr())
 			}
 			p.expect(']')
-			p.designation(mut dummy)
+			// Skip to the next top-level separator without building: the value
+			// (and any nested designators inside it) advances past itself by
+			// bracket depth, stopping at the `,` or `}` that ends this element.
+			// Calling `designation` here would need a properly shaped tree to
+			// write into, which the counting dummy — a bare element — is not;
+			// indexing into it is what crashed on `[2]`. The max already accounts
+			// for the outer index.
+			mut depth := 0
+			for p.tok().kind != .eof {
+				if depth == 0 && (p.at(',') || p.at('}')) {
+					break
+				}
+				if p.at('{') || p.at('[') || p.at('(') {
+					depth++
+				} else if p.at('}') || p.at(']') || p.at(')') {
+					if depth > 0 {
+						depth--
+					} else {
+						break
+					}
+				}
+				p.pos++
+			}
 		} else {
 			p.initializer2(mut dummy)
 		}
@@ -3743,3 +3783,4 @@ fn (mut p Parser) new_add(mut lhs &ast.Node, mut rhs &ast.Node, tok ast.Token) &
 	add_type(mut node)
 	return node
 }
+
