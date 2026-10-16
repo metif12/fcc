@@ -35,6 +35,10 @@ const max_int32 = 0x7fffffff
 pub const ty_void = &ast.Type{ kind: .basic, basic: .void_, size: 1, align: 1 }
 pub const ty_bool = &ast.Type{ kind: .basic, basic: .bool_, size: 1, align: 1 }
 pub const ty_char = &ast.Type{ kind: .basic, basic: .char_, size: 1, align: 1 }
+// `signed char` is a distinct type from plain `char` — same representation,
+// same size, but C11 6.2.5p15 lists all three character types separately and
+// `_Generic` tells them apart. Nothing generates different code for it.
+pub const ty_schar = &ast.Type{ kind: .basic, basic: .char_, size: 1, align: 1, is_signed: true }
 pub const ty_short = &ast.Type{ kind: .basic, basic: .short_, size: 2, align: 2 }
 pub const ty_int = &ast.Type{ kind: .basic, basic: .int_, size: 4, align: 4 }
 // ty_long is 4 bytes here, so `long` and `int` are the same width. They are still
@@ -299,6 +303,9 @@ pub fn is_exact_type_match(t1 &ast.Type, t2 &ast.Type) bool {
 	// because an origin points at the type a copy was made from — following it
 	// first would compare through the qualifier instead of against it.
 	if t1.is_const != t2.is_const || t1.is_volatile != t2.is_volatile {
+		return false
+	}
+	if t1.is_signed != t2.is_signed {
 		return false
 	}
 	// Unwrap aliases fully on both sides to reach the structural types. The

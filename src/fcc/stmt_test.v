@@ -414,6 +414,25 @@ fn test_a_generic_selection_picks_the_matching_association() {
 	assert picked.num == 1
 }
 
+fn test_a_generic_selection_strips_top_level_qualifiers() {
+	// A `const int` controlling expression matches `int`, never `const int` —
+	// measured against gcc and tcc, which both pick the unqualified association
+	// regardless of order and fall through to `default` when only a qualified
+	// one is offered.
+	f := fn_with_body('int f(const int n) { return _Generic(n, int: 1, const int: 2, default: 3); }\n')
+	assert uncast(f.body[0].lhs).num == 1
+	g := fn_with_body('int g(const int n) { return _Generic(n, const int: 2, default: 3); }\n')
+	assert uncast(g.body[0].lhs).num == 3
+}
+
+fn test_a_generic_selection_tells_char_from_signed_char() {
+	// Plain `char` and `signed char` are distinct types for `_Generic` even
+	// though they share a representation: a `const char *` controlling
+	// expression matches `const char *`, not `const signed char *`.
+	f := fn_with_body('int f(const char *p) { return _Generic(p, const unsigned char *: 1, const char *: 4, char *: 3, const signed char *: 2); }\n')
+	assert uncast(f.body[0].lhs).num == 4
+}
+
 fn test_a_statement_expression_is_a_block() {
 	f := fn_with_body('int f(int n) { return ({ int t = n; t + 1; }); }\n')
 	stmt_expr := uncast(f.body[0].lhs)

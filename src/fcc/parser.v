@@ -900,7 +900,8 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 		ty = match counter {
 			ts_void { ty_void }
 			ts_bool { ty_bool }
-			ts_char, ts_signed + ts_char { ty_char }
+			ts_char { ty_char }
+		ts_signed + ts_char { ty_schar }
 			ts_unsigned + ts_char { ty_uchar }
 			ts_short, ts_short + ts_int, ts_signed + ts_short, ts_signed + ts_short + ts_int {
 				ty_short

@@ -122,6 +122,12 @@ pub mut:
 	// expression's qualifiers before comparing.
 	is_const   bool
 	is_volatile bool
+	// is_signed marks an explicitly `signed` character type. Plain `char` and
+	// `signed char` are the same representation on this target, but C11
+	// 6.2.5p15 makes them distinct types and `_Generic` tells them apart: a
+	// `const char *` controlling expression matches `const char *`, not
+	// `const signed char *`. Nothing generates different code for them.
+	is_signed bool
 	// origin is the type this one was copied from. Type compatibility is decided
 	// through it, which is what makes two spellings of the same typedef compare
 	// equal without comparing their structure.
