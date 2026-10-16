@@ -28,11 +28,65 @@ probes for frames over a page, struct returns, bitfields, and floating point.
   **20 of 20 match**.
 - The [c-testsuite](https://github.com/c-testsuite/c-testsuite) single-exec
   suite (220 cases, run from an external checkout via `tools/cts/cts.v`):
-  **208 match, 12 differ, 0 blocked** — and every differ carries its tcc
+  **209 match, 11 differ, 0 blocked** — and every differ carries its tcc
   control, so a defect in fcc is distinguished from a gap tcc shares.
-- The chibicc suite: 9 of 18 pass; the 9 failures are host-ABI divergences
-  (`long`=4, `wchar_t`=2 on this target), not defects.
-- `v test .`: 10 of 10.
+- The chibicc behavioural suite: **9 of 18**. The nine failures are *not* all
+  ABI divergences, as this file previously claimed — they are, measured:
+  three host-ABI divergences with an explicit expected-vs-got (`_Alignof(long)`,
+  `sizeof` of a `long` bitfield, `sizeof(L'0')` — `long`=4 and `wchar_t`=2 on
+  this target, matching tcc and mingw gcc), one frontend gap (chibicc's private
+  `__va_area__`), one **backend crash** (invalid memory access in `AsmGen.store`),
+  and four behavioural mismatches inside chibicc's own `assert`s that are not yet
+  individually characterised.
+- `v test .`: 10 of 10, on stock V and on the local build.
+- CI builds and runs the suite on stock V. Build is green; the two test files
+  that fail there are stock-V codegen defects, recorded in `docs/PLAN.md`.
+
+## How ready is this for real C source
+
+Measured on the harnesses above, not estimated.
+
+**Works today.** Whole translation units: the data section with relocations,
+initializers and bitfields; the full expression and statement walk; variadic
+calls across the boundary into mingw's C library; struct returns of every size;
+floating point including `long double`; VLAs; all 19 standard headers. The 20
+differential programs and 209 of 220 c-testsuite cases agree with tcc or gcc on
+the same program.
+
+**Not yet.** Ten c-testsuite cases are frontend refusals tcc accepts — incomplete
+`enum`, multi-declarator declarations, abstract declarators, four
+`expected an expression` shapes, `undefined variable` from `##`, and `#line`
+with a macro argument. These are unimplemented language features, each with a
+tcc control. One case (00204) crashes the compiler; the trigger is in 64-bit
+`movi`/`opi` patterns. On the chibicc suite, one backend crash and four
+uncharacterised behavioural mismatches are open.
+
+**What "replace tcc" would still need.** The honest gap is not the percentage —
+it is that a single crash or wrong answer in a large codebase is enough to stop
+someone shipping with it. The 209/220 number counts programs that agree; it does
+not count how often fcc is right for the *wrong reason*. Closing that means the
+four uncharacterised chibicc mismatches and the 00204 crash, not more percentages.
+
+## Cross-compilation
+
+**Not supported, and by decision rather than by omission** (decision D4, "one
+platform at a time"; D35 records wasm as not planned). The target is Win32/Win64
+x86-64 and it is hardcoded in three places:
+
+- the preprocessor defines only `_WIN32`, `_WIN64` and `__LLP64__`;
+- the type model is fixed — `long` 4, `wchar_t` 2, `long double` 8, pointers 8;
+- the backend emits x86-64 only.
+
+The groundwork is better than nothing, and worth being precise about. The
+Microsoft x64 ABI lives alone in `src/ast/abi.v` — `gp_max`, `fp_max`,
+`shadow_space`, `incoming_base`, the `va_list` shape — and is reached through 49
+sites outside that file, so a second x86-64 target is an ABI-parameterisation job
+rather than a rewrite. But the backend itself is monolithic: 425 hardcoded
+x86-64 register operands across `gen.v` and `asm.v`, about 2,350 lines.
+
+So: a Linux x86-64 target (System V ABI, `long`=8, `wchar_t`=4, `__LP64__`, no
+shadow space, different callee-saved set, varargs in `%al`) is a bounded piece of
+work. A different architecture is a new backend. Neither is started.
 
 `fcc --preprocess` prints the token stream. `fcc --dump-ast` prints every global
 and function with its layout, initial data, relocations and frame, and every

@@ -1417,3 +1417,55 @@ one-line shape: `or` on an option **field** of a mutable reference emits
 build-context dependent — the same construct is correct in `fcc.exe` — so reading
 the option into a local first is applied at every such site rather than only the
 two the test build happened to hit.
+## Measured readiness, and the state of cross-compilation
+
+Re-measured after the stock-V port, so these are current numbers rather than
+carried forward. Nothing moved: 20/20 differential, 209/220 c-testsuite, 9/18
+chibicc, 10/10 units, on the ported tree.
+
+**The chibicc claim in the README was wrong and is corrected here too.** It said
+all nine failures were host-ABI divergences, "not defects". Measured, they are:
+
+| case | verdict |
+|---|---|
+| `alignof` | host-ABI: `_Alignof(long)` 8 expected, 4 got |
+| `bitfield` | host-ABI: `sizeof(struct{long x:1;})` 8 expected, 4 got |
+| `unicode` | host-ABI: `sizeof(L'0')` 4 expected, 2 got |
+| `function` | frontend gap: chibicc's private `__va_area__` |
+| `pointer` | **backend crash**: invalid memory access in `AsmGen.store` |
+| `arith`, `literal`, `string`, `struct` | behavioural mismatch inside chibicc's own `assert`s, **not yet individually characterised** |
+
+Three are the target's data model and match tcc and mingw gcc. One is a known
+frontend omission. One is a real defect. Four are unexplained, and that is the
+open item, not the count.
+
+**Readiness.** What works: whole translation units with the data section,
+relocations, initializers, bitfields, the full expression and statement walk,
+variadic calls across the boundary into mingw's C library, struct returns of
+every size, floating point including `long double`, VLAs, all 19 standard
+headers. What does not: ten c-testsuite frontend refusals (incomplete `enum`,
+multi-declarators, abstract declarators, four `expected an expression` shapes,
+`undefined variable` from `##`, `#line` with a macro argument) and one compiler
+crash (00204).
+
+The number that matters for replacing tcc is not 209/220. It is that the
+percentage counts programs which *agree*, and says nothing about how often fcc is
+right for the wrong reason. So the next work is the four uncharacterised chibicc
+mismatches and the 00204 crash, not another percentage.
+
+**Cross-compilation is not supported**, by decision D4 ("one platform at a time")
+rather than omission. Sizing what a second target costs, measured rather than
+guessed:
+
+- The Microsoft x64 ABI already lives alone in `src/ast/abi.v` and is reached
+  through **49** sites outside that file. A second x86-64 target is therefore
+  ABI parameterisation, not a rewrite.
+- The backend is monolithic: **425** hardcoded x86-64 register operands across
+  `gen.v` and `asm.v`, about 2,350 lines. A different architecture is a new
+  backend.
+- The type model is fixed — `long` 4, `wchar_t` 2, `long double` 8 — across 14
+  target-constant sites in `types.v`, and the preprocessor defines only `_WIN32`,
+  `_WIN64` and `__LLP64__`.
+
+So Linux/x86-64 (System V, `long`=8, `wchar_t`=4, no shadow space, different
+callee-saved set, varargs in `%al`) is bounded work. aarch64 is not.

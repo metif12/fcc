@@ -38,11 +38,15 @@
 <table>
 <tr><th>Suite</th><th>Result</th></tr>
 <tr><td>Differential end-to-end (<code>tests/endtoend/</code>)</td><td><strong>20 of 20 match</strong> tcc/gcc</td></tr>
-<tr><td><a href="https://github.com/c-testsuite/c-testsuite">c-testsuite</a> single-exec (220 cases)</td><td><strong>208 match</strong>, 12 differ with tcc control each</td></tr>
-<tr><td>chibicc suite</td><td>9 of 18 (9 are host-ABI divergences, not defects)</td></tr>
-<tr><td>Unit tests (<code>v test .</code>)</td><td><strong>10 of 10</strong></td></tr>
+<tr><td><a href="https://github.com/c-testsuite/c-testsuite">c-testsuite</a> single-exec (220 cases)</td><td><strong>209 match</strong>, 11 differ with tcc control each</td></tr>
+<tr><td>chibicc suite</td><td>9 of 18 &mdash; 3 measured host-ABI divergences, 1 frontend gap, 1 backend crash, 4 uncharacterised</td></tr>
+<tr><td>Unit tests (<code>v test .</code>)</td><td><strong>10 of 10</strong>, stock V and local build</td></tr>
 </table>
 <p>Every differ carries its tcc oracle control, so a defect in fcc is distinguished from a gap tcc shares. Open items and their reproducers live in <a href="https://github.com/metif12/fcc/blob/master/docs/PLAN.md"><code>docs/PLAN.md</code></a>.</p>
+
+<h2>How ready, and what is not cross-compiled</h2>
+<p>Whole translation units work today: data section with relocations, initializers and bitfields, the full expression and statement walk, variadic calls into mingw&rsquo;s C library, struct returns of every size, floating point including <code>long double</code>, VLAs, and all 19 standard headers. Ten c-testsuite cases are frontend refusals tcc accepts, and one crashes the compiler. The honest gap to replacing tcc is not the percentage &mdash; it is that one wrong answer in a large codebase is enough to stop someone shipping with it.</p>
+<p><strong>Cross-compilation is not supported</strong>, by decision D4 rather than omission. The target is Win32/Win64 x86-64, hardcoded in the preprocessor macros, the type model (<code>long</code>=4, <code>wchar_t</code>=2, <code>long double</code>=8) and the backend. The Microsoft x64 ABI does live alone in <code>src/ast/abi.v</code> and is reached from 49 sites, so a second x86-64 target is ABI parameterisation rather than a rewrite; a different architecture is a new backend.</p>
 
 <h2>Diagnostics</h2>
 <p>Errors keep the terse <code>tcc:</code> first line the V driver keys on, followed by a source block with file, line, column, a caret span, and <code>= help:</code> hints where the fix is known:</p>
