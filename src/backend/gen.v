@@ -1479,24 +1479,31 @@ fn (mut g AsmGen) spill_params(fun &ast.Obj) {
 		if param.offset > 0 {
 			continue
 		}
-		ty := param.ty
-		if ty.kind == .struct_ || ty.kind == .union_ {
-			if has_flonum(ty, 0, 8, 0) {
-				g.store_fp(fp, param.offset, imin(8, ty.size))
-			} else {
-				g.store_gp(gp, param.offset, imin(8, ty.size))
-			}
+	ty := param.ty
+	if ty.kind == .struct_ || ty.kind == .union_ {
+		// Each eightbyte advances its own counter, matching `assign_lvar_offsets`:
+		// a floating first half takes an SSE register and the second half takes
+		// the next one of its own class. Advancing only one counter, or advancing
+		// after both, spills the second half from the first half's register — so
+		// a 16-byte struct of two doubles arrived as the first double twice.
+		if has_flonum(ty, 0, 8, 0) {
+			g.store_fp(fp, param.offset, imin(8, ty.size))
+			fp++
+		} else {
+			g.store_gp(gp, param.offset, imin(8, ty.size))
 			gp++
-			if ty.size > 8 {
-				if has_flonum(ty, 8, 16, 0) {
-					g.store_fp(fp, param.offset + 8, ty.size - 8)
-				} else {
-					g.store_gp(gp, param.offset + 8, ty.size - 8)
-				}
-				fp++
-			}
-			continue
 		}
+		if ty.size > 8 {
+			if has_flonum(ty, 8, 16, 0) {
+				g.store_fp(fp, param.offset + 8, ty.size - 8)
+				fp++
+			} else {
+				g.store_gp(gp, param.offset + 8, ty.size - 8)
+				gp++
+			}
+		}
+		continue
+	}
 		if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_) {
 			// A `long double` spills exactly as a `double` does — 8 bytes from its
 			// XMM register to the frame slot. The `fldt`/`fstpt` through an address
