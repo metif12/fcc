@@ -140,6 +140,25 @@ pub fn copy_type(ty &ast.Type) &ast.Type {
 	return &c
 }
 
+// unqualified_copy copies a type without its top-level qualifiers, for the
+// `_Generic` controlling expression: matching happens after stripping, so a
+// `const int` lvalue matches `int` and never `const int`.
+//
+// The origin is pointed past the qualified level, not at it: a copy's origin
+// is the type it was made from, so leaving it would hand the next
+// origin-following comparison the qualifier right back.
+pub fn unqualified_copy(ty &ast.Type) &ast.Type {
+	mut c := copy_type(ty)
+	c.is_const = false
+	c.is_volatile = false
+	if ty.origin != unsafe { nil } {
+		c.origin = ty.origin
+	} else {
+		c.origin = unsafe { nil }
+	}
+	return &c
+}
+
 pub fn pointer_to(base &ast.Type) &ast.Type {
 	mut ty := new_type(.pointer, .none, 8, 8)
 	ty.base = base
@@ -264,49 +283,71 @@ pub fn is_compatible(t1 &ast.Type, t2 &ast.Type) bool {
 // `double` is not `float`, so `_Generic(100.0, double: 1, float: 4)` selects the
 // `double` association. is_compatible treats them as one class, which is correct for
 // assignment and function calls but wrong here.
+//
+// Qualifiers participate at every level: `const int` is not `int`, and neither is
+// `const int *` the same as `int *`. They are checked before the origin chain,
+// because a qualified copy's origin is the unqualified type it was made from —
+// following origins first would match across the qualifier without ever seeing it.
+// And origins unwrap symmetrically after the check, so two spellings of the same
+// qualified type still meet through their shared structure.
 pub fn is_exact_type_match(t1 &ast.Type, t2 &ast.Type) bool {
 	if t1 == t2 {
 		return true
 	}
-	if t1.origin != unsafe { nil } {
-		return is_exact_type_match(t1.origin, t2)
-	}
-	if t2.origin != unsafe { nil } {
-		return is_exact_type_match(t1, t2.origin)
-	}
-	if t1.kind != t2.kind {
+	// Qualifiers participate at every level: `const int` is not `int`, and
+	// neither is `const int *` the same as `int *`. Checked before unwrapping,
+	// because an origin points at the type a copy was made from — following it
+	// first would compare through the qualifier instead of against it.
+	if t1.is_const != t2.is_const || t1.is_volatile != t2.is_volatile {
 		return false
 	}
-	match t1.kind {
+	// Unwrap aliases fully on both sides to reach the structural types. The
+	// qualifiers above were already verified equal, and nested qualifiers are
+	// checked by the recursion below, so the unwrapped comparison is structural.
+	mut u1 := t1
+	for u1.origin != unsafe { nil } {
+		u1 = u1.origin
+	}
+	mut u2 := t2
+	for u2.origin != unsafe { nil } {
+		u2 = u2.origin
+	}
+	if u1 == u2 {
+		return true
+	}
+	if u1.kind != u2.kind {
+		return false
+	}
+	match u1.kind {
 		.basic {
-			if is_flonum(t1) || is_flonum(t2) {
-				return t1.basic == t2.basic
+			if is_flonum(u1) || is_flonum(u2) {
+				return u1.basic == u2.basic
 			}
-			return t1.basic == t2.basic && t1.is_unsigned == t2.is_unsigned
+			return u1.basic == u2.basic && u1.is_unsigned == u2.is_unsigned
 		}
-		.pointer { return is_exact_type_match(t1.base, t2.base) }
+		.pointer { return is_exact_type_match(u1.base, u2.base) }
 		.func {
-			if !is_exact_type_match(t1.ret_type, t2.ret_type) {
+			if !is_exact_type_match(u1.ret_type, u2.ret_type) {
 				return false
 			}
-			if t1.is_variadic != t2.is_variadic {
+			if u1.is_variadic != u2.is_variadic {
 				return false
 			}
-			if t1.params.len != t2.params.len {
+			if u1.params.len != u2.params.len {
 				return false
 			}
-			for i, p in t1.params {
-				if !is_exact_type_match(p, t2.params[i]) {
+			for i, p in u1.params {
+				if !is_exact_type_match(p, u2.params[i]) {
 					return false
 				}
 			}
 			return true
 		}
 		.array {
-			if !is_exact_type_match(t1.base, t2.base) {
+			if !is_exact_type_match(u1.base, u2.base) {
 				return false
 			}
-			return t1.array_len < 0 || t2.array_len < 0 || t1.array_len == t2.array_len
+			return u1.array_len < 0 || u2.array_len < 0 || u1.array_len == u2.array_len
 		}
 		else { return false }
 	}
@@ -339,13 +380,47 @@ fn get_common_type(ty1 &ast.Type, ty2 &ast.Type) &ast.Type {
 	// promotion rule, and it is why `char + char` is an int addition.
 	a := if ty1.size < 4 { ty_int } else { ty1 }
 	b := if ty2.size < 4 { ty_int } else { ty2 }
-	if a.size != b.size {
-		return if a.size < b.size { b } else { a }
+	// Rank decides before size: `long` outranks `int` even though both are 4
+	// bytes here, so `int + long` is a `long` addition and not an `int` one.
+	// The old code compared sizes first and returned the first operand on a tie,
+	// which made `i + 2L` an int and a `_Generic` on it miss the `long`
+	// association it should have matched.
+	ar := int_rank(a.basic)
+	br := int_rank(b.basic)
+	if ar != br {
+		hi := if ar > br { a } else { b }
+		lo := if ar > br { b } else { a }
+		if hi.is_unsigned {
+			return hi
+		}
+		if lo.is_unsigned && hi.size <= lo.size {
+			return unsigned_version(hi)
+		}
+		return hi
 	}
 	if b.is_unsigned {
 		return b
 	}
 	return a
+}
+
+// int_rank orders integer types by conversion rank (C11 6.3.1.1): long long
+// outranks long outranks int, whether or not the sizes differ. Unsigned types
+// share their signed counterpart's rank.
+fn int_rank(b ast.Basic) int {
+	if b == .llong_ {
+		return 4
+	}
+	if b == .long_ {
+		return 3
+	}
+	if b == .int_ {
+		return 2
+	}
+	if b == .short_ {
+		return 1
+	}
+	return 0
 }
 
 // usual_arith_conv promotes both operands of a binary operator to one type.

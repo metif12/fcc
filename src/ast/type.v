@@ -115,6 +115,13 @@ pub mut:
 	// is_atomic marks `_Atomic T`. Nothing in vcc generates different code for
 	// it yet; the flag exists so the parser can accept and record it.
 	is_atomic bool
+	// is_const and is_volatile mark a qualified type. They matter for exactly
+	// one thing today: `_Generic` matches associations exactly, and a qualified
+	// association never matches — so the parser records what it sees rather
+	// than dropping it, and the generic selection strips the controlling
+	// expression's qualifiers before comparing.
+	is_const   bool
+	is_volatile bool
 	// origin is the type this one was copied from. Type compatibility is decided
 	// through it, which is what makes two spellings of the same typedef compare
 	// equal without comparing their structure.

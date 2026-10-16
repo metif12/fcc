@@ -780,6 +780,15 @@ fn (mut p Parser) generic_selection() &ast.Node {
 	} else if ctrl_ty.kind == .vla {
 		ctrl_ty = pointer_to(ctrl_ty.base)
 	}
+	// Top-level qualifiers are stripped before matching: `_Generic` on a
+	// `const int` lvalue matches `int`, never `const int` — measured against
+	// both gcc and tcc, which agree that a `const int` association goes
+	// unmatched even for a `const int` controlling expression while `int`
+	// matches regardless of order. Nested qualifiers stay: `const char *`
+	// still differs from `char *`, because the pointer itself is unqualified.
+	if ctrl_ty.is_const || ctrl_ty.is_volatile {
+		ctrl_ty = unqualified_copy(ctrl_ty)
+	}
 
 	mut ret := unsafe { nil }
 	mut default_ret := unsafe { nil }
@@ -800,9 +809,19 @@ fn (mut p Parser) generic_selection() &ast.Node {
 		assoc_ty := p.typename()
 		p.expect(':')
 		node := p.assign()
-		// The last matching association wins, as [C11 6.5.1.1p2] requires.
-		if is_exact_type_match(ctrl_ty, assoc_ty) {
-			ret = node
+		// A top-level qualified association never matches: the controlling type
+		// is stripped above, so it is always unqualified at the top, and an
+		// exact match requires the qualifier to be there on both sides.
+		// Nested qualifiers still participate — `const char *` differs from
+		// `char *` — because only the top level was stripped. Skipping here
+		// rather than in the matcher keeps `is_exact_type_match` qualifier-blind
+		// for every other use, of which there are none today but the next one
+		// should not inherit `_Generic`'s rule.
+		if !(assoc_ty.is_const || assoc_ty.is_volatile) {
+			// The last matching association wins, as [C11 6.5.1.1p2] requires.
+			if is_exact_type_match(ctrl_ty, assoc_ty) {
+				ret = node
+			}
 		}
 	}
 	if ret == unsafe { nil } {

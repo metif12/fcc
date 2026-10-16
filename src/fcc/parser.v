@@ -719,6 +719,8 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 	mut ty := ty_int
 	mut counter := 0
 	mut atomic_spec := false
+	mut const_spec := false
+	mut volatile_spec := false
 
 	// mingw's headers write attributes *between* the specifiers as well as before them:
 	// `extern` on one line, `__attribute__((format(gnu_printf, 3, 0)))` on the next, and
@@ -778,13 +780,19 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 			continue
 		}
 
-		// Recognised and ignored: they qualify the type without changing it.
-		//
-		// The calling-convention specifiers belong here too, and ignoring them is right
-		// on this target: the Microsoft x64 ABI has one convention, so none of them
-		// changes how an argument is passed. See `calling_convention_keywords`.
-		if p.consume('const') || p.consume('volatile') || p.consume('auto')
-			|| p.consume('register') || p.consume('restrict') || p.consume('__restrict')
+		// Recognised and recorded: qualifiers change what `_Generic` matches, so
+		// they are kept on the type rather than dropped. Storage-class and
+		// calling-convention specifiers are still ignored — they qualify the
+		// declaration, not the type.
+		if p.consume('const') {
+			const_spec = true
+			continue
+		}
+		if p.consume('volatile') {
+			volatile_spec = true
+			continue
+		}
+		if p.consume('auto') || p.consume('register') || p.consume('restrict') || p.consume('__restrict')
 			|| p.consume('__restrict__') || p.consume('_Noreturn')
 			|| p.consume('__extension__')
 			|| tok.text in calling_convention_keywords {
@@ -929,6 +937,14 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 		ty = copy_type(ty)
 		ty.is_atomic = true
 	}
+	if const_spec {
+		ty = copy_type(ty)
+		ty.is_const = true
+	}
+	if volatile_spec {
+		ty = copy_type(ty)
+		ty.is_volatile = true
+	}
 	return ty
 }
 
@@ -1071,6 +1087,11 @@ struct Decl {
 mut:
 	// ptrs is the number of `*` before the name.
 	ptrs int
+	// ptr_const and ptr_volatile mark which of those levels was qualified:
+	// `int * const p` qualifies the pointer itself, where `const int *p`
+	// qualifies what it points at. Parallel to `ptrs` by index.
+	ptr_const   []bool
+	ptr_volatile []bool
 	// nested is a declarator inside parentheses, as in `(*fp)`.
 	nested ?&Decl
 	name   string
@@ -1104,18 +1125,30 @@ mut:
 // `int (*)(void)`.
 fn (mut p Parser) parse_decl_shape(allow_name bool) &Decl {
 	mut d := &Decl{
-		ptrs:     0
-		nested:   none
-		name:     ''
-		line:     p.tok().line.disp_line
-		suffixes: []Suffix{}
+		ptrs:         0
+		ptr_const:    []bool{}
+		ptr_volatile: []bool{}
+		nested:       none
+		name:         ''
+		line:         p.tok().line.disp_line
+		suffixes:     []Suffix{}
 	}
 	for p.consume('*') {
 		d.ptrs++
+		mut c := false
+		mut v := false
 		for p.at('const') || p.at('volatile') || p.at('restrict') || p.at('__restrict')
 			|| p.at('__restrict__') {
+			if p.at('const') {
+				c = true
+			}
+			if p.at('volatile') {
+				v = true
+			}
 			p.pos++
 		}
+		d.ptr_const << c
+		d.ptr_volatile << v
 	}
 
 	if p.at('(') && p.starts_declarator_at(1) {
@@ -1219,19 +1252,36 @@ fn (mut p Parser) build_decl(base &ast.Type, d &Decl) &ast.Type {
 		// first put the pointer outside the function — `p` came out as
 		// pointer-to-pointer instead of pointer-to-function — and a call
 		// through it dereferenced the function's own code bytes.
-		for _ in 0 .. d.ptrs {
-			t = pointer_to(t)
+		for i in 0 .. d.ptrs {
+			t = p.qualified_pointer(t, d, i)
 		}
 		for i := d.suffixes.len - 1; i >= 0; i-- {
 			t = p.apply_suffix(t, d.suffixes[i])
 		}
 		return p.build_decl(t, nested)
 	}
-	for _ in 0 .. d.ptrs {
-		t = pointer_to(t)
+	for i in 0 .. d.ptrs {
+		t = p.qualified_pointer(t, d, i)
 	}
 	for i := d.suffixes.len - 1; i >= 0; i-- {
 		t = p.apply_suffix(t, d.suffixes[i])
+	}
+	return t
+}
+
+// qualified_pointer wraps a type in one pointer level, carrying that level's
+// qualifiers: `int * const p` qualifies the pointer itself, where `const int *p`
+// qualifies what it points at (which the declaration specifiers already recorded
+// on the base).
+fn (mut p Parser) qualified_pointer(base &ast.Type, d &Decl, i int) &ast.Type {
+	mut t := pointer_to(base)
+	if i < d.ptr_const.len && d.ptr_const[i] {
+		t = copy_type(t)
+		t.is_const = true
+	}
+	if i < d.ptr_volatile.len && d.ptr_volatile[i] {
+		t = copy_type(t)
+		t.is_volatile = true
 	}
 	return t
 }

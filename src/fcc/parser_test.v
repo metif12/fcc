@@ -12,6 +12,8 @@ import ast
 // parsed runs a snippet through the parser with no preprocessor, which is what a
 // declaration-only test needs.
 fn parsed(src string) ParseResult {
+	return parse_tokens(tokenize(src), 'test.c', []PackEvent{})
+}
 
 // A pp-number that is not a valid constant is a diagnostic, not a value.
 //
@@ -45,9 +47,6 @@ fn test_an_invalid_pp_number_is_reported_not_decoded() {
 		r := parsed('int x = ${chr};\n')
 		assert r.errors.len == 0, 'unexpected diagnostic for ${chr}: ${r.errors}'
 	}
-}
-
-	return parse_tokens(tokenize(src), 'test.c', []PackEvent{})
 }
 
 // preprocessed runs a snippet through the preprocessor first, which is what any test
@@ -187,9 +186,12 @@ fn test_a_variadic_function_is_marked() {
 	assert ty.kind == .func
 	assert ty.is_variadic
 	assert ty.params.len == 1
-	// `char *` decays to a pointer to char here, not to an array of them.
+	// `char *` decays to a pointer to char here, not to an array of them. The base
+	// carries the qualifier — `const char`, not plain `char` — which is what
+	// lets `_Generic` tell them apart.
 	assert ty.params[0].kind == .pointer
-	assert ty.params[0].base == ty_char
+	assert ty.params[0].base.basic == .char_
+	assert ty.params[0].base.is_const
 }
 
 fn test_the_builtin_va_list_is_a_pointer_to_char() {
