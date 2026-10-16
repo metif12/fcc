@@ -26,9 +26,10 @@ jobs:
           git checkout weekly.2026.41
           # `make.bat` does not exist at this tag; the Windows entry point is
           # `makev.bat` (it became `make.bat` again later — do not "fix" this
-          # to `make.bat` without checking the tag first). `-gcc` avoids the
-          # bundled tcc, which cannot link V's own runtime in this environment.
-          & "$env:RUNNER_TEMP\vhome\makev.bat" -gcc
+          # to `make.bat` without checking the tag first). `-msvc` uses the
+          # runner's Visual Studio; the bundled tcc cannot link V's runtime
+          # here and its gcc fallback fails at link time.
+          & "$env:RUNNER_TEMP\vhome\makev.bat" -msvc
           "V=$env:RUNNER_TEMP\vhome" | Out-File -FilePath $env:GITHUB_PATH -Append
           cd "$env:GITHUB_WORKSPACE"
 
