@@ -26,8 +26,9 @@ jobs:
           git checkout weekly.2026.41
           # `make.bat` does not exist at this tag; the Windows entry point is
           # `makev.bat` (it became `make.bat` again later — do not "fix" this
-          # to `make.bat` without checking the tag first).
-          & "$env:RUNNER_TEMP\vhome\makev.bat"
+          # to `make.bat` without checking the tag first). `-gcc` avoids the
+          # bundled tcc, which cannot link V's own runtime in this environment.
+          & "$env:RUNNER_TEMP\vhome\makev.bat" -gcc
           "V=$env:RUNNER_TEMP\vhome" | Out-File -FilePath $env:GITHUB_PATH -Append
           cd "$env:GITHUB_WORKSPACE"
 
