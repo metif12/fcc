@@ -178,13 +178,14 @@ b')
 
 fn test_backslash_newline_joins_lines() {
 	// A splice is not a token boundary, so `in\` + newline + `t` is one identifier.
-	assert texts('in\
-t') == ['int']
+	// The backslash is written `\\` and the newline `\n` rather than spelled as a
+	// literal backslash followed by a line break: stock V rejects that as an
+	// unknown escape sequence, while the C text being fed in is unchanged.
+	assert texts('in\\\nt') == ['int']
 }
 
 fn test_line_splice_inside_a_string_literal() {
-	assert strdata('"a\
-b"') == 'ab'
+	assert strdata('"a\\\nb"') == 'ab'
 }
 
 fn test_line_counter_advances_past_a_splice() {
