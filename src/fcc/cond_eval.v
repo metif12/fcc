@@ -34,6 +34,22 @@ mut:
 	pos  int
 	p    &Preprocessor
 	line int
+	// quiet suppresses diagnostics while parsing a short-circuited branch.
+	// C11 6.5.1 requires `&&`, `||` and `?:` to skip their untaken side, so
+	// `0 && (0/0)` must not report division by zero — and since the branch is
+	// dead, syntax oddities inside it are not reported either. The tokens are
+	// still consumed so the parser stays aligned; only the diagnostics and the
+	// dangerous arithmetic are skipped.
+	quiet bool
+}
+
+// err records a diagnostic unless the evaluator is skipping a short-circuited
+// branch, whose dead code must not diagnose.
+fn (mut e CondEval) err(msg string) {
+	if e.quiet {
+		return
+	}
+	e.p.errorf(e.line, msg)
 }
 
 // eval_condition evaluates an `#if` or `#elif` operand.
@@ -185,18 +201,41 @@ fn (mut e CondEval) conditional() Eval {
 	if !e.eat('?') {
 		return cond
 	}
-	then_val := e.conditional()
-	if !e.eat(':') {
-		e.p.errorf(e.line, 'expected : in #if conditional')
+	if cond.v != 0 {
+		then_val := e.conditional()
+		if !e.eat(':') {
+			e.err('expected : in #if conditional')
+			return then_val
+		}
+		e.quiet = true
+		e.conditional()
+		e.quiet = false
 		return then_val
 	}
-	else_val := e.conditional()
-	return if cond.v != 0 { then_val } else { else_val }
+	e.quiet = true
+	e.conditional()
+	e.quiet = false
+	if !e.eat(':') {
+		e.err('expected : in #if conditional')
+		return cond
+	}
+	return e.conditional()
 }
 
 fn (mut e CondEval) logical_or() Eval {
 	mut left := e.logical_and()
 	for e.eat('||') {
+		if left.v != 0 {
+			// Short-circuit: the result is true whatever follows, so parse
+			// past it quietly instead of evaluating it. Normalize to 1 here:
+			// leaving the raw nonzero value would make `1 != (-1 || ...)`
+			// true, when the comparison is against the boolean 1.
+			e.quiet = true
+			e.logical_and()
+			e.quiet = false
+			left = bool_eval(true)
+			continue
+		}
 		right := e.logical_and()
 		left = bool_eval((left.v != 0) || (right.v != 0))
 	}
@@ -206,6 +245,15 @@ fn (mut e CondEval) logical_or() Eval {
 fn (mut e CondEval) logical_and() Eval {
 	mut left := e.bit_or()
 	for e.eat('&&') {
+		if left.v == 0 {
+			// Short-circuit: the result is false whatever follows.
+			// Normalized to 0 for the same reason as `||` normalizes to 1.
+			e.quiet = true
+			e.bit_or()
+			e.quiet = false
+			left = bool_eval(false)
+			continue
+		}
 		right := e.bit_or()
 		left = bool_eval((left.v != 0) && (right.v != 0))
 	}
@@ -352,7 +400,7 @@ fn (mut e CondEval) multiplicative() Eval {
 		if e.eat('/') {
 			right := e.unary()
 			if right.v == 0 {
-				e.p.errorf(e.line, 'division by zero in #if')
+				e.err('division by zero in #if')
 				return left
 			}
 			left = arith(left.v / right.v, left.is_unsigned || right.is_unsigned)
@@ -361,7 +409,7 @@ fn (mut e CondEval) multiplicative() Eval {
 		if e.eat('%') {
 			right := e.unary()
 			if right.v == 0 {
-				e.p.errorf(e.line, 'modulo by zero in #if')
+				e.err('modulo by zero in #if')
 				return left
 			}
 			left = arith(left.v % right.v, left.is_unsigned || right.is_unsigned)
@@ -393,14 +441,14 @@ fn (mut e CondEval) unary() Eval {
 
 fn (mut e CondEval) primary() Eval {
 	t := e.peek() or {
-		e.p.errorf(e.line, 'unexpected end of #if expression')
+		e.err('unexpected end of #if expression')
 		return Eval{}
 	}
 	if t.text == '(' {
 		e.pos++
 		v := e.conditional()
 		if !e.eat(')') {
-			e.p.errorf(e.line, 'expected ) in #if expression')
+			e.err('expected ) in #if expression')
 		}
 		return v
 	}
@@ -412,7 +460,7 @@ fn (mut e CondEval) primary() Eval {
 		return arith(t.val, is_unsigned_literal(t.text))
 	}
 	if t.kind == .keyword {
-		e.p.errorf(e.line, 'unexpected keyword ${t.text} in #if expression')
+		e.err('unexpected keyword ${t.text} in #if expression')
 		e.pos++
 		return Eval{}
 	}
@@ -429,7 +477,7 @@ fn (mut e CondEval) primary() Eval {
 		}
 		return Eval{}
 	}
-	e.p.errorf(e.line, 'unexpected token ${t.text} in #if expression')
+	e.err('unexpected token ${t.text} in #if expression')
 	e.pos++
 	return Eval{}
 }
@@ -443,12 +491,12 @@ fn (mut e CondEval) defined() Eval {
 		paren = true
 	}
 	name := e.peek() or {
-		e.p.errorf(e.line, 'expected a macro name after defined')
+		e.err('expected a macro name after defined')
 		return Eval{}
 	}
 	e.pos++
 	if paren && !e.eat(')') {
-		e.p.errorf(e.line, 'expected ) after defined')
+		e.err('expected ) after defined')
 	}
 	return bool_eval(e.p.is_defined(name.text))
 }
