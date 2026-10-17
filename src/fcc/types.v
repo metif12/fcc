@@ -25,6 +25,94 @@ import ast
 // Using chibicc's numbers here would not fail loudly. It would make every `long`
 // field in every V-generated struct the wrong width, and the symptom would
 // surface as corrupted data somewhere unrelated.
+//
+// Three of the entries are not properties of the language at all — `long`,
+// `long double` and `wchar_t` are the *target's* data model — so they are read
+// from `ast.Target` rather than written here, and the table above is the Windows
+// x64 one that `ast.windows_x86_64` holds. The Linux numbers are measured in
+// `src/ast/target.v`. Everything else on this table is the same on both targets
+// and stays a `const`.
+
+// --- the target the front end is typing for ---
+//
+// `cur_target` is the one piece of module-level state in the front end, and it
+// exists because the alternative was measured and rejected: the target-dependent
+// types are read by `numeric_type`, which `add_type` calls for every numeric
+// literal, and `add_type` has 88 call sites of its own. Threading a `&ast.Target`
+// through all of them — plus the `type_child` recursion that calls back into it —
+// is a several-hundred-site change to express one constant.
+//
+// Its contract is narrow, and the contract is what makes it safe:
+//
+//   - it is written once per process, by `set_target`, before any parsing;
+//   - it is never written while nodes are being typed, so two compilations in one
+//     process cannot see different targets at the same moment;
+//   - it always holds *one* `ast.Target`, whose cached types are built by the
+//     target's constructor. That is what preserves type identity: `ty_long()` and
+//     the type a `long` declaration gets are the same pointer, which
+//     `is_exact_type_match` and the initializer writers rely on.
+//
+// fcc compiles one translation unit per process and `emit_asm` walks its inputs
+// sequentially, so there is no concurrency to serialise against.
+//
+// It also needs `v -enable-globals`, which the build instructions and the CI
+// workflow both pass. Without the flag the build fails loudly rather than
+// miscompiling.
+__global (
+	cur_target &ast.Target
+	cur_triple string
+)
+
+// current_target is the target being compiled for, defaulting to the one fcc was
+// built for. It is safe to call before `set_target_triple`: the default is
+// materialised once and kept, so the first call and every call after it see the
+// same types.
+//
+// It is not named `target` because four functions in `stmt.v` and this file have a
+// local variable called `target`, and shadowing a function that is in scope is how
+// a call silently starts reading the wrong value.
+//
+// The target is built here rather than by the driver, because the driver only
+// needs its *name*: it validates `-target` and decides whether code generation is
+// possible, and neither question needs the object — `abi_for_triple` answers both
+// without allocating. That keeps one construction of the target per process
+// rather than one per lookup, and it keeps a several-hundred-byte allocation out
+// of `main`.
+//
+// It does *not* dodge the latent parse crash recorded in `docs/PLAN.md`. Building
+// the target in `main` was tried first and made no difference: the fault moved
+// with `main`'s stack frame either way. It is a defect of its own, not something
+// this arrangement papers over.
+pub fn current_target() &ast.Target {
+	if cur_target == unsafe { nil } {
+		cur_target = if cur_triple == '' {
+			ast.host_target()
+		} else {
+			ast.target_by_triple(cur_triple) or { ast.host_target() }
+		}
+	}
+	return cur_target
+}
+
+// set_target_triple selects the target for the rest of the process by name,
+// without building it. See the contract above, and `current_target` for why the
+// building is deferred.
+//
+// The triple is assumed to have been validated by the driver; an unknown one falls
+// back to the host target rather than being an error here, because by the time
+// this is called the driver has already reported it.
+pub fn set_target_triple(triple string) {
+	cur_triple = triple
+	cur_target = unsafe { nil }
+}
+
+// set_target selects the target for the rest of the process. See the contract
+// above; this is the writer, and it is what the tests use because they need to put
+// a *specific* target in place rather than name one.
+pub fn set_target(t &ast.Target) {
+	cur_triple = t.triple
+	cur_target = t
+}
 
 // max_int32 is the largest value an unsuffixed decimal constant can hold before
 // it has to be something wider than int.
@@ -41,27 +129,43 @@ pub const ty_char = &ast.Type{ kind: .basic, basic: .char_, size: 1, align: 1 }
 pub const ty_schar = &ast.Type{ kind: .basic, basic: .char_, size: 1, align: 1, is_signed: true }
 pub const ty_short = &ast.Type{ kind: .basic, basic: .short_, size: 2, align: 2 }
 pub const ty_int = &ast.Type{ kind: .basic, basic: .int_, size: 4, align: 4 }
-// ty_long is 4 bytes here, so `long` and `int` are the same width. They are still
-// different types: `long long` is 8 bytes and the usual arithmetic conversions
-// distinguish them.
-pub const ty_long = &ast.Type{ kind: .basic, basic: .long_, size: 4, align: 4 }
+// ty_long is the target's `long`: four bytes on the Windows x64 model, which is
+// the same width as `int`, and eight on LP64. They are still different types on
+// both — `long long` is 8 bytes and the usual arithmetic conversions distinguish
+// them by rank rather than by size.
+//
+// It is a function rather than a `const` because the width is the target's, not
+// the language's. It returns the same pointer on every call, which is what
+// `is_exact_type_match` and the qualifier copies need.
+pub fn ty_long() &ast.Type {
+	return current_target().long_type()
+}
 pub const ty_llong = &ast.Type{ kind: .basic, basic: .llong_, size: 8, align: 8 }
 pub const ty_uchar = &ast.Type{ kind: .basic, basic: .char_, size: 1, align: 1, is_unsigned: true }
 pub const ty_ushort = &ast.Type{ kind: .basic, basic: .short_, size: 2, align: 2, is_unsigned: true }
 pub const ty_uint = &ast.Type{ kind: .basic, basic: .int_, size: 4, align: 4, is_unsigned: true }
-pub const ty_ulong = &ast.Type{ kind: .basic, basic: .long_, size: 4, align: 4, is_unsigned: true }
+// ty_ulong is `long`'s unsigned counterpart, so it moves with it: four bytes on
+// Windows, eight on LP64. Same pointer every call, for the reason on `ty_long`.
+pub fn ty_ulong() &ast.Type {
+	return current_target().ulong_type()
+}
 pub const ty_ullong = &ast.Type{ kind: .basic, basic: .llong_, size: 8, align: 8, is_unsigned: true }
 pub const ty_float = &ast.Type{ kind: .basic, basic: .float_, size: 4, align: 4 }
 pub const ty_double = &ast.Type{ kind: .basic, basic: .double_, size: 8, align: 8 }
-// A `long double` is eight bytes, not sixteen, and not ten. tcc reports 8 and 8
-// on this host, measured, and passes one exactly as it passes a `double` — the
-// 64-bit value in a general register for a variadic call, which is what msvcrt's
-// `printf` reads for `%Lf`. gcc reports 16 and 16 and spills an 80-bit value,
-// which its own statically-linked `printf` then reads, but msvcrt's does not.
-// Since tcc is the primary oracle — same headers, same objects, same C library —
-// this generator agrees with tcc: a `long double` is a `double` in every path
+// A `long double` is eight bytes on the Windows target — not sixteen, and not ten.
+// tcc reports 8 and 8 on this host, measured, and passes one exactly as it passes
+// a `double` — the 64-bit value in a general register for a variadic call, which is
+// what msvcrt's `printf` reads for `%Lf`. gcc reports 16 and 16 and spills an
+// 80-bit value, which its own statically-linked `printf` then reads, but msvcrt's
+// does not. Since tcc is the primary oracle — same headers, same objects, same C
+// library — the Windows target treats a `long double` as a `double` in every path
 // below, and the x87 ten-byte operations are not reached for it.
-pub const ty_ldouble = &ast.Type{ kind: .basic, basic: .ldouble_, size: 8, align: 8 }
+//
+// On Linux it *is* 16: the 80-bit x87 format in a 16-byte slot, 16-byte aligned.
+// So the width is the target's, and the x87 operations become reachable there.
+pub fn ty_ldouble() &ast.Type {
+	return current_target().ldouble_type()
+}
 
 // ty_size_t is what `sizeof` and `_Alignof` evaluate to.
 //
@@ -375,7 +479,7 @@ fn get_common_type(ty1 &ast.Type, ty2 &ast.Type) &ast.Type {
 		return pointer_to(ty2)
 	}
 	if ty1.basic == .ldouble_ || ty2.basic == .ldouble_ {
-		return ty_ldouble
+		return ty_ldouble()
 	}
 	if ty1.basic == .double_ || ty2.basic == .double_ {
 		return ty_double
@@ -603,9 +707,9 @@ pub fn add_type(mut node &ast.Node) {
 // int 31 while `0x1f` is a float — and one place that knows the rule keeps it out
 // of the lexer's hot path.
 //
-// The promotions implemented here are the ones this target needs. In particular an
-// unsuffixed decimal that does not fit an int becomes a long long, not a long,
-// because a long on this target is the same width as an int.
+// The promotions implemented here are the ones the target needs. In particular an
+// unsuffixed decimal that does not fit an int becomes a long long on Windows,
+// because a long there is the same width as an int, and a long on LP64.
 pub fn numeric_type(tok &ast.Token) &ast.Type {
 	// A prefixed *character* constant is a `wchar_t`, `char16_t` or `char32_t` and
 	// nothing else, so its prefix answers the question outright. It has to be asked
@@ -641,7 +745,7 @@ pub fn numeric_type(tok &ast.Token) &ast.Type {
 	// never pushed onto — the local got whatever the empty x87 stack held.
 	if is_hex_float(tok.text) || is_float_spelling(tok.text) {
 		if suffix.contains('l') || suffix.contains('L') {
-			return ty_ldouble
+			return ty_ldouble()
 		}
 		return ty_double
 	}
@@ -652,7 +756,7 @@ pub fn numeric_type(tok &ast.Token) &ast.Type {
 	if wide {
 		ty = ty_llong
 	} else if suffix.contains('l') || suffix.contains('L') {
-		ty = ty_long
+		ty = ty_long()
 	}
 	if unsigned {
 		return unsigned_version(ty)
@@ -660,9 +764,22 @@ pub fn numeric_type(tok &ast.Token) &ast.Type {
 	if tok.val <= i64(max_int32) {
 		return ty
 	}
+	// The constant does not fit an `int`, and what it becomes next is the
+	// target's question. C11 6.4.4.1 lists the remaining *decimal* candidates as
+	// `long` then `long long`, so on Windows — where a `long` is also 4 bytes and
+	// cannot hold it — it is a `long long`, while on LP64, where the `long` is 8
+	// bytes, it is a `long`. Returning `long long` unconditionally gets the Windows
+	// answer right and the LP64 one wrong, and the symptom would be a constant typed
+	// wider than the source asked for, which `sizeof` on a `_Generic` would report.
+	if !is_nondecimal(tok.text) {
+		return if ty_long().size >= 8 { ty_long() } else { ty_llong }
+	}
 	// A constant written in a base other than ten may be written to mean an
-	// unsigned type without saying so; a decimal one may not.
-	return if is_nondecimal(tok.text) { ty_uint } else { ty_llong }
+	// unsigned type without saying so; a decimal one may not. This answers `unsigned
+	// int` without asking whether the value fits in 32 bits, which is right for every
+	// hex constant that does and truncates one that does not. That gap predates the
+	// target work and is recorded in `docs/PLAN.md` rather than fixed here.
+	return ty_uint
 }
 
 // numeric_suffix returns the type suffix of a literal's spelling.
@@ -780,7 +897,9 @@ fn unsigned_version(ty &ast.Type) &ast.Type {
 	return match ty.basic {
 		.char_ { ty_uchar }
 		.short_ { ty_ushort }
-		.long_ { ty_ulong }
+		// `unsigned long` is the target's, because `long` is: a Windows `long` is
+		// 4 bytes so its unsigned form is 4, and on LP64 both are 8.
+		.long_ { ty_ulong() }
 		.llong_ { ty_ullong }
 		else { ty_uint }
 	}
@@ -852,7 +971,12 @@ pub fn string_literal_type(tok &ast.Token) &ast.Type {
 // prefix decides.
 //
 // The widths are measured, not carried over from chibicc. chibicc is System V, where
-// `wchar_t` is four bytes; on this target it is two, and so is `char16_t`.
+// `wchar_t` is four bytes; on the Windows target it is two, and so is `char16_t`.
+//
+// `wchar_t` is the one prefix whose width is the target's rather than C's, so `L`
+// reads it from the target and the other three are constants here. Measured for all
+// four on both targets, and the two that are not target-dependent are the same on
+// both: `u` is 2 bytes and `U` is 4 on Windows and on Linux alike.
 pub fn string_element_type(tok &ast.Token) &ast.Type {
 	return wide_literal_type(tok) or { ty_char }
 }
@@ -892,10 +1016,14 @@ pub fn wide_literal_type(tok &ast.Token) ?&ast.Type {
 	}
 	match text[0] {
 		`L` {
+			// `L` alone is a `wchar_t`, which is the target's: `unsigned short` at two
+			// bytes on Windows, signed `int` at four on Linux. `Lu` and `LU` are not in
+			// C11, but the tokenizer has always accepted them, and taking their width
+			// from the second letter costs one `match` arm.
 			match text[1] {
 				`u` { return ty_ushort }
 				`U` { return ty_uint }
-				else { return ty_ushort }
+				else { return current_target().wchar_type() }
 			}
 		}
 		`u` {

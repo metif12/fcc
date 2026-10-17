@@ -862,6 +862,43 @@ Each has a reproducer, because an open defect without one is a story rather than
 bug. The second one is a correction of something written here earlier, which is why
 the wrong claim is quoted alongside the right one.
 
+**A three-term expression segfaults fcc, and whether it does depends on `main`'s
+stack frame.** Found while landing the `-target` work, and it is **pre-existing**:
+adding one unrelated pointer-sized local to `main` at `80d4644`, with no other
+change, reproduces it.
+
+```c
+int main(void){return 1 + 2 + 3;}
+```
+
+| tree | `fcc --dump-ast` on that source |
+|---|---|
+| `80d4644` as committed | fine |
+| `80d4644` + `dummy := &Options{}` in `main` | **segfault** |
+| `80d4644` + `dummy := [2]i64{}` (16 bytes) in `main` | fine |
+| `80d4644` + `dummy := [3]i64{}` (24 bytes) in `main` | fine |
+| `80d4644` + `[]u8{len: 4096}` allocated in `main` | fine |
+| `80d4644` + `map[string]string{}` allocated in `main` | fine |
+| `80d4644` + `Options{}` by value in `main` | fine |
+
+The rows are the measurement. It is not the size of the addition — 16, 24 and 64
+bytes are all fine and 8 is not — and it is not merely "an allocation", because
+`[]u8{4096}` and a map are both fine. It is not in the target work either:
+`--preprocess` is unaffected, `1 + 2` is fine, `1 + 2 + 3` is not, and
+`--dump-ast` and `-S` both fault because both parse. Bisecting the crash back to a
+one-line change in `main` is what established that it predates `-target`.
+
+What is known and what is not: the fault is inside the parse path — instrumentation
+puts the last thing reached inside `add_type`'s `.num` arm — and it moves with the
+caller's frame, which is the signature of a stack write that lands on a live local
+or of a caller whose alignment assumption the callee does not share. It was not
+root-caused: V's `-g` build prints `print_backtrace_skipping_top_frames is not
+implemented`, the Windows box has no debugger, and the generated C is
+Windows-specific so it cannot be run under WSL's tools. **It needs its own
+session with a symbolising stack**, and until then the honest statement is that
+fcc's parse path has an unexplained memory fault that ordinary edits to `main` can
+expose.
+
 **A wide bitfield produced assembly GNU `as` rejected outright** — fixed in `4fb556e`,
 kept here only because the reasoning is what makes `bitfield_wide.c` worth having. A
 field wider than an int needs `(1 << 40) - 1`, and the generator emitted it as
@@ -1453,19 +1490,27 @@ percentage counts programs which *agree*, and says nothing about how often fcc i
 right for the wrong reason. So the next work is the four uncharacterised chibicc
 mismatches and the 00204 crash, not another percentage.
 
-**Cross-compilation is not supported**, by decision D4 ("one platform at a time")
-rather than omission. Sizing what a second target costs, measured rather than
-guessed:
+**Cross-compilation: the front end is done, the back end is not.** The sizing above
+is what it cost, and the first of those three bullets has been paid for.
+`src/ast/target.v` now holds a target — its data model, its predefined macros and
+the name of the calling convention it needs — and `-target=<triple>` switches the
+first two:
 
-- The Microsoft x64 ABI already lives alone in `src/ast/abi.v` and is reached
-  through **49** sites outside that file. A second x86-64 target is therefore
-  ABI parameterisation, not a rewrite.
-- The backend is monolithic: **425** hardcoded x86-64 register operands across
-  `gen.v` and `asm.v`, about 2,350 lines. A different architecture is a new
-  backend.
-- The type model is fixed — `long` 4, `wchar_t` 2, `long double` 8 — across 14
-  target-constant sites in `types.v`, and the preprocessor defines only `_WIN32`,
-  `_WIN64` and `__LLP64__`.
+| triple | `long` | `long double` | `wchar_t` | codegen |
+|---|---|---|---|---|
+| `x86_64-windows` (default) | 4 | 8 | `unsigned short` | Microsoft x64 |
+| `x86_64-linux` | 8 | 16 | signed `int` | **refused** |
 
-So Linux/x86-64 (System V, `long`=8, `wchar_t`=4, no shadow space, different
-callee-saved set, varargs in `%al`) is bounded work. aarch64 is not.
+Measured end to end through the CLI: `long v;` reports `size=4` by default and
+`size=8` under `-target=x86_64-linux`, and a header's own `#ifdef __linux__` takes
+the other branch. The Linux column is gcc 13.3.0 on x86-64 Linux — a probe program
+for the layout, `gcc -dM -E -x c /dev/null` for the macros — and it corrected one
+value this project had wrong: `wchar_t` is a *signed* `int` on Linux, so the target
+carries a type rather than a width. `-S` refuses the Linux target by name and by
+missing convention (D36).
+
+**What remains is the second bullet.** System V needs `gp_max`/`fp_max` (6 and 8,
+not 4 and 4), no shadow space, a different callee-saved set, `%al` counting
+variadic arguments, and a 24-byte `va_list` struct where `abi.v` has a pointer —
+all five at once, because a caller and callee that disagree on any one of them fail
+at the first cross-library call rather than loudly. AArch64 is not this.

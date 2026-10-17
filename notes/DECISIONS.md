@@ -521,8 +521,51 @@ would all need answers that do not exist on wasm.
 **If a second target is wanted later**, the order that makes it cheap is: `--emit-c`
 to validate the front end, then make the layout table and pointer width parameters
 (`-m32` proves it), then a target-independent IR, and only then a backend. AArch64
-is the more useful of the two exotic targets, because it keeps every language
+is the more useful of the two exotic platforms, because it keeps every language
 semantic and phase 6 already wants macOS.
+
+---
+
+## D36. The target, the data model and the ABI are three separate things
+
+**Decision.** `src/ast/target.v` holds a *target*: its data model (`long`,
+`long double`, `wchar_t`), its predefined macros, and the name of the calling
+convention it needs. The data model and the macros are what `-target` switches.
+The ABI stays in `src/ast/abi.v`, and `-S` **refuses** any target whose ABI is not
+described there rather than emitting the one it has.
+
+**Why.** A target the front end can type but the backend cannot emit is only safe
+if the compiler says so. Emitting Microsoft x64 for a target named
+`x86_64-linux` produces a file that assembles, links and runs with four argument
+registers instead of six, a shadow space the callee does not expect, and a `char *`
+`va_list` where System V uses a 24-byte struct — none of which is visible from
+inside the compiler, because two fcc-compiled functions agree with each other. So
+the refusal is not a limitation of partial support; it is the only property that
+makes partial support safe, and the diagnostic names the convention that is missing
+because the target *is* known.
+
+**Also, the front end's target is a `__global`, not a parameter.** The
+target-dependent types are read by `numeric_type`, which `add_type` calls for every
+numeric literal, and `add_type` has 88 call sites of its own; threading a
+`&ast.Target` through those plus the `type_child` recursion is a
+several-hundred-site change to express one constant. `cur_target` is written once
+per process, before any parsing, and never while nodes are being typed — and the
+process compiles one translation unit at a time, so there is no concurrency to
+serialise against. The cost is `v -enable-globals` on every invocation, which
+fails loudly when it is missing rather than miscompiling.
+
+**The numbers are measured, and one of them corrected a file.** The Linux column
+comes from gcc 13.3.0 on x86-64 Linux — a probe program for the layout,
+`gcc -dM -E -x c /dev/null` for the macros. It changed one value this project had
+wrong: `wchar_t` is a **signed** `int` on Linux, not an `unsigned short`. The
+earlier draft of `target.v` claimed unsigned on both targets; `__WCHAR_TYPE__` is
+`int` and `__WCHAR_MAX__` is `0x7fffffff`, and a probe printing
+`(wchar_t)-1 < (wchar_t)0` answers 1. Signedness is part of the difference, which
+is why the target carries a *type* and not just a width.
+
+**What this does not decide.** The System V backend. That is ABI parameterisation
+(D4's "Linux second"), and it needs all five of `gp_max`, `fp_max`,
+`shadow_space`, `incoming_base` and the `va_list` shape changed at once.
 
 ---
 

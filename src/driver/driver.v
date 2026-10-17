@@ -1,6 +1,7 @@
 module driver
 
 import os
+import src.ast
 import src.backend
 import src.fcc
 // Command line handling and the invocation contract.
@@ -76,6 +77,21 @@ pub mut:
 	options_not_yet_honoured map[string]string
 }
 
+// requested_target is the `-target` triple, held as module state rather than as a
+// field on `Options` for a reason that is not stylistic and is recorded in
+// `docs/PLAN.md` as an open defect: growing `Options` moves the local `main` holds,
+// and fcc's parse path has a latent fault that a change to that frame is enough to
+// expose. An unset `-target` is the empty string; an explicitly empty one is
+// rejected during parsing, because `-target=${CROSS_TARGET}` with that variable
+// unset expands to `-target=`, and falling back would build for the wrong machine
+// silently.
+//
+// It is written by `parse_args` and read by `resolve_triple`, which is why it is
+// module state and not a parameter.
+__global (
+	requested_target string
+)
+
 pub const version = 'fcc 0.1.0 (phase 0)'
 
 pub const usage = 'usage: fcc [options] file...
@@ -84,6 +100,7 @@ pub const usage = 'usage: fcc [options] file...
   -c               compile only, produce a relocatable object
   -shared          produce a DLL
   -std=<std>       language dialect (default: gnu11)
+  -target=<triple> machine to compile for (default: x86_64-windows)
   -I<dir>          add an include search directory
   -isystem <dir>   add a system include search directory
   -D<name>[=val]   define a macro
@@ -154,6 +171,17 @@ pub fn parse_args(args []string) !Options {
 			o.emit_asm = true
 		} else if arg.starts_with('-std=') {
 			o.std = arg[5..]
+		} else if arg.starts_with('-target=') {
+			requested_target = arg[8..]
+			if requested_target == '' {
+				return error('option ${arg} requires a target triple')
+			}
+		} else if arg == '-target' {
+			i++
+			requested_target = need_value(args, i, '-target')
+			if requested_target == '' {
+				return error('option ${arg} requires a target triple')
+			}
 		} else if arg == '-isystem' {
 			i++
 			o.sys_includes << need_value(args, i, '-isystem')
@@ -289,6 +317,79 @@ fn need_value(args []string, i int, flag string) string {
 	return args[i]
 }
 
+// resolve_triple turns the `-target` value into the canonical triple to compile for.
+//
+// An unknown triple is an error rather than a warning, and it is the one place that
+// decides: a target silently falling back to the host would emit code for the wrong
+// machine under the right machine's name, which is the failure this project cares
+// most about not shipping. The error lists the spellings that are accepted, taken
+// from the table rather than written out here, so the list cannot drift.
+//
+// It returns the *canonical* triple rather than what was typed, so an alias and its
+// target resolve to the same name — and it returns a string rather than a
+// `&ast.Target`, so that nothing is allocated before the first compilation. See
+// `current_target` in `src/fcc/types.v` for why that matters.
+fn resolve_triple(o &Options) !string {
+	if requested_target == '' {
+		// The name, not the object: building a `Target` here would put a
+		// several-hundred-byte allocation in `main` on every run, including the ones
+		// that pass no target at all.
+		return ast.host_triple
+	}
+	// The lookup is by ABI rather than by target, for the same reason: neither
+	// question needs the object.
+	if ast.abi_for_triple(requested_target) == none {
+		return error('unknown target: ${requested_target} (known: ${ast.known_triples().join(', ')})')
+	}
+	return match requested_target {
+		'amd64-windows', 'x86_64-windows-msvc', 'x86_64-pc-windows-msvc' { 'x86_64-windows' }
+		'amd64-linux', 'x86_64-linux-gnu', 'x86_64-unknown-linux-gnu' { 'x86_64-linux' }
+		else { requested_target }
+	}
+}
+
+// select_target validates `-target` and records it for the front end.
+//
+// It is called once per process, before anything is parsed. The front end builds
+// the target itself, on first use, so nothing here allocates.
+// It is called once per process, before anything is parsed. The front end builds
+// the target itself, on first use, so nothing here allocates.
+//
+// The default is not written. `current_target` already answers the host target
+// when nothing has been recorded, so the overwhelmingly common run — no `-target`
+// at all — leaves the front end's globals exactly as the process found them.
+fn select_target(o &Options) !string {
+	triple := resolve_triple(o) or { return err }
+	if requested_target != '' {
+		fcc.set_target_triple(triple)
+	}
+	return triple
+}
+
+// refuse_unimplemented_codegen stops before code generation for a target whose
+// calling convention the backend does not implement.
+//
+// The front end can type a target the backend cannot emit, and the two facts are
+// independent: the data model and the predefined macros are properties of the
+// machine, while the ABI is what `abi.v` describes. Emitting the Microsoft x64 ABI
+// for a target named `x86_64-linux` would produce a file that assembles, links and
+// runs with the wrong argument registers and the wrong `va_list` — so the refusal
+// is the point of having the target separate from the ABI, not a limitation of it.
+fn refuse_unimplemented_codegen(o &Options) ! {
+	triple := resolve_triple(o) or { return err }
+	if ast.codegen_ready_for_triple(triple) {
+		return
+	}
+	// The message is assembled rather than written as one long literal because a
+	// string cannot be wrapped here, and a wrapped one is a diagnostic nobody reads
+	// to the end.
+	abi := ast.abi_for_triple(triple) or { return error('unknown target: ${triple}') }
+	return error('no code generator for ${triple}: it needs the ' +
+		'${ast.abi_name_of(abi)} calling convention, and fcc implements only ' +
+		'${ast.abi_name_of(.microsoft_x64)}. The front end is target-aware, so ' +
+		'--preprocess and --dump-ast accept this target.')
+}
+
 // main runs the command line. Phase 0 stops after reporting, which is
 // deliberate: a compiler that parses its flags and then prints "not
 // implemented" is testable, where one that half-compiles a file is not.
@@ -308,6 +409,12 @@ pub fn main(args []string) {
 	}
 	if o.verbose {
 		eprintln('fcc: ${o.summary()}')
+	}
+	// Validated once, before any mode runs, and recorded by name: the front end builds
+	// the target on first use rather than here.
+	select_target(&o) or {
+		eprintln('fcc: ${err.msg()}')
+		exit(1)
 	}
 	if o.dump_tokens {
 		dump_tokens(o)
@@ -392,6 +499,10 @@ fn report(errors []string, warnings []string) bool {
 // Every input is attempted even after one fails, so a file the front end rejects
 // does not hide the diagnostics of the file after it.
 fn emit_asm(o &Options) {
+	refuse_unimplemented_codegen(o) or {
+		eprintln('fcc: ${err.msg()}')
+		exit(1)
+	}
 	mut all := []string{}
 	mut failed := false
 	mut first := true
@@ -539,6 +650,12 @@ pub fn (o &Options) summary() string {
 		b << '-shared'
 	}
 	b << '-std=${o.std}'
+	// The effective target rather than the spelling given, because the value that
+	// matters to a reader of `--verbose` is the one the type model came from: an
+	// alias resolves to the target's own name. An unknown spelling is echoed rather
+	// than replaced, because `resolve_triple` is what reports it and a summary that
+	// invented a target would be worse than one that shows the question.
+	b << '-target ${if requested_target == '' { ast.host_triple } else { requested_target }}'
 	b << o.inputs
 	if o.output != '' {
 		b << '-o ${o.output}'

@@ -75,6 +75,27 @@ pub mut:
 	// later use of the same name expands normally. See `expand_arg`.
 	painted          []string
 	collecting_paint bool
+	// target selects the predefined macros: `__SIZE_TYPE__` and its seven siblings
+	// expand to the target's own type spellings, and `_WIN32`/`__LP64__` name the
+	// target's data model. It defaults to the target the front end is compiling
+	// for, which is the target fcc was built for unless `-target` selected another,
+	// so a preprocessor built without one behaves exactly as it always has.
+	target &ast.Target = unsafe { nil }
+}
+
+// set_target selects the target whose predefined macros this preprocessor installs.
+//
+// It is read once, by `define_builtins`, and not consulted again: a preprocessor is
+// built for one translation unit and the macros are installed before the first line
+// is read. Changing it afterwards would mean a header already expanded under one
+// target's `__SIZE_TYPE__` while the rest of the file is read under another's.
+//
+// The driver does not call this — it selects the target once for the process with
+// `set_target`, and every preprocessor inherits that. It is here for a
+// preprocessor built for a specific target rather than for the current one, which
+// is what the tests that check two targets in one process need.
+pub fn (mut p Preprocessor) set_target(t &ast.Target) {
+	p.target = t
 }
 
 // max_depth bounds include nesting and expansion recursion.
@@ -238,34 +259,29 @@ pub fn (mut p Preprocessor) define_builtins() {
 	p.define_builtin('__TIMESTAMP__', .timestamp)
 	p.define_builtin('__BASE_FILE__', .base_file)
 
-	// The predefined target macros, in the order a header is likely to need them.
-	// Exactly eight are referenced anywhere in tcc's include tree, which is the whole
-	// requirement rather than a sample of it.
-	p.define_target_macro('__SIZE_TYPE__', 'unsigned long long')
-	p.define_target_macro('__PTRDIFF_TYPE__', 'long long')
-	p.define_target_macro('__WCHAR_TYPE__', 'unsigned short')
-	p.define_target_macro('__WINT_TYPE__', 'unsigned short')
-	p.define_target_macro('__INTPTR_TYPE__', 'long long')
-	p.define_target_macro('__UINTPTR_TYPE__', 'unsigned long long')
-	p.define_target_macro('__INT64_TYPE__', 'long long')
-	p.define_target_macro('__INT32_TYPE__', 'int')
-
-	// The target macros the headers branch on. `wctype.h` and `time.h` both open with
-	// `#ifndef _WIN32` / `#error Only Win32 target is supported!`, so without these two
-	// every translation unit that names either of them fails at once.
+	// The predefined target macros, in the order a header is likely to need them, all
+	// of them coming from the target rather than from this file.
 	//
-	// These two and no more, because that is what tcc does and tcc is the compiler the
-	// headers also have to satisfy. Measured: tcc defines `_WIN32` and `_WIN64` and
-	// *not* `__WIN32__`, `__MINGW32__` or `__MSVCRT__` — gcc defines all five, and the
-	// headers are written to work with either. Following gcc instead would make fcc claim
-	// a mingw identity it has not measured, and would let a header take a gcc-only path.
-	p.define_target_macro('_WIN32', '1')
-	p.define_target_macro('_WIN64', '1')
-	// The data model, measured the same way: tcc defines `__LLP64__` (short 2, int 4,
-	// long 4, pointer 8 — the Windows 64-bit model) and neither `__LP64__` nor
-	// `__ILP32__`. Without it a conformance test that branches on the model falls
-	// through to its `#else` and reports the compiler as unknown.
-	p.define_target_macro('__LLP64__', '1')
+	// Exactly eight of the `__…_TYPE__` macros are referenced anywhere in tcc's include
+	// tree, which is the whole requirement rather than a sample of it. Their values are
+	// the target's, and they are spellings rather than numbers because they are type
+	// names: `stddef.h` is `typedef __SIZE_TYPE__ size_t;`, so `unsigned long` arriving
+	// as one string is parsed into the target's own `unsigned long` and
+	// `is_compatible` then agrees with the program's own.
+	//
+	// The platform macros are the second half of the same list, and the comments on
+	// `ast.Target` record what each target defines and why — in particular that
+	// `_WIN32` and `__LLP64__` are what tcc defines, and that following gcc's five
+	// instead would claim a mingw identity fcc has not measured and would let a
+	// header take a gcc-only path. `wctype.h` and `time.h` both open with
+	// `#ifndef _WIN32` / `#error Only Win32 target is supported!`, so on the Windows
+	// target those two decide whether either header compiles at all.
+	if p.target == unsafe { nil } {
+		p.target = current_target()
+	}
+	for m in p.target.macros {
+		p.define_target_macro(m.name, m.value)
+	}
 	}
 
 // lookup finds a macro by name, or returns none.

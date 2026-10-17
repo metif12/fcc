@@ -1,3 +1,9 @@
+# `-enable-globals` is required on every `v` invocation in this project, not just
+# on the build. `src/fcc/types.v` holds the selected `ast.Target` in a `__global`,
+# and stock V rejects a module-level mutable variable without the flag with
+# `bad top level statement keyword `mut`` (measured on 0.5.2). It is therefore also
+# on the harness commands in README.md.
+
 name: build
 
 on:
@@ -42,11 +48,11 @@ jobs:
           $env:PATH = "$env:RUNNER_TEMP\vhome;" + $env:PATH
           $env:TMPDIR = "$env:RUNNER_TEMP\vccbuild"
           New-Item -ItemType Directory -Path $env:TMPDIR -Force | Out-Null
-          v -o fcc.exe .
+          v -enable-globals -o fcc.exe .
 
       - name: Unit tests
         shell: powershell
         run: |
           $env:PATH = "$env:RUNNER_TEMP\vhome;" + $env:PATH
           $env:TMPDIR = "$env:RUNNER_TEMP\vccbuild"
-          v test .
+          v -enable-globals test .

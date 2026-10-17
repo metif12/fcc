@@ -69,24 +69,57 @@ four uncharacterised chibicc mismatches and the 00204 crash, not more percentage
 
 ## Cross-compilation
 
-**Not supported, and by decision rather than by omission** (decision D4, "one
-platform at a time"; D35 records wasm as not planned). The target is Win32/Win64
-x86-64 and it is hardcoded in three places:
+**The front end is target-aware; the back end is not, and it refuses rather than
+guessing.** `-target=<triple>` selects the machine fcc compiles *for*:
 
-- the preprocessor defines only `_WIN32`, `_WIN64` and `__LLP64__`;
-- the type model is fixed — `long` 4, `wchar_t` 2, `long double` 8, pointers 8;
-- the backend emits x86-64 only.
+| triple | data model | codegen |
+|---|---|---|
+| `x86_64-windows` (default) | `long` 4, `long double` 8, `wchar_t` 2, `__LLP64__`, `_WIN32` | Microsoft x64 ABI |
+| `x86_64-linux` | `long` 8, `long double` 16, `wchar_t` 4 **signed**, `__LP64__`, `__linux__` | refused — no System V backend |
 
-The groundwork is better than nothing, and worth being precise about. The
-Microsoft x64 ABI lives alone in `src/ast/abi.v` — `gp_max`, `fp_max`,
-`shadow_space`, `incoming_base`, the `va_list` shape — and is reached through 49
-sites outside that file, so a second x86-64 target is an ABI-parameterisation job
-rather than a rewrite. But the backend itself is monolithic: 425 hardcoded
-x86-64 register operands across `gen.v` and `asm.v`, about 2,350 lines.
+Each also answers to the spellings the two toolchains use: `amd64-windows`,
+`x86_64-windows-msvc`, `x86_64-pc-windows-msvc`, `amd64-linux`,
+`x86_64-linux-gnu`, `x86_64-unknown-linux-gnu`. An unknown triple is a hard
+error that lists them; `-target=` with an empty value is an error rather than the
+default, because that is what an unset variable expands to. The default is the
+target fcc was **built** for, not the one it happens to run on — a compiler that
+infers its target from its host cannot cross-compile at all.
 
-So: a Linux x86-64 target (System V ABI, `long`=8, `wchar_t`=4, `__LP64__`, no
-shadow space, different callee-saved set, varargs in `%al`) is a bounded piece of
-work. A different architecture is a new backend. Neither is started.
+`-S` on `x86_64-linux` exits non-zero and says which calling convention is
+missing rather than emitting Microsoft x64 code under a Linux name.
+`--preprocess` and `--dump-ast` accept any known target, because the data model
+and the predefined macros are the front end's and the ABI is not.
+
+```console
+$ fcc -target=x86_64-linux --preprocess probe.c   # __SIZE_TYPE__ expands to `unsigned long`
+$ fcc -target=x86_64-linux -S -o x.s x.c
+fcc: no code generator for x86_64-linux: it needs the sysv-x64 calling convention,
+and fcc implements only microsoft-x64. The front end is target-aware, so
+--preprocess and --dump-ast accept this target.
+```
+
+**Why this shape and not a second platform** (decision D4, "one platform at a
+time"; D36 records the split). The three things that differ between targets are
+kept apart: the *data model* is `ast.Target` in `src/ast/target.v`, the
+*predefined macros* come from the same table, and the *ABI* lives in
+`src/ast/abi.v`. The front end can be correct for a machine whose calling
+convention is not implemented, provided the compiler then refuses to generate
+code for it — which is the only property that makes a partial second target safe.
+
+**What is left to a real second target**, measured rather than guessed:
+
+- the Microsoft x64 ABI already lives alone in `src/ast/abi.v` and is reached
+  through **49** sites outside that file, so System V is parameterisation work;
+- the backend is monolithic — **425** hardcoded x86-64 register operands across
+  `gen.v` and `asm.v`, about 2,350 lines — so a different architecture is a new
+  backend;
+- the front end's target-dependent numbers are now in one file rather than
+  scattered: 14 sites in `types.v` moved into `src/ast/target.v`, and the Linux
+  column is measured from gcc 13.3.0, not recalled.
+
+Note that V itself passes `-target` only on its macOS→Linux cross path
+(`vlib/v/driver/driver.v:2104`), never on the Windows path fcc serves, so the
+flag is parity with tcc rather than a contract item.
 
 `fcc --preprocess` prints the token stream. `fcc --dump-ast` prints every global
 and function with its layout, initial data, relocations and frame, and every
@@ -125,9 +158,14 @@ $env:V_MACOS_V3_NO_FALLBACK = '1'
 $env:TMPDIR = "$env:LOCALAPPDATA\Temp\opencode\vccbuild"
 $env:VJOBS = '4'
 
-v -o fcc.exe .
-v test .
+v -enable-globals -o fcc.exe .
+v -enable-globals test .
 ```
+
+`-enable-globals` is required on **every** `v` invocation here, not only the
+build: `src/fcc/types.v` holds the selected target in a `__global`, and stock V
+rejects a module-level mutable variable without the flag with `bad top level
+statement keyword `mut``.
 
 The end-to-end and conformance runs need two more variables pointing at
 scratch space and at a
@@ -137,9 +175,9 @@ scratch space and at a
 $env:VCC_PROBE_DIR = "$env:LOCALAPPDATA\Temp\opencode\va-probe"
 $env:VCC_CTS_DIR = "$env:LOCALAPPDATA\Temp\opencode\c-testsuite"
 
-v run tools/probe/probe.v     # 20 differential programs vs tcc/gcc
-v run tools/suite/suite.v     # chibicc suite
-v run tools/cts/cts.v         # c-testsuite single-exec (220 cases)
+v -enable-globals run tools/probe/probe.v     # 20 differential programs vs tcc/gcc
+v -enable-globals run tools/suite/suite.v     # chibicc suite
+v -enable-globals run tools/cts/cts.v         # c-testsuite single-exec (220 cases)
 ```
 
 ## Diagnostics

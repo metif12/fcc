@@ -910,7 +910,7 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 			ts_int, ts_signed, ts_signed + ts_int { ty_int }
 			ts_unsigned, ts_unsigned + ts_int { ty_uint }
 			ts_long, ts_long + ts_int, ts_signed + ts_long, ts_signed + ts_long + ts_int {
-				ty_long
+				ty_long()
 			}
 			// `long long` is a distinct type from `long` on this target: 8 bytes
 			// against 4. Collapsing the two would mis-size every `long long` in
@@ -919,13 +919,13 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 			ts_signed + ts_long + ts_long + ts_int {
 				ty_llong
 			}
-			ts_unsigned + ts_long, ts_unsigned + ts_long + ts_int { ty_ulong }
+			ts_unsigned + ts_long, ts_unsigned + ts_long + ts_int { ty_ulong() }
 			ts_unsigned + ts_long + ts_long, ts_unsigned + ts_long + ts_long + ts_int {
 				ty_ullong
 			}
 			ts_float { ty_float }
 			ts_double { ty_double }
-			ts_long + ts_double { ty_ldouble }
+			ts_long + ts_double { ty_ldouble() }
 			else {
 				p.error_at(tok, 'invalid combination of type specifiers')
 				ty_int

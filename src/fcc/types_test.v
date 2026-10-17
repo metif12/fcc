@@ -31,25 +31,169 @@ fn common_of(a &ast.Type, b &ast.Type) &ast.Type {
 	return get_common_type(a, b)
 }
 
+// linux is the other target, resolved the way the driver resolves `-target`.
+fn linux_target() &ast.Target {
+	return ast.target_by_triple('x86_64-linux') or { panic('x86_64-linux is not a known target') }
+}
+
+// with_target runs body against another target and puts the previous one back.
+//
+// The restore is not tidiness. The front end's target is process-wide — see the
+// contract on `cur_target` in types.v — so a test that switched it and returned
+// would silently change the answer of every test that ran after it, in this file
+// and in any file the runner happened to share the process with.
+fn with_target(t &ast.Target, body fn ()) {
+	previous := current_target()
+	set_target(t)
+	body()
+	set_target(previous)
+}
+
+// The target's data model is measured per target, not per language, and this is
+// the assertion that the two do not collapse into one.
+//
+// The numbers are the probe output in `src/ast/target.v`: gcc 13.3.0 on x86-64
+// Linux for the LP64 column, the bundled tcc and mingw gcc for the LLP64 one. The
+// three that disagree are the three the front end reads from the target, and each
+// one is a silent-corruption bug if it is wrong — a mis-sized `long` in a struct,
+// a mis-aligned `long double`, a `wchar_t` literal stored at the wrong stride.
+fn test_the_data_model_follows_the_target() {
+	with_target(linux_target(), fn () {
+		assert ty_long().size == 8
+		assert ty_long().align == 8
+		assert ty_ulong().size == 8
+		// `long double` is the 80-bit x87 format in a 16-byte slot here, which is not
+		// merely a different size: it changes every offset in a struct that holds one.
+		assert ty_ldouble().size == 16
+		assert ty_ldouble().align == 16
+		// And back to the target fcc was built for.
+		assert current_target().triple == 'x86_64-linux'
+	})
+	assert ty_long().size == 4
+	assert ty_ldouble().size == 8
+	assert current_target().triple == 'x86_64-windows'
+}
+
+// `wchar_t` is signed on Linux and unsigned on Windows, which is why the target
+// carries a type rather than a width.
+fn test_wide_literals_take_the_targets_wchar_width() {
+	with_target(linux_target(), fn () {
+		mut lit := first_token('L"ab"')
+		ty := string_literal_type(&lit)
+		assert ty.base == current_target().wchar_type()
+		assert ty.base.size == 4
+		assert !ty.base.is_unsigned
+		// Three elements of four bytes each: measured, `sizeof(L"ab") == 12` on Linux
+		// against 6 on Windows.
+		assert ty.array_len == 3
+		assert ty.size == 12
+		mut ch := first_token("L'0'")
+		assert numeric_type(&ch).size == 4
+	})
+	mut lit := first_token('L"ab"')
+	ty := string_literal_type(&lit)
+	assert ty.base == ty_ushort
+	assert ty.base.is_unsigned
+	assert ty.size == 6
+}
+
+// The `u` and `U` prefixes are *not* the target's business: `char16_t` is two bytes
+// and `char32_t` four on both targets, measured. A change that made them follow
+// `wchar_t` would break the Windows target, where `u"ab"` is 6 bytes and `L"ab"`
+// is also 6.
+fn test_char16_and_char32_are_the_same_width_on_both_targets() {
+	// The tokens are built inside each half rather than shared: V does not capture
+	// an enclosing function's mutable local into a closure, and `&tok` is what these
+	// functions take.
+	with_target(linux_target(), fn () {
+		mut c16 := first_token('u"ab"')
+		mut c32 := first_token('U"ab"')
+		assert string_element_type(&c16).size == 2
+		assert string_element_type(&c32).size == 4
+	})
+	mut c16 := first_token('u"ab"')
+	mut c32 := first_token('U"ab"')
+	assert string_element_type(&c16).size == 2
+	assert string_element_type(&c32).size == 4
+}
+
+// A type's identity is its pointer, so the accessors have to hand back the same
+// object every time. `is_exact_type_match` and the qualifier copies in the
+// initializer writers compare types that way: a fresh `&Type{}` per lookup would
+// make `ty_long == ty_long` false and stop every qualified copy from matching its
+// un-qualified original.
+//
+// What is *not* asserted here is that two separately-resolved targets get separate
+// type objects, because that is not what happens: V hoists two identical
+// `&Type{…}` literals into one object, so two `x86_64-linux` targets share their
+// `long`. Measured. It is harmless — the shared object describes the same machine —
+// and the distinction that does matter is asserted below.
+fn test_target_types_keep_one_identity() {
+	with_target(linux_target(), fn () {
+		assert ty_long() == ty_long()
+		assert ty_long().size == 8
+	})
+	assert ty_long() == ty_long()
+	// The two targets' `long` must never be the same object, because they are
+	// different widths and every layout decision reads that width.
+	assert ty_long() != ty_long_under(linux_target())
+	assert ty_long().size == 4
+	assert ty_long_under(linux_target()).size == 8
+}
+
+// ty_long_under is `ty_long` as it would be with a different target selected,
+// without disturbing the current one.
+fn ty_long_under(t &ast.Target) &ast.Type {
+	previous := current_target()
+	set_target(t)
+	ty := ty_long()
+	set_target(previous)
+	return ty
+}
+
+// C11 6.4.4.1: an unsuffixed decimal constant that does not fit an `int` becomes a
+// `long` if there is one that fits, and a `long long` otherwise. On this target the
+// two are the same width, so it is always a `long long`; on LP64 it is a `long`.
+fn test_an_unsuffixed_constant_too_big_for_int_follows_the_targets_long() {
+	// 2147483648 — one past INT_MAX, and a decimal so the `long long` branch applies.
+	// The token is built in each half because V does not capture an enclosing
+	// function's mutable local into a closure.
+	with_target(linux_target(), fn () {
+		mut tok := first_token('2147483648')
+		assert numeric_type(&tok) == ty_long()
+		assert numeric_type(&tok).size == 8
+	})
+	mut tok := first_token('2147483648')
+	assert numeric_type(&tok) == ty_llong
+	// `1L` is spelled out, so it is a `long` on both — the width is the target's and
+	// the spelling is the programmer's.
+	with_target(linux_target(), fn () {
+		mut suffixed := first_token('1L')
+		assert numeric_type(&suffixed) == ty_long()
+	})
+	mut suffixed := first_token('1L')
+	assert numeric_type(&suffixed) == ty_long()
+}
+
 fn test_basic_type_sizes_are_the_measured_ones() {
 	assert ty_void.size == 1
 	assert ty_bool.size == 1
 	assert ty_char.size == 1
 	assert ty_short.size == 2
 	assert ty_int.size == 4
-	assert ty_long.size == 4
+	assert ty_long().size == 4
 	assert ty_llong.size == 8
 	assert ty_float.size == 4
 	assert ty_double.size == 8
-	assert ty_ldouble.size == 8
+	assert ty_ldouble().size == 8
 }
 
 fn test_long_and_long_long_are_different_widths() {
 	// The whole reason `long` and `long long` are separate kinds here: collapsing
 	// them would mis-size every 64-bit constant V emits.
-	assert ty_long.size == 4
+	assert ty_long().size == 4
 	assert ty_llong.size == 8
-	assert ty_long.size != ty_llong.size
+	assert ty_long().size != ty_llong.size
 }
 
 fn test_basic_type_alignments() {
@@ -125,7 +269,7 @@ fn test_is_integer_and_is_flonum() {
 	assert !is_integer(ty_double)
 	assert is_flonum(ty_double)
 	assert is_flonum(ty_float)
-	assert !is_flonum(ty_long)
+	assert !is_flonum(ty_long())
 	assert is_numeric(ty_int)
 	assert is_numeric(ty_double)
 	assert !is_numeric(pointer_to(ty_int))
@@ -146,7 +290,7 @@ fn test_signed_and_unsigned_are_not_compatible() {
 	// int and long are distinct types even though they are the same width on this
 	// target. C's type identity does not depend on size, and _Generic depends on that
 	// identity: an int controlling expression must not select a long association.
-	assert is_compatible(ty_int, ty_long) == false
+	assert is_compatible(ty_int, ty_long()) == false
 }
 
 fn test_compatibility_is_structural_for_derived_types() {
@@ -264,7 +408,7 @@ fn test_align_to_and_align_down() {
 fn test_numeric_literal_types() {
 	assert numeric_type(first_token('1')) == ty_int
 	assert numeric_type(first_token('1u')) == ty_uint
-	assert numeric_type(first_token('1L')) == ty_long
+	assert numeric_type(first_token('1L')) == ty_long()
 	assert numeric_type(first_token('1LL')) == ty_llong
 	assert numeric_type(first_token('1ULL')) == ty_ullong
 	assert numeric_type(first_token('1.0')) == ty_double

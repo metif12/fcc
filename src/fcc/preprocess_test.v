@@ -1,4 +1,5 @@
 module fcc
+import ast
 import os
 
 // Preprocessor tests.
@@ -89,6 +90,91 @@ fn test_the_llp64_macro_is_defined() {
 	assert ppb('#ifdef __LLP64__\nyes\n#endif').text == 'yes'
 	assert ppb('#ifdef __LP64__\nyes\n#endif').text == ''
 	assert ppb('#ifdef __ILP32__\nyes\n#endif').text == ''
+}
+
+// ppb_for runs source with the predefined macros registered for a specific target.
+//
+// It is how a target's macros are checked against the same assertions as the
+// default's, rather than by reading the table in `ast`: the table and the
+// preprocessor are two implementations of the same list, and only running the
+// second one catches a macro that is in the table and never installed.
+fn ppb_for(t &ast.Target, src string) PPResult {
+	mut p := preprocessor([], [])
+	p.set_target(t)
+	p.define_builtins()
+	r := p.run_text(src, 'test.c')
+	return PPResult{
+		text:   r.tokens.filter(it.kind != .eof).map(it.text).join(' ')
+		errors: r.errors
+	}
+}
+
+fn ppb_linux(src string) PPResult {
+	tgt := ast.target_by_triple('x86_64-linux') or { panic('x86_64-linux is not known') }
+	return ppb_for(tgt, src)
+}
+
+// The eight `__…_TYPE__` macros on the other target, from `gcc -dM -E -x c /dev/null`
+// on x86-64 Linux. The widths are the same as the Windows ones — a `size_t` is 8
+// bytes either way — but the *spellings* are not, and that is the part a header
+// depends on: `typedef __SIZE_TYPE__ size_t;` has to name a type the program's own
+// `long` can be compared against, or every `sizeof` against a `size_t` is a
+// comparison of two different types.
+fn test_the_type_macros_are_the_targets_own() {
+	assert ppb_linux('__SIZE_TYPE__').text == 'unsigned long'
+	assert ppb_linux('__PTRDIFF_TYPE__').text == 'long'
+	// `wchar_t` is a *signed* `int` here and an `unsigned short` on Windows. The
+	// previous table claimed unsigned on both; measured, `__WCHAR_TYPE__` is `int`
+	// and `__WCHAR_MAX__` is 0x7fffffff.
+	assert ppb_linux('__WCHAR_TYPE__').text == 'int'
+	assert ppb_linux('__WINT_TYPE__').text == 'unsigned int'
+	assert ppb_linux('__INTPTR_TYPE__').text == 'long'
+	assert ppb_linux('__UINTPTR_TYPE__').text == 'unsigned long'
+	assert ppb_linux('__INT64_TYPE__').text == 'long'
+	assert ppb_linux('__INT32_TYPE__').text == 'int'
+	assert ppb_linux('typedef __SIZE_TYPE__ size_t;').text == 'typedef unsigned long size_t ;'
+	// And the Windows target still says what it always said.
+	assert ppb('__SIZE_TYPE__').text == 'unsigned long long'
+	assert ppb('__WCHAR_TYPE__').text == 'unsigned short'
+}
+
+// The platform macros are the target's, and the one that matters most is the one
+// that must *not* be there: a Linux translation unit that sees `_WIN32` takes the
+// mingw branch of every header in glibc, silently.
+fn test_the_platform_macros_follow_the_target() {
+	assert ppb_linux('#ifdef __linux__\nyes\n#endif').text == 'yes'
+	assert ppb_linux('#ifdef __unix__\nyes\n#endif').text == 'yes'
+	assert ppb_linux('#ifdef __x86_64__\nyes\n#endif').text == 'yes'
+	// LP64 rather than LLP64, and the unprefixed spellings old feature-test macros
+	// look for.
+	assert ppb_linux('#ifdef __LP64__\nyes\n#endif').text == 'yes'
+	assert ppb_linux('#ifdef __LLP64__\nyes\n#endif').text == ''
+	assert ppb_linux('#ifdef linux\nyes\n#endif').text == 'yes'
+	assert ppb_linux('#ifdef _WIN32\nyes\n#endif').text == ''
+	assert ppb_linux('#ifdef _WIN64\nyes\n#endif').text == ''
+	// The default target is unchanged.
+	assert ppb('#ifdef _WIN32\nyes\n#endif').text == 'yes'
+	assert ppb('#ifdef __LLP64__\nyes\n#endif').text == 'yes'
+	assert ppb('#ifdef __LP64__\nyes\n#endif').text == ''
+}
+
+// The whole point of a target switch is that a header's own `#if` lands on a
+// different branch, so this checks a conditional that changes value rather than a
+// macro that appears.
+//
+// The branch bodies are `linuxpath` and `otherpath` rather than bare `linux`,
+// because on this target `linux` is itself a predefined macro and the bare word
+// would be replaced by `1` before the conditional was even finished — which is
+// what the first version of this test asserted on.
+fn test_a_header_conditional_takes_the_other_branch() {
+	probe := '#ifdef __linux__\nlinuxpath\n#else\notherpath\n#endif\n'
+	assert ppb(probe).text == 'otherpath'
+	assert ppb_linux(probe).text == 'linuxpath'
+	// And the unprefixed macro is what makes the word itself expand, measured: gcc
+	// defines `linux` and `unix` under its default -std=gnu* and drops both under
+	// -std=c11, and fcc's default dialect is gnu11.
+	assert ppb_linux('linux').text == '1'
+	assert ppb('linux').text == 'linux'
 }
 
 

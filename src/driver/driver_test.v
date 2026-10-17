@@ -1,4 +1,5 @@
 module driver
+import src.ast
 
 fn parse(args []string) !Options {
 	return parse_args(args)
@@ -140,4 +141,127 @@ fn test_summary_renders_the_parsed_flags() {
 	assert s.contains('-std=gnu11')
 	assert s.contains('-bt25')
 	assert s.contains('x.c')
+}
+
+// --- -target ---
+
+// Both spellings, because the two toolchains differ: V and gcc pass `-target=x`,
+// and a build script written for either should work.
+fn test_target_is_accepted_joined_and_separated() {
+	joined := resolve_triple(&opts(['-target=x86_64-linux', 'x.c'])) or { panic('joined failed') }
+	separated := resolve_triple(&opts(['-target', 'x86_64-linux', 'x.c'])) or { panic('separated failed') }
+	assert joined == 'x86_64-linux'
+	assert separated == joined
+	// The operand must not become an input file, which is the failure mode
+	// `options_that_consume_an_operand` exists to prevent.
+	assert opts(['-target=x86_64-linux', 'x.c']).inputs == ['x.c']
+}
+
+// target_error_message is what `-target` fails with for these arguments, or an
+// empty string when it resolves.
+//
+// The tests assert on a message rather than on a Result because V will not let a
+// `!`-returning call be assigned without handling its error, and the thing under
+// test here *is* the message: a refusal that does not say which ABI is missing is
+// the failure mode this file exists to catch.
+fn target_error_message(args []string) string {
+	o := parse_args(args) or { return 'parse failed: ' + err.msg() }
+	resolve_triple(&o) or { return err.msg() }
+	return ''
+}
+
+// triple_for is the canonical triple `-target` resolves to.
+fn triple_for(args []string) string {
+	o := opts(args)
+	return resolve_triple(&o) or { panic('${args} did not resolve') }
+}
+
+// No `-target` means the target fcc was built for — not the machine it happens to
+// be running on, which would make cross-compilation impossible by construction.
+fn test_no_target_means_the_host_target() {
+	assert triple_for(['x.c']) == 'x86_64-windows'
+	assert target_error_message(['x.c']) == ''
+	assert ast.host_triple == 'x86_64-windows'
+	assert ast.codegen_ready_for_triple(ast.host_triple)
+}
+
+// An unknown triple is a hard error, never a silent fallback. A fallback here would
+// emit the right machine's code under the wrong machine's name, which is the one
+// failure this project will not ship.
+fn test_an_unknown_target_is_an_error_that_lists_the_known_ones() {
+	msg := target_error_message(['-target=x86_64-plan9', 'x.c'])
+	assert msg != ''
+	assert msg.contains('unknown target')
+	assert msg.contains('x86_64-plan9')
+	// The list comes from the table rather than from the message, so it cannot drift
+	// away from what `resolve_target` accepts.
+	assert msg.contains('x86_64-windows')
+	assert msg.contains('x86_64-linux')
+	// Both spellings of the flag, because a build script may use either.
+	assert target_error_message(['-target', 'x86_64-plan9', 'x.c']).contains('unknown')
+	// An explicitly empty value is not "not given": it is what an unset variable
+	// expands to, and it must not quietly build for the host.
+	assert target_error_message(['-target=', 'x.c']).contains('requires a target')
+	assert target_error_message(['-target', '', 'x.c']).contains('requires a target')
+}
+
+// The aliases exist so a build script can pass whichever spelling its own toolchain
+// would, and each has to land on the target it names rather than on the default.
+fn test_target_aliases_resolve_to_their_own_target() {
+	for spelling in ['x86_64-windows', 'x86_64-windows-msvc', 'x86_64-pc-windows-msvc',
+		'amd64-windows'] {
+		assert triple_for(['-target=${spelling}', 'x.c']) == 'x86_64-windows'
+		assert ast.abi_for_triple(spelling) or { panic('no abi') } == .microsoft_x64
+	}
+	for spelling in ['x86_64-linux', 'x86_64-linux-gnu', 'x86_64-unknown-linux-gnu',
+		'amd64-linux'] {
+		assert triple_for(['-target=${spelling}', 'x.c']) == 'x86_64-linux'
+		assert ast.abi_for_triple(spelling) or { panic('no abi') } == .sysv_x64
+	}
+}
+
+// `known_triples` is written beside the resolver rather than derived from it, so
+// this is what keeps the two in agreement: every spelling the error message offers
+// has to be one the resolver accepts.
+fn test_every_advertised_triple_resolves() {
+	for spelling in ast.known_triples() {
+		assert target_error_message(['-target=${spelling}', 'x.c']) == ''
+	}
+}
+
+// The front end can type the System V target; the backend cannot emit it. The
+// compiler has to say so rather than generate Microsoft-ABI code, and the
+// diagnostic has to name the convention that is missing rather than reporting the
+// target as unknown — it is known, and every header already agrees.
+fn test_codegen_is_refused_for_a_target_the_backend_cannot_emit() {
+	assert !ast.codegen_ready_for_triple('x86_64-linux')
+	assert ast.codegen_ready_for_triple('x86_64-windows')
+	// The refusal, as `-S` would print it.
+	assert codegen_refusal(['-target=x86_64-linux', 'x.c']).contains('x86_64-linux')
+	assert codegen_refusal(['-target=x86_64-linux', 'x.c']).contains('sysv-x64')
+	// The message names the convention that does exist, so a reader knows it is not
+	// a typo or an unsupported flag…
+	assert codegen_refusal(['-target=x86_64-linux', 'x.c']).contains('microsoft-x64')
+	// …and it names the modes that do work, because refusing everything would make
+	// the flag look unsupported rather than partially supported.
+	assert codegen_refusal(['-target=x86_64-linux', 'x.c']).contains('--preprocess')
+	// The default target generates, and an alias for it generates too.
+	assert codegen_refusal(['x.c']) == ''
+	assert codegen_refusal(['-target=amd64-windows', 'x.c']) == ''
+}
+
+// codegen_refusal is what `-S` would print for these arguments, or an empty string
+// when it would generate code.
+fn codegen_refusal(args []string) string {
+	o := parse_args(args) or { return 'parse failed: ' + err.msg() }
+	refuse_unimplemented_codegen(&o) or { return err.msg() }
+	return ''
+}
+
+// `--verbose` shows the target the type model actually came from, so an unknown
+// spelling is echoed rather than quietly replaced by the default.
+fn test_the_summary_shows_the_target() {
+	assert opts(['x.c']).summary().contains('-target x86_64-windows')
+	assert opts(['-target=x86_64-linux', 'x.c']).summary().contains('-target x86_64-linux')
+	assert opts(['-target=x86_64-plan9', 'x.c']).summary().contains('-target x86_64-plan9')
 }
