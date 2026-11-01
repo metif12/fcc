@@ -13,6 +13,10 @@
 /vccbuild/
 *.tmp.c
 
+# V-emitted transient artefacts
+*.def
+*.manifest
+
 # Editor and OS noise
 .vscode/
 .idea/
