@@ -1,4 +1,5 @@
 module driver
+
 import src.ast
 
 fn parse(args []string) !Options {
@@ -148,8 +149,10 @@ fn test_summary_renders_the_parsed_flags() {
 // Both spellings, because the two toolchains differ: V and gcc pass `-target=x`,
 // and a build script written for either should work.
 fn test_target_is_accepted_joined_and_separated() {
-	joined := resolve_triple(&opts(['-target=x86_64-linux', 'x.c'])) or { panic('joined failed') }
-	separated := resolve_triple(&opts(['-target', 'x86_64-linux', 'x.c'])) or { panic('separated failed') }
+	mut joined_opts := opts(['-target=x86_64-linux', 'x.c'])
+	mut separated_opts := opts(['-target', 'x86_64-linux', 'x.c'])
+	joined := resolve_triple(&joined_opts) or { panic('joined failed') }
+	separated := resolve_triple(&separated_opts) or { panic('separated failed') }
 	assert joined == 'x86_64-linux'
 	assert separated == joined
 	// The operand must not become an input file, which is the failure mode
@@ -208,13 +211,11 @@ fn test_an_unknown_target_is_an_error_that_lists_the_known_ones() {
 // The aliases exist so a build script can pass whichever spelling its own toolchain
 // would, and each has to land on the target it names rather than on the default.
 fn test_target_aliases_resolve_to_their_own_target() {
-	for spelling in ['x86_64-windows', 'x86_64-windows-msvc', 'x86_64-pc-windows-msvc',
-		'amd64-windows'] {
+	for spelling in ['x86_64-windows', 'x86_64-windows-msvc', 'x86_64-pc-windows-msvc', 'amd64-windows'] {
 		assert triple_for(['-target=${spelling}', 'x.c']) == 'x86_64-windows'
 		assert ast.abi_for_triple(spelling) or { panic('no abi') } == .microsoft_x64
 	}
-	for spelling in ['x86_64-linux', 'x86_64-linux-gnu', 'x86_64-unknown-linux-gnu',
-		'amd64-linux'] {
+	for spelling in ['x86_64-linux', 'x86_64-linux-gnu', 'x86_64-unknown-linux-gnu', 'amd64-linux'] {
 		assert triple_for(['-target=${spelling}', 'x.c']) == 'x86_64-linux'
 		assert ast.abi_for_triple(spelling) or { panic('no abi') } == .sysv_x64
 	}
@@ -261,7 +262,10 @@ fn codegen_refusal(args []string) string {
 // `--verbose` shows the target the type model actually came from, so an unknown
 // spelling is echoed rather than quietly replaced by the default.
 fn test_the_summary_shows_the_target() {
-	assert opts(['x.c']).summary().contains('-target x86_64-windows')
-	assert opts(['-target=x86_64-linux', 'x.c']).summary().contains('-target x86_64-linux')
-	assert opts(['-target=x86_64-plan9', 'x.c']).summary().contains('-target x86_64-plan9')
+	mut o1 := opts(['x.c'])
+	mut o2 := opts(['-target=x86_64-linux', 'x.c'])
+	mut o3 := opts(['-target=x86_64-plan9', 'x.c'])
+	assert o1.summary().contains('-target x86_64-windows')
+	assert o2.summary().contains('-target x86_64-linux')
+	assert o3.summary().contains('-target x86_64-plan9')
 }

@@ -18,12 +18,20 @@ const driver_rel = 'vlib/v/driver/driver.v'
 
 // find_checkout locates a vlang/v tree. VCC_V_ROOT overrides the search so the
 // suite can be run against any checkout rather than a hard-coded path.
+//
+// The home-directory candidate was misspelled (`C:/Users/MMR/v`), so on the one
+// machine whose checkout it was meant to find it never matched and the whole
+// suite skipped itself: `v test .` reported `contract_test.v OK` for a run that
+// had asserted nothing. A skip that reads as a pass is worse than a failure,
+// which is the whole reason this suite exists (D8).
 fn find_checkout() ?string {
 	mut candidates := []string{}
 	if env := os.getenv_opt('VCC_V_ROOT') {
 		candidates << env
 	}
-	candidates << 'C:/Users/MMR/v'
+	if home := os.getenv_opt('USERPROFILE') {
+		candidates << os.join_path(home, 'v')
+	}
 	candidates << '../v'
 	candidates << '../../v'
 	for c in candidates {

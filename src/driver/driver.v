@@ -4,6 +4,7 @@ import os
 import src.ast
 import src.backend
 import src.fcc
+
 // Command line handling and the invocation contract.
 //
 // The contract `vcc` has to satisfy is written out in docs/CONTRACT.md. This
@@ -22,6 +23,11 @@ pub mut:
 	shared bool
 	// std is the value of -std=, defaulting to the dialect V emits.
 	std string = 'gnu11'
+	// target is the -target triple, empty when not given (meaning the host target).
+	// Carried here rather than in module state so that `resolve_triple` and
+	// `summary` are pure functions of their argument and tests do not leak state
+	// across calls in one process.
+	target string
 	// includes are -I paths, in order, later entries taking precedence.
 	includes []string
 	// sys_includes are -isystem paths.
@@ -77,20 +83,15 @@ pub mut:
 	options_not_yet_honoured map[string]string
 }
 
-// requested_target is the `-target` triple, held as module state rather than as a
-// field on `Options` for a reason that is not stylistic and is recorded in
-// `docs/PLAN.md` as an open defect: growing `Options` moves the local `main` holds,
-// and fcc's parse path has a latent fault that a change to that frame is enough to
-// expose. An unset `-target` is the empty string; an explicitly empty one is
-// rejected during parsing, because `-target=${CROSS_TARGET}` with that variable
-// unset expands to `-target=`, and falling back would build for the wrong machine
-// silently.
-//
-// It is written by `parse_args` and read by `resolve_triple`, which is why it is
-// module state and not a parameter.
-__global (
-	requested_target string
-)
+// `-target` is carried on `Options.target` (see the field above). It used to live
+// in a `__global` in this file, and that global is what put the access violation
+// into every compile: `parse_args` wrote it, `resolve_triple` read it back, and
+// the read returned a pointer that was not the one written. Moving the triple
+// onto the options struct removed the fault on every input measured (see
+// docs/PLAN.md for the bisect). The mechanism was not established — a standalone
+// `__global string` round-trip through a function returning a struct does not
+// misbehave under the same V — so this comment records the change and its
+// measured effect, not a cause.
 
 pub const version = 'fcc 0.1.0 (phase 0)'
 
@@ -172,14 +173,14 @@ pub fn parse_args(args []string) !Options {
 		} else if arg.starts_with('-std=') {
 			o.std = arg[5..]
 		} else if arg.starts_with('-target=') {
-			requested_target = arg[8..]
-			if requested_target == '' {
+			o.target = arg[8..]
+			if o.target == '' {
 				return error('option ${arg} requires a target triple')
 			}
 		} else if arg == '-target' {
 			i++
-			requested_target = need_value(args, i, '-target')
-			if requested_target == '' {
+			o.target = need_value(args, i, '-target')
+			if o.target == '' {
 				return error('option ${arg} requires a target triple')
 			}
 		} else if arg == '-isystem' {
@@ -330,21 +331,16 @@ fn need_value(args []string, i int, flag string) string {
 // `&ast.Target`, so that nothing is allocated before the first compilation. See
 // `current_target` in `src/fcc/types.v` for why that matters.
 fn resolve_triple(o &Options) !string {
-	if requested_target == '' {
-		// The name, not the object: building a `Target` here would put a
-		// several-hundred-byte allocation in `main` on every run, including the ones
-		// that pass no target at all.
+	if o.target == '' {
 		return ast.host_triple
 	}
-	// The lookup is by ABI rather than by target, for the same reason: neither
-	// question needs the object.
-	if ast.abi_for_triple(requested_target) == none {
-		return error('unknown target: ${requested_target} (known: ${ast.known_triples().join(', ')})')
+	if ast.abi_for_triple(o.target) == none {
+		return error('unknown target: ${o.target} (known: ${ast.known_triples().join(', ')})')
 	}
-	return match requested_target {
+	return match o.target {
 		'amd64-windows', 'x86_64-windows-msvc', 'x86_64-pc-windows-msvc' { 'x86_64-windows' }
 		'amd64-linux', 'x86_64-linux-gnu', 'x86_64-unknown-linux-gnu' { 'x86_64-linux' }
-		else { requested_target }
+		else { o.target }
 	}
 }
 
@@ -360,7 +356,7 @@ fn resolve_triple(o &Options) !string {
 // at all — leaves the front end's globals exactly as the process found them.
 fn select_target(o &Options) !string {
 	triple := resolve_triple(o) or { return err }
-	if requested_target != '' {
+	if o.target != '' {
 		fcc.set_target_triple(triple)
 	}
 	return triple
@@ -559,6 +555,7 @@ fn emit_asm(o &Options) {
 		}
 	}
 }
+
 // preprocess_only mirrors `-E`: run the preprocessor and print the resulting
 // tokens. It is how phase 1 is validated, since every phase-2 acceptance criterion
 // depends on the front end being right.
@@ -655,7 +652,7 @@ pub fn (o &Options) summary() string {
 	// alias resolves to the target's own name. An unknown spelling is echoed rather
 	// than replaced, because `resolve_triple` is what reports it and a summary that
 	// invented a target would be worse than one that shows the question.
-	b << '-target ${if requested_target == '' { ast.host_triple } else { requested_target }}'
+	b << '-target ${if o.target == '' { ast.host_triple } else { o.target }}'
 	b << o.inputs
 	if o.output != '' {
 		b << '-o ${o.output}'

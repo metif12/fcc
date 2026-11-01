@@ -39,7 +39,7 @@ fn main() {
 	vcc := os.join_path(root, 'fcc.exe')
 	v_root := os.getenv('VCC_V_ROOT')
 	assert v_root != '', 'VCC_V_ROOT must name the V tree tcc and gcc are taken from'
-	gcc := os.join_path(os.dir(os.dir(v_root)), 'scoop', 'apps', 'gcc', 'current', 'bin',
+	gcc := os.join_path(os.dir(v_root), 'scoop', 'apps', 'gcc', 'current', 'bin',
 		'gcc.exe')
 	tcc := os.join_path(v_root, 'thirdparty', 'tcc', 'tcc.exe')
 
