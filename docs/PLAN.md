@@ -862,42 +862,34 @@ Each has a reproducer, because an open defect without one is a story rather than
 bug. The second one is a correction of something written here earlier, which is why
 the wrong claim is quoted alongside the right one.
 
-**A three-term expression segfaults fcc, and whether it does depends on `main`'s
-stack frame.** Found while landing the `-target` work, and it is **pre-existing**:
-adding one unrelated pointer-sized local to `main` at `80d4644`, with no other
-change, reproduces it.
+**A three-term expression segfaults fcc — corrected.** This paragraph is kept
+because the original claim was wrong in a way that matters, and the correction
+records the measurement that refutes it.
 
-```c
-int main(void){return 1 + 2 + 3;}
-```
+The original claim (written while landing `-target`) was that `int main(void){return 1 + 2 + 3;}` segfaulted fcc, that `1 + 2` did not, and that reproducing it required only adding `dummy := &Options{}` to `main` at `80d4644`. **That control did not reproduce**: four independent builds of `80d4644` with that addition (before and after `parse_args`, two builds each) compiled and ran cleanly, and the current tree compiles and runs `1 + 2 + 3` to 6 (`--dump-ast` exits 0, `-S` exits 0, linked binary exits 6). The claim is withdrawn.
 
-| tree | `fcc --dump-ast` on that source |
-|---|---|
-| `80d4644` as committed | fine |
-| `80d4644` + `dummy := &Options{}` in `main` | **segfault** |
-| `80d4644` + `dummy := [2]i64{}` (16 bytes) in `main` | fine |
-| `80d4644` + `dummy := [3]i64{}` (24 bytes) in `main` | fine |
-| `80d4644` + `[]u8{len: 4096}` allocated in `main` | fine |
-| `80d4644` + `map[string]string{}` allocated in `main` | fine |
-| `80d4644` + `Options{}` by value in `main` | fine |
+What the bisect actually found: the access violation on every input (`min.c`,
+`s4.c`, `c3.c`, `tiny.c`, …) came from the `-target` work's own `__global
+(requested_target string)` in `src/driver/driver.v` — `parse_args` wrote it,
+`resolve_triple` read it back, and the read did not get back what was written.
+Moving the triple onto `Options.target` removed the fault on every input measured
+(probe: 20/20, cts: 209/220, suite: 9/9). The mechanism was **not** established:
+a standalone `__global string` round-trip through a function returning a struct
+does not misbehave under the same V build, so "the global's mere existence" is
+not the explanation. The note about `s4.c` in the checkpoint — `--dump-ast`
+exiting 0 while `-S` exited non-zero — is consistent with that: the fault was
+memory corruption whose manifestation depended on later allocation, not a
+deterministic failure inside `add_type`'s `.num` arm as the instrumentation
+suggested.
 
-The rows are the measurement. It is not the size of the addition — 16, 24 and 64
-bytes are all fine and 8 is not — and it is not merely "an allocation", because
-`[]u8{4096}` and a map are both fine. It is not in the target work either:
-`--preprocess` is unaffected, `1 + 2` is fine, `1 + 2 + 3` is not, and
-`--dump-ast` and `-S` both fault because both parse. Bisecting the crash back to a
-one-line change in `main` is what established that it predates `-target`.
+`s4.c`'s `--dump-ast`/`-S` split is the observation that contradicts the
+"fault is inside the parse path" sentence that appeared in the summary; that
+sentence is withdrawn too. The instrumentation that pointed at `add_type`'s `.num`
+arm was reading a corrupted frame, not the site of the bug.
 
-What is known and what is not: the fault is inside the parse path — instrumentation
-puts the last thing reached inside `add_type`'s `.num` arm — and it moves with the
-caller's frame, which is the signature of a stack write that lands on a live local
-or of a caller whose alignment assumption the callee does not share. It was not
-root-caused: V's `-g` build prints `print_backtrace_skipping_top_frames is not
-implemented`, the Windows box has no debugger, and the generated C is
-Windows-specific so it cannot be run under WSL's tools. **It needs its own
-session with a symbolising stack**, and until then the honest statement is that
-fcc's parse path has an unexplained memory fault that ordinary edits to `main` can
-expose.
+What remains true and recorded: fcc's parse path has no known memory fault at
+this commit. If one is found later it must be reproduced against the current
+tree, not against the withdrawn measurement above.
 
 **A wide bitfield produced assembly GNU `as` rejected outright** — fixed in `4fb556e`,
 kept here only because the reasoning is what makes `bitfield_wide.c` worth having. A
