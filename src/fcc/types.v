@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 
 // The type system.
@@ -129,6 +130,7 @@ pub const ty_char = &ast.Type{ kind: .basic, basic: .char_, size: 1, align: 1 }
 pub const ty_schar = &ast.Type{ kind: .basic, basic: .char_, size: 1, align: 1, is_signed: true }
 pub const ty_short = &ast.Type{ kind: .basic, basic: .short_, size: 2, align: 2 }
 pub const ty_int = &ast.Type{ kind: .basic, basic: .int_, size: 4, align: 4 }
+
 // ty_long is the target's `long`: four bytes on the Windows x64 model, which is
 // the same width as `int`, and eight on LP64. They are still different types on
 // both — `long long` is 8 bytes and the usual arithmetic conversions distinguish
@@ -140,18 +142,22 @@ pub const ty_int = &ast.Type{ kind: .basic, basic: .int_, size: 4, align: 4 }
 pub fn ty_long() &ast.Type {
 	return current_target().long_type()
 }
+
 pub const ty_llong = &ast.Type{ kind: .basic, basic: .llong_, size: 8, align: 8 }
 pub const ty_uchar = &ast.Type{ kind: .basic, basic: .char_, size: 1, align: 1, is_unsigned: true }
 pub const ty_ushort = &ast.Type{ kind: .basic, basic: .short_, size: 2, align: 2, is_unsigned: true }
 pub const ty_uint = &ast.Type{ kind: .basic, basic: .int_, size: 4, align: 4, is_unsigned: true }
+
 // ty_ulong is `long`'s unsigned counterpart, so it moves with it: four bytes on
 // Windows, eight on LP64. Same pointer every call, for the reason on `ty_long`.
 pub fn ty_ulong() &ast.Type {
 	return current_target().ulong_type()
 }
+
 pub const ty_ullong = &ast.Type{ kind: .basic, basic: .llong_, size: 8, align: 8, is_unsigned: true }
 pub const ty_float = &ast.Type{ kind: .basic, basic: .float_, size: 4, align: 4 }
 pub const ty_double = &ast.Type{ kind: .basic, basic: .double_, size: 8, align: 8 }
+
 // A `long double` is eight bytes on the Windows target — not sixteen, and not ten.
 // tcc reports 8 and 8 on this host, measured, and passes one exactly as it passes
 // a `double` — the 64-bit value in a general register for a variadic call, which is
@@ -469,8 +475,16 @@ fn get_common_type(ty1 &ast.Type, ty2 &ast.Type) &ast.Type {
 	// An array or a function decays to a pointer in every arithmetic context, and
 	// C's rule is that it is the *element* type that matters, so an array of
 	// arrays does not become a pointer to an array here.
+	//
+	// The check is made for *either* operand: `i + p` is the same addition as
+	// `p + i` and has to yield the pointer type either way. Testing only the
+	// left operand made `2[x]` (which parses as `*(2 + x)`) type as `int`, so
+	// `2[x] = 5` had no target type and crashed the backend in `store`.
 	if ty1.base != unsafe { nil } {
 		return pointer_to(ty1.base)
+	}
+	if ty2.base != unsafe { nil } {
+		return pointer_to(ty2.base)
 	}
 	if ty1.kind == .func {
 		return pointer_to(ty1)
