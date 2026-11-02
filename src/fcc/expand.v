@@ -728,14 +728,25 @@ fn string_body(text string) []u8 {
 // Returns a list rather than a token, because a paste that is not one at a chain's end
 // sits *between* other tokens: `2##x` with `x` bound to `1+2` is `21`, `+`, `2`.
 fn paste(lhs []ast.Token, rhs []ast.Token) []ast.Token {
-	if lhs.len == 0 {
-		return rhs.clone()
+	// Trim trailing whitespace from lhs and leading whitespace from rhs, so
+	// that a paste of two identifiers does not pick up a stray space token and
+	// emit the two halves separately.
+	mut l := lhs.clone()
+	for l.len > 0 && (l[l.len - 1].kind == .newline || l[l.len - 1].text.trim_space() == '') {
+		l.delete(l.len - 1)
 	}
-	if rhs.len == 0 {
-		return lhs.clone()
+	mut r := rhs.clone()
+	for r.len > 0 && (r[0].kind == .newline || r[0].text.trim_space() == '') {
+		r.delete(0)
 	}
-	mut out := lhs[..lhs.len - 1].clone()
-	joined := lhs[lhs.len - 1].text + rhs[0].text
+	if l.len == 0 {
+		return r
+	}
+	if r.len == 0 {
+		return l
+	}
+	mut out := l[..l.len - 1].clone()
+	joined := l[l.len - 1].text + r[0].text
 	toks := tokenize_fragment(joined)
 	for t in toks {
 		if t.kind == .eof {
@@ -743,6 +754,6 @@ fn paste(lhs []ast.Token, rhs []ast.Token) []ast.Token {
 		}
 		out << t
 	}
-	out << rhs[1..].clone()
+	out << r[1..].clone()
 	return out
 }
