@@ -792,8 +792,14 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 			if ty.size > 16 || c.by_stack {
 				continue
 			}
+			is_variadic := node.func_ty != unsafe { nil } && node.func_ty.is_variadic
 			if c.fp1 {
 				g.popf(fp)
+				// Variadic: mirror the float half into the general register too.
+				if is_variadic && gp < gp_max {
+					g.line('  movq %xmm${fp}, ${arg_regs_mirror[gp]}')
+					gp++
+				}
 				fp++
 			} else {
 				g.pop(arg_regs[gp])
@@ -802,6 +808,10 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 			if ty.size > 8 {
 				if c.fp2 {
 					g.popf(fp)
+					if is_variadic && gp < gp_max {
+						g.line('  movq %xmm${fp}, ${arg_regs_mirror[gp]}')
+						gp++
+					}
 					fp++
 				} else {
 					g.pop(arg_regs[gp])
