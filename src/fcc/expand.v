@@ -234,6 +234,42 @@ fn (mut p Preprocessor) expand(toks []ast.Token, path string) []ast.Token {
 			// `#define M14(x) M13(x. M12)` with `M12` an object-like macro for `foo` has a
 			// space before `M12` in the body, and the stringified argument is `"bar. foo"`
 			// — so `foo` has to arrive with that space. Measured on chibicc's macro.c 320.
+			// [C11 6.10.3.4] Rescan: if the substitution produced a single
+			// identifier that is itself a function-like macro, and the next
+			// token in the stream is `(`, invoke it with those arguments. This
+			// is how `CAT(A,B)(x)` becomes `AB(x)`.
+			// The substituted result may carry trailing whitespace tokens; check
+			// the first token only.
+			if substituted.len > 0 && substituted[0].kind == .ident {
+				next_i := parsed.close
+				if next_i < toks.len && toks[next_i].text == '(' {
+					if idx2 := p.find_index(substituted[0].text) {
+						m2 := p.macros[idx2]
+						if m2.is_func && !m2.is_expanding {
+							open2 := next_significant(toks, next_i)
+							if open2 >= 0 && toks[open2].text == '(' {
+								parsed2 := collect_args(toks, open2)
+								if parsed2.close >= 0 {
+									owns_paint2 := !p.collecting_paint
+									paint_mark2 := p.painted.len
+									mut substituted2, arg_count2 := p.substitute(m2, parsed2.list, path, tok.line.disp_line)
+									if arg_count2 >= 0 {
+										p.macros[idx2].is_expanding = true
+										substituted2 = p.expand(stamp_line(substituted2, tok.line.disp_line), path)
+										p.macros[idx2].is_expanding = false
+										if owns_paint2 {
+											p.painted.trim(paint_mark2)
+										}
+										out << with_leading_space(substituted2, tok.has_space)
+										i = parsed2.close
+										continue
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 			out << with_leading_space(substituted, tok.has_space)
 			i = parsed.close
 			continue
@@ -280,6 +316,10 @@ fn collect_args(toks []ast.Token, open int) Args {
 		close: -1
 		list:  [][]ast.Token{}
 	}
+	// DEBUG
+	// (removed)
+	// DEBUG
+	// (removed)
 	mut cur := []ast.Token{}
 	mut depth := 0
 	mut i := open
