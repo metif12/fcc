@@ -1831,6 +1831,11 @@ fn (mut p Parser) translation_unit() {
 		} else {
 			p.global_variable(basety, attr)
 		}
+		// Consume a trailing comma in a comma-separated declaration list,
+		// so the next iteration parses the following declarator.
+		if p.at(',') {
+			p.pos++
+		}
 
 		// Every branch above must have consumed something. One that did not would
 		// spin here forever, so the fallback advances and reports rather than
@@ -1926,6 +1931,11 @@ fn (mut p Parser) function(basety &ast.Type, attr VarAttr) {
 	}
 
 	if p.consume(';') {
+		return
+	}
+	// A comma-separated declaration list: `int f(int), g(int), x;`. Each
+	// item is parsed by the next iteration of the translation unit loop.
+	if p.at(',') {
 		return
 	}
 	if !p.at('{') {
