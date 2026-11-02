@@ -631,10 +631,10 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 				if ty.size <= 16 {
 					fp1 := has_flonum(ty, 0, 8, 0)
 					fp2 := has_flonum(ty, 8, 16, 8)
-					if fp + b2i(fp1) + b2i(fp2) <= fp_max
-						&& gp + b2i(!fp1) + b2i(!fp2) <= gp_max {
-						fp += b2i(fp1) + b2i(fp2)
-						gp += b2i(!fp1) + b2i(!fp2)
+					if fp + b2i(fp1) + b2i(fp2) < fp_max
+						&& gp + b2i(!fp1) + b2i(!fp2) < gp_max {
+						fp += b2i(fp1) + (if ty.size > 8 { b2i(fp2) } else { 0 })
+						gp += b2i(!fp1) + (if ty.size > 8 { b2i(!fp2) } else { 0 })
 						passed = true
 					}
 				}
@@ -717,6 +717,13 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			}
 			if align < 1 {
 				align = 1
+			}
+			// Register-passed parameters and locals are stored in 8-byte slots.
+			// A struct whose natural alignment is 1 (e.g. char[N]) still occupies
+			// a full 8-byte register, so its frame slot must be 8-byte aligned or
+			// the second half spills into the first half's bytes.
+			if align < 8 {
+				align = 8
 			}
 			bottom += fun.locals[li].ty.size
 			bottom = align_to(bottom, align)
