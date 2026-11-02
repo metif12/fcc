@@ -1415,11 +1415,51 @@ fn (mut g AsmGen) gen_va_arg(node &ast.Node) {
 	// A `long double` is eight bytes and travels as a `double` does, so it is read
 	// like one — `g.load` below emits `movsd` for it. The by-reference rule used to
 	// name it explicitly, for a sixteen-byte value this target never had.
-	by_ref := sz > 16
+	// An HFA (homogeneous floating-point aggregate) is passed by value even
+	// when larger than 16 bytes, so it must not be treated as by-reference.
+	mut is_hfa := false
+	if ty.kind == .struct_ || ty.kind == .union_ {
+		if has_flonum(ty, 0, ty.size, 0) {
+			mut member_basic := ast.Basic.char_
+			mut has_member_basic := false
+			mut all_same := true
+			mut count := 0
+			for mem in ty.members {
+				count++
+				if mem.ty.kind != .basic {
+					all_same = false
+				} else {
+					if !has_member_basic {
+						member_basic = mem.ty.basic
+						has_member_basic = true
+					} else if mem.ty.basic != member_basic {
+						all_same = false
+					}
+				}
+			}
+			if all_same && has_member_basic && count > 0 && count <= 4 {
+				if member_basic == .float_ || member_basic == .double_ || member_basic == .ldouble_ {
+					is_hfa = true
+				}
+			}
+		}
+	}
 
-	// slots_per_arg is how many 8-byte slots this argument consumes in the
-	// register save area / on the stack. A 9-16 byte struct occupies two.
-	slots_per_arg := if sz > 8 && sz <= 16 { 2 } else { 1 }
+	// by_ref is true for non-HFA structs >16 bytes (passed by reference).
+	by_ref := (ty.kind == .struct_ || ty.kind == .union_) && sz > 16 && !is_hfa
+
+	// slots_per_arg: HFAs take size/8 slots (by value). 9-16 byte structs
+	// take 2. By-ref structs take 1 (the pointer). Others take 1.
+	mut slots_per_arg := 1
+	if by_ref {
+		slots_per_arg = 1
+	} else if ty.kind == .struct_ || ty.kind == .union_ {
+		if sz > 8 {
+			slots_per_arg = align_to(sz, 8) / 8
+		} else {
+			slots_per_arg = 1
+		}
+	}
 
 	// `%r11` holds the address of the `va_list` object and `%rax` walks the slots.
 	// They have to be kept apart: the advance writes *through the object's address*
