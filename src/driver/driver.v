@@ -149,6 +149,11 @@ pub fn parse_args(args []string) !Options {
 			o.show_help = true
 			return o
 		}
+		if arg == '--verbose' {
+			o.verbose = true
+			i++
+			continue
+		}
 		if arg == '-o' {
 			i++
 			o.output = need_value(args, i, '-o')
