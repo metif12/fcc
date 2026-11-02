@@ -312,13 +312,13 @@ fn (mut g AsmGen) store(ty &ast.Type) {
 				g.line('  movss %xmm0, (%rcx)')
 				return
 			}
-  if ty.basic == .double_ || ty.basic == .ldouble_ {
-  // A `long double` stores as a `double` — 8 bytes. The `fstpt` that used to be
-  // here popped the x87 stack, which held whatever was there rather than the
-  // value in `%xmm0` that every other path in this generator produces.
-  g.line('  movsd %xmm0, (%rcx)')
-  return
-  }
+			if ty.basic == .double_ || ty.basic == .ldouble_ {
+				// A `long double` stores as a `double` — 8 bytes. The `fstpt` that used to be
+				// here popped the x87 stack, which held whatever was there rather than the
+				// value in `%xmm0` that every other path in this generator produces.
+				g.line('  movsd %xmm0, (%rcx)')
+				return
+			}
 		}
 		else {}
 	}
@@ -338,14 +338,14 @@ fn (mut g AsmGen) cmp_zero(ty &ast.Type) {
 				g.line('  ucomiss %xmm1, %xmm0')
 				return
 			}
-  if ty.basic == .double_ || ty.basic == .ldouble_ {
-  // A `long double` compares as a `double` — 8 bytes in `%xmm0`. The `fldz` /
-  // `fucomip` sequence that used to be here compared the value against whatever
-  // the x87 stack held, which was not it.
-  g.line('  xorpd %xmm1, %xmm1')
-  g.line('  ucomisd %xmm1, %xmm0')
-  return
-  }
+			if ty.basic == .double_ || ty.basic == .ldouble_ {
+				// A `long double` compares as a `double` — 8 bytes in `%xmm0`. The `fldz` /
+				// `fucomip` sequence that used to be here compared the value against whatever
+				// the x87 stack held, which was not it.
+				g.line('  xorpd %xmm1, %xmm1')
+				g.line('  ucomisd %xmm1, %xmm0')
+				return
+			}
 		}
 		else {}
 	}
@@ -365,11 +365,12 @@ const type_u8 = 4
 const type_u16 = 5
 const type_u32 = 6
 const type_u64 = 7
-  const type_f32 = 8
-  const type_f64 = 9
-  // There is no `type_f80`: a `long double` maps to `type_f64` in `type_id`,
-  // because it is eight bytes on this target. The `f80` rows still present in
-  // the tables below are unreachable through it.
+const type_f32 = 8
+const type_f64 = 9
+
+// There is no `type_f80`: a `long double` maps to `type_f64` in `type_id`,
+// because it is eight bytes on this target. The `f80` rows still present in
+// the tables below are unreachable through it.
 
 fn type_id(ty &ast.Type) int {
 	if ty.kind != .basic {
@@ -391,8 +392,8 @@ fn type_id(ty &ast.Type) int {
 		.long_, .llong_ {
 			if ty.is_unsigned { type_u64 } else { type_i64 }
 		}
-	.float_ { type_f32 }
-	.double_, .ldouble_ { type_f64 }
+		.float_ { type_f32 }
+		.double_, .ldouble_ { type_f64 }
 		else { type_u64 }
 	}
 }
@@ -630,8 +631,8 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 				if ty.size <= 16 {
 					fp1 := has_flonum(ty, 0, 8, 0)
 					fp2 := has_flonum(ty, 8, 16, 8)
-					if fp + b2i(fp1) + b2i(fp2) < fp_max
-						&& gp + b2i(!fp1) + b2i(!fp2) < gp_max {
+					if fp + b2i(fp1) + b2i(fp2) <= fp_max
+						&& gp + b2i(!fp1) + b2i(!fp2) <= gp_max {
 						fp += b2i(fp1) + b2i(fp2)
 						gp += b2i(!fp1) + b2i(!fp2)
 						passed = true
@@ -649,23 +650,23 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			// than eight bytes by reference. Listing it with the floating-point types is
 			// what put it on the stack on the caller side as well, which is the other
 			// half of why `sprintf(buf, "%Lf", x)` never worked.
-	is_float := ty.kind == .basic
-		&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_)
-	if !passed && is_float && fp < fp_max {
-		fp++
-		passed = true
-	}
-	// A struct or union that reaches here did not fit in registers above —
-	// either it is wider than sixteen bytes or the registers were already taken
-	// — and it must go on the stack. Letting it fall into the general-register
-	// path below gives it an in-frame slot and spills registers into it, while
-	// the caller laid it out on the stack: the callee then reads registers for
-	// a value that was never there, which is an access violation rather than a
-	// wrong answer.
-	if !passed && !is_float && ty.kind != .struct_ && ty.kind != .union_ && gp < gp_max {
-		gp++
-		passed = true
-	}
+			is_float := ty.kind == .basic
+				&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_)
+			if !passed && is_float && fp < fp_max {
+				fp++
+				passed = true
+			}
+			// A struct or union that reaches here did not fit in registers above —
+			// either it is wider than sixteen bytes or the registers were already taken
+			// — and it must go on the stack. Letting it fall into the general-register
+			// path below gives it an in-frame slot and spills registers into it, while
+			// the caller laid it out on the stack: the callee then reads registers for
+			// a value that was never there, which is an access violation rather than a
+			// wrong answer.
+			if !passed && !is_float && ty.kind != .struct_ && ty.kind != .union_ && gp < gp_max {
+				gp++
+				passed = true
+			}
 
 			if passed {
 				if fun.ty.is_variadic {
