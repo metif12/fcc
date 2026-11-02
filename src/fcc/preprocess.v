@@ -1,4 +1,5 @@
 module fcc
+
 import os
 import ast
 
@@ -64,6 +65,8 @@ pub mut:
 	// changes on every `#include` — inside a header, `__FILE__` is the header and
 	// `__BASE_FILE__` must still be the file that was compiled.
 	base_file string
+	// line_offset adjusts disp_line for all subsequent tokens, honouring #line.
+	line_offset int
 	// depth bounds include nesting and expansion recursion, so a pathological file is
 	// reported instead of exhausting the stack.
 	depth int
@@ -282,7 +285,7 @@ pub fn (mut p Preprocessor) define_builtins() {
 	for m in p.target.macros {
 		p.define_target_macro(m.name, m.value)
 	}
-	}
+}
 
 // lookup finds a macro by name, or returns none.
 pub fn (p &Preprocessor) lookup(name string) ?Macro {
@@ -609,8 +612,22 @@ fn (mut p Preprocessor) simple_directive(name string, rest string, line int, pat
 			p.do_pragma(rest, line, path)
 		}
 		'line' {
-			// Accepted and ignored. The tokenizer already tracks physical lines, and
-			// honouring `#line` only matters for diagnostics.
+			mut num := 0
+			if !p.skipping() {
+				// Expand macros in the argument (e.g. `#line line`).
+				mut expanded := p.expand(tokenize_fragment(rest), path)
+				// Find the line number.
+				for t in expanded {
+					if t.kind == .num_ {
+						num = t.text.int()
+						break
+					}
+				}
+				if num > 0 {
+					// The next physical line is line+1; make its disp_line = num.
+					p.line_offset = num - 1
+				}
+			}
 		}
 		'' {
 			// A null directive, which the standard requires be accepted.
@@ -982,6 +999,7 @@ fn strip_sentinels(toks []ast.Token) []ast.Token {
 	}
 	return out
 }
+
 // resolve_include searches for a header and returns two spellings of where it found it.
 //
 // The first is the *resolved* path, which is what opens the file and what keys

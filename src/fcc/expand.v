@@ -37,7 +37,7 @@ fn (mut p Preprocessor) next_counter() string {
 fn (mut p Preprocessor) builtin_token(m Macro, tok ast.Token, path string) ast.Token {
 	value := match m.builtin {
 		.file { path }
-		.line { i64(tok.line.disp_line).str() }
+		.line { i64(tok.line.disp_line + p.line_offset).str() }
 		// [C11 6.10.8.1p2] the value starts at 0 and increments after each use: "a new
 		// integer constant ... beginning with 0". Incrementing *before* reading — which
 		// this did — made the first use 1, and chibicc's macro.c asserts on 0, 1, 2.
@@ -383,8 +383,7 @@ fn has_va_opt(toks []ast.Token) bool {
 // rescan sees `M2` with the flag clear, expands it once, and paints it for the nested
 // pass — which is the same single expansion, in the same place, with no flag to reset.
 // `#` and `##` are unaffected: they already read `args[idx]` directly.
-fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, path string, line int) ([]ast.Token,
-	int) {
+fn (mut p Preprocessor) substitute(m Macro, args [][]ast.Token, path string, line int) ([]ast.Token, int) {
 	if !m.is_func {
 		mut out := []ast.Token{}
 		for t in m.body {
