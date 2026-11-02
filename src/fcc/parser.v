@@ -1207,8 +1207,11 @@ fn (mut p Parser) parse_suffix() Suffix {
 		is_array:  true
 		array_len: -1
 	}
-	// `[static]` and `[restrict]` are allowed on a parameter's array declarator.
-	for p.at('static') || p.at('restrict') || p.at('__restrict') || p.at('__restrict__') {
+	// `[static]`, `[restrict]`, `[const]` and `[volatile]` are allowed on a
+	// parameter's array declarator (C99 6.7.5.3).
+	for p.at('static') || p.at('restrict') || p.at('__restrict') || p.at('__restrict__')
+		|| p.at('const') || p.at('volatile') || p.at('__const__') || p.at('__volatile__')
+		|| p.at('*') {
 		p.pos++
 	}
 	if !p.at(']') {
