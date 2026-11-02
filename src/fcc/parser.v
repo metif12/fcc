@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 
 // The declaration half of the parser.
@@ -169,10 +170,10 @@ pub mut:
 // layout code needs; see `Parser.pack_at`.
 pub fn parse_tokens(toks []ast.Token, path string, packs []PackEvent) ParseResult {
 	mut p := Parser{
-		toks:    toks
-		path:    path
-		packs:   packs
-		scopes:  [
+		toks:     toks
+		path:     path
+		packs:    packs
+		scopes:   [
 			Scope{
 				vars: map[string]&VarScope{}
 				tags: map[string]&ast.Type{}
@@ -901,7 +902,7 @@ fn (mut p Parser) declspec(attr ?&VarAttr) &ast.Type {
 			ts_void { ty_void }
 			ts_bool { ty_bool }
 			ts_char { ty_char }
-		ts_signed + ts_char { ty_schar }
+			ts_signed + ts_char { ty_schar }
 			ts_unsigned + ts_char { ty_uchar }
 			ts_short, ts_short + ts_int, ts_signed + ts_short, ts_signed + ts_short + ts_int {
 				ty_short
@@ -996,7 +997,7 @@ fn (p &Parser) is_typename() bool {
 const gnu_inline_keywords = [
 	'__inline'
 	'__inline__'
-	'__forceinline'
+	'__forceinline',
 ]
 
 // calling_convention_keywords are the Microsoft and GNU calling-convention specifiers,
@@ -1029,7 +1030,7 @@ const calling_convention_keywords = [
 	'CALLBACK'
 	'APIENTRY'
 	'APIPRIVATE'
-	'NTAPI'
+	'NTAPI',
 ]
 
 // type_specifier_keywords are the keywords that can begin a type. `__thread` is not
@@ -1099,7 +1100,7 @@ mut:
 	// ptr_const and ptr_volatile mark which of those levels was qualified:
 	// `int * const p` qualifies the pointer itself, where `const int *p`
 	// qualifies what it points at. Parallel to `ptrs` by index.
-	ptr_const   []bool
+	ptr_const    []bool
 	ptr_volatile []bool
 	// nested is a declarator inside parentheses, as in `(*fp)`.
 	nested ?&Decl
@@ -1446,14 +1447,17 @@ fn (mut p Parser) enum_specifier() &ast.Type {
 	ty.tag = tag
 
 	if tag != '' && !p.at('{') {
-		found := p.find_tag(tag) or {
-			p.error_here('unknown enum type "${tag}"')
-			ty
+		if found := p.find_tag(tag) {
+			if found.kind != .enum_ {
+				p.error_here('"${tag}" is not an enum tag')
+			}
+			return found
 		}
-		if found.kind != .enum_ {
-			p.error_here('"${tag}" is not an enum tag')
-		}
-		return found
+		// Forward declaration of an enum: size -1 marks it incomplete,
+		// matching how struct/union handle a tag named before its body.
+		ty.size = -1
+		p.push_tag_scope(tag, ty)
+		return ty
 	}
 
 	p.expect('{')
@@ -1477,7 +1481,7 @@ fn (mut p Parser) enum_specifier() &ast.Type {
 			p.pos++
 			continue
 		}
-	name := tok.text
+		name := tok.text
 		p.pos++
 		if p.consume('=') {
 			next = p.const_expr()
@@ -1500,6 +1504,18 @@ fn (mut p Parser) enum_specifier() &ast.Type {
 		ty.is_unsigned = true
 	}
 	if tag != '' {
+		// A redefinition overwrites the type the tag already names (including a
+		// forward declaration), so that a pointer to the tag made before the
+		// definition sees the completed type too — matching struct_union_decl.
+		if mut found := p.scopes[p.scopes.len - 1].tags[tag] {
+			found.tag = tag
+			found.kind = ty.kind
+			found.size = ty.size
+			found.align = ty.align
+			found.members = ty.members
+			found.is_unsigned = ty.is_unsigned
+			return found
+		}
 		p.push_tag_scope(tag, ty)
 	}
 	return ty
@@ -2053,6 +2069,11 @@ fn (mut p Parser) global_variable(basety &ast.Type, attr VarAttr) {
 		var.is_tls = attr.is_tls
 		if attr.align != 0 {
 			var.align = attr.align
+		}
+		// An enum tag can be forward-declared (a GNU extension), but a variable
+		// of the still-incomplete type is not allowed.
+		if var.ty.kind == .enum_ && !var.ty.is_complete() {
+			p.error_here('variable "${var.name}" has an incomplete type')
 		}
 		if p.consume('=') {
 			p.gvar_initializer(mut var)
@@ -3532,8 +3553,8 @@ fn (mut p Parser) primary() &ast.Node {
 		if tok.text.len > 0 && is_number_start(tok.text[0]) {
 			bad := invalid_numeric_suffix(tok.text)
 			if bad != '' {
-		kind := if is_flonum(ty) { 'floating' } else { 'integer' }
-		p.error_at_help(tok, "invalid suffix '${bad}' on ${kind} constant", 'integer suffixes are u/U, l/L and ll/LL; floating suffixes are f/F and l/L')
+				kind := if is_flonum(ty) { 'floating' } else { 'integer' }
+				p.error_at_help(tok, "invalid suffix '${bad}' on ${kind} constant", 'integer suffixes are u/U, l/L and ll/LL; floating suffixes are f/F and l/L')
 			}
 		}
 		if is_flonum(ty) {
@@ -3823,4 +3844,3 @@ fn (mut p Parser) new_add(mut lhs &ast.Node, mut rhs &ast.Node, tok ast.Token) &
 	add_type(mut node)
 	return node
 }
-

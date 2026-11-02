@@ -412,11 +412,13 @@ fn test_a_trailing_comma_in_an_enum_is_allowed() {
 }
 
 fn test_an_enum_tag_must_be_known_before_it_is_used() {
-	// C has no forward reference for an enum: the tag has to exist before the
-	// enumeration is complete, and saying so is better than inventing a type.
+	// An enum tag used before its definition is a forward declaration (a GNU
+	// extension, accepted by GCC with -pedantic). A variable of the still-
+	// incomplete type is not allowed, though: `enum E e;` has no definition to
+	// size `e` from.
 	r := parsed('enum E e;\n')
 	assert r.errors.len == 1
-	assert r.errors[0].contains('unknown enum type')
+	assert r.errors[0].contains('incomplete type')
 }
 
 fn test_a_struct_tag_can_be_completed_after_it_is_referenced() {
