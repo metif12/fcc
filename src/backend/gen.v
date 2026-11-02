@@ -60,6 +60,13 @@ fn (mut g AsmGen) classify_args(node &ast.Node) (int, []ArgClass) {
 					&& gp + b2i(!c.fp1) + b2i(!c.fp2) < gp_max {
 					fp += b2i(c.fp1) + b2i(c.fp2)
 					gp += b2i(!c.fp1) + b2i(!c.fp2)
+					// A variadic call mirrors every floating-point half into a
+					// general register, so an HFA consumes that many general
+					// slots even though the struct branch above did not count
+					// them (they are floats, not integers).
+					if node.func_ty != unsafe { nil } && node.func_ty.is_variadic {
+						gp += b2i(c.fp1) + b2i(c.fp2)
+					}
 				} else {
 					c.by_stack = true
 					stack += align_to(ty.size, 8) / 8
@@ -216,7 +223,8 @@ fn (mut g AsmGen) push_args_pass(node &ast.Node, classes []ArgClass, first_pass 
 			i--
 			continue
 		}
-		g.push_one(node.args[i])
+		variadic := node.func_ty != unsafe { nil } && node.func_ty.is_variadic
+		g.push_one(node.args[i], variadic)
 		i--
 	}
 }
@@ -225,13 +233,19 @@ fn (mut g AsmGen) push_args_pass(node &ast.Node, classes []ArgClass, first_pass 
 // find it: an aggregate copied out of `%rax`, an SSE value in `%xmm0` (which is
 // what a `long double` is on this target — 8 bytes, measured against tcc), and
 // everything else as a word in `%rax`.
-fn (mut g AsmGen) push_one(arg &ast.Node) {
+fn (mut g AsmGen) push_one(arg &ast.Node, variadic bool) {
 	g.gen_expr(arg)
 	ty := arg.ty
 	if ty.kind == .struct_ || ty.kind == .union_ {
 		g.push_struct(ty)
 	} else if ty.kind == .basic
 		&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_) {
+		// A variadic callee reads a `float` as a `double` (x86-64 promotes
+		// float to double in variadic calls), so the value in %xmm0 has to be
+		// the double before it is stored. Non-variadic callees expect a float.
+		if variadic && ty.basic == .float_ {
+			g.line('  cvtss2sd %xmm0, %xmm0')
+		}
 		g.pushf()
 	} else {
 		g.push()
