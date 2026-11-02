@@ -765,13 +765,13 @@ fn (mut g AsmGen) gen_assign_bitfield(node &ast.Node, m ast.Member) {
 // because %r10 is not an argument register and so survives loading the arguments
 // into theirs.
 fn (mut g AsmGen) gen_funcall(node &ast.Node) {
-		// The VLA allocator is not a function, so it is emitted here rather than called.
-		if node.lhs.kind == .var_ref && node.lhs.var.name == 'alloca' {
-			g.gen_expr(node.args[0])
-			g.line('  mov %rax, %r11')
-			g.builtin_alloca()
-			return
-		}
+	// The VLA allocator is not a function, so it is emitted here rather than called.
+	if node.lhs.kind == .var_ref && node.lhs.var.name == 'alloca' {
+		g.gen_expr(node.args[0])
+		g.line('  mov %rax, %r11')
+		g.builtin_alloca()
+		return
+	}
 
 	_, classes := g.classify_args(node)
 	stack_args := g.push_args(node, classes)
@@ -1417,6 +1417,10 @@ fn (mut g AsmGen) gen_va_arg(node &ast.Node) {
 	// name it explicitly, for a sixteen-byte value this target never had.
 	by_ref := sz > 16
 
+	// slots_per_arg is how many 8-byte slots this argument consumes in the
+	// register save area / on the stack. A 9-16 byte struct occupies two.
+	slots_per_arg := if sz > 8 && sz <= 16 { 2 } else { 1 }
+
 	// `%r11` holds the address of the `va_list` object and `%rax` walks the slots.
 	// They have to be kept apart: the advance writes *through the object's address*
 	// while the read dereferences the pointer the object holds, and using one register
@@ -1431,6 +1435,25 @@ fn (mut g AsmGen) gen_va_arg(node &ast.Node) {
 	g.gen_addr(node.lhs) // %rax = &ap
 	g.line('  mov %rax, %r11') // %r11 = &ap, kept across the load
 	g.line('  mov (%r11), %rax') // %rax = ap
+
+	// A struct that does not fit in the remaining argument registers is placed
+	// on the stack by the caller, which leaves the leftover register slots
+	// unused. va_arg has to skip those, otherwise it reads a leftover register
+	// as the first slot of the value. consumed is (ap - va_start_base) / 8.
+	skip_label := g.next_label()
+	g.line('  mov %rax, %rdx')
+	g.line('  sub $16, %rdx')
+	g.line('  shr $3, %rdx') // %rdx = consumed slots so far
+	g.line('  mov $4, %rcx')
+	g.line('  sub %rdx, %rcx') // %rcx = remaining register slots
+	g.line('  cmp $${slots_per_arg}, %rcx')
+	g.line('  jge .L.va_arg.no_skip.${skip_label}')
+	g.line('  cmp $4, %rdx')
+	g.line('  jge .L.va_arg.no_skip.${skip_label}')
+	g.line('  shl $3, %rcx') // remaining * 8
+	g.line('  add %rcx, %rax') // ap += remaining * 8
+	g.line('  mov %rax, (%r11)') // update stored ap
+	g.line('.L.va_arg.no_skip.${skip_label}:')
 
 	if by_ref {
 		g.line('  mov (%rax), %rax') // the slot holds the address of the object
@@ -1488,31 +1511,31 @@ fn (mut g AsmGen) spill_params(fun &ast.Obj) {
 		if param.offset > 0 {
 			continue
 		}
-	ty := param.ty
-	if ty.kind == .struct_ || ty.kind == .union_ {
-		// Each eightbyte advances its own counter, matching `assign_lvar_offsets`:
-		// a floating first half takes an SSE register and the second half takes
-		// the next one of its own class. Advancing only one counter, or advancing
-		// after both, spills the second half from the first half's register — so
-		// a 16-byte struct of two doubles arrived as the first double twice.
-		if has_flonum(ty, 0, 8, 0) {
-			g.store_fp(fp, param.offset, imin(8, ty.size))
-			fp++
-		} else {
-			g.store_gp(gp, param.offset, imin(8, ty.size))
-			gp++
-		}
-		if ty.size > 8 {
-			if has_flonum(ty, 8, 16, 0) {
-				g.store_fp(fp, param.offset + 8, ty.size - 8)
+		ty := param.ty
+		if ty.kind == .struct_ || ty.kind == .union_ {
+			// Each eightbyte advances its own counter, matching `assign_lvar_offsets`:
+			// a floating first half takes an SSE register and the second half takes
+			// the next one of its own class. Advancing only one counter, or advancing
+			// after both, spills the second half from the first half's register — so
+			// a 16-byte struct of two doubles arrived as the first double twice.
+			if has_flonum(ty, 0, 8, 0) {
+				g.store_fp(fp, param.offset, imin(8, ty.size))
 				fp++
 			} else {
-				g.store_gp(gp, param.offset + 8, ty.size - 8)
+				g.store_gp(gp, param.offset, imin(8, ty.size))
 				gp++
 			}
+			if ty.size > 8 {
+				if has_flonum(ty, 8, 16, 0) {
+					g.store_fp(fp, param.offset + 8, ty.size - 8)
+					fp++
+				} else {
+					g.store_gp(gp, param.offset + 8, ty.size - 8)
+					gp++
+				}
+			}
+			continue
 		}
-		continue
-	}
 		if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_) {
 			// A `long double` spills exactly as a `double` does — 8 bytes from its
 			// XMM register to the frame slot. The `fldt`/`fstpt` through an address
