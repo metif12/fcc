@@ -975,6 +975,9 @@ fn (p &Parser) is_typename() bool {
 	if tok.kind != .keyword {
 		return false
 	}
+	if tok.text == '__attribute__' || tok.text == '__attribute' {
+		return true
+	}
 	// A folded alias keyword keeps its own spelling as its text, so `__inline` and
 	// `__inline__` arrive here as `.keyword` tokens whose text is *not* in
 	// `type_specifier_keywords` — which is why they were rejected here even after the
