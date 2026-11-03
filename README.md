@@ -28,16 +28,21 @@ probes for frames over a page, struct returns, bitfields, and floating point.
   **20 of 20 match**.
 - The [c-testsuite](https://github.com/c-testsuite/c-testsuite) single-exec
   suite (220 cases, run from an external checkout via `tools/cts/cts.v`):
-  **209 match, 11 differ, 0 blocked** — and every differ carries its tcc
-  control, so a defect in fcc is distinguished from a gap tcc shares.
+  **216 match, 4 differ, 0 blocked** — 7 of the original 11 differs were fixed
+  (forward-declared enums, `#line` macro expansion, K&R comma-separated
+  declarations, array parameter qualifiers, paste whitespace, macro rescan, and
+  the `AsmGen.store` crash). The remaining 4 differs are: one ARM64
+  calling-convention test (00204, no longer crashes but output differs), and
+  three complex-initializer tests (00205, 00210, 00216) that need parser work.
+  Every differ carries its tcc control, so a defect in fcc is distinguished from
+  a gap tcc shares.
 - The chibicc behavioural suite: **9 of 18**. The nine failures are *not* all
   ABI divergences, as this file previously claimed — they are, measured:
   three host-ABI divergences with an explicit expected-vs-got (`_Alignof(long)`,
   `sizeof` of a `long` bitfield, `sizeof(L'0')` — `long`=4 and `wchar_t`=2 on
   this target, matching tcc and mingw gcc), one frontend gap (chibicc's private
-  `__va_area__`), one **backend crash** (invalid memory access in `AsmGen.store`),
-  and four behavioural mismatches inside chibicc's own `assert`s that are not yet
-  individually characterised.
+  `__va_area__`), one backend crash (invalid memory access in `AsmGen.store`,
+  **fixed**), and four behavioural mismatches inside chibicc's own `assert`s.
 - `v test .`: 10 of 10, on stock V and on the local build.
 - CI builds and runs the suite on stock V. Build is green; the two test files
   that fail there are stock-V codegen defects, recorded in `docs/PLAN.md`.
@@ -211,6 +216,17 @@ not recognise would make V fall back to `cc` instead of surfacing what went wron
 
 So: `fcc.exe` builds, `fcc -S` compiles, `fcc: ` is what the driver prints — and
 `tcc: ` is what a compiler error looks like from V's side.
+
+## Roadmap
+
+- **Phase 0** — contract capture. Done: `docs/CONTRACT.md` pinned by 12 tests.
+- **Phase 1** — C front end. Done: tokenizer, preprocessor, parser, type system.
+- **Phase 2** — assembly-text backend. Done: whole translation units compile to
+  x86-64 assembly, 20/20 differential programs match, 216/220 c-testsuite cases.
+- **Phase 3** — machine-code emitter + object writer. Not started.
+- **Open work** (see `docs/PLAN.md`): CTS 00204 (variadic HFA ABI), complex
+  initializers (00205, 00216), `__attribute__` in cast types (00210), and
+  characterising the remaining chibicc failures.
 
 ## Design in one paragraph
 

@@ -25,7 +25,7 @@ remains is still a working C compiler.
 
 ## Phases
 
-### Phase 0 — contract capture *(in progress)*
+### Phase 0 — contract capture *(done)*
 
 Make the requirement falsifiable. `docs/CONTRACT.md` records the exact tcc surface
 V depends on, each item quoted from a live source line.
@@ -39,7 +39,7 @@ reported as a clean run.
 **Done:** contract documented and pinned by 12 tests; harness with 15 tests.
 
 **Remaining:** a corpus of V programs to compare `v.exe -cc tcc` against
-`v.exe -cc fcc` on.
+`v.exe -cc fcc` on. Phase 2 now has 20 differential programs, all matching.
 
 ### Phase 1 — C front end
 
