@@ -1146,6 +1146,13 @@ fn (mut p Parser) parse_decl_shape(allow_name bool) &Decl {
 		line:         p.tok().line.disp_line
 		suffixes:     []Suffix{}
 	}
+	// Skip leading attribute groups: `int (__attribute__((x)) *p)`.
+	for p.at('__attribute__') || p.at('__attribute') {
+		p.pos++
+		if p.at('(') {
+			p.skip_balanced('(', ')')
+		}
+	}
 	for p.consume('*') {
 		d.ptrs++
 		mut c := false
@@ -1187,6 +1194,10 @@ fn (mut p Parser) parse_decl_shape(allow_name bool) &Decl {
 fn (mut p Parser) starts_declarator_at(n int) bool {
 	tok := p.tok_at(n)
 	if tok.text == '*' || tok.text == '(' {
+		return true
+	}
+	// An attribute group can precede a declarator: `int (__attribute__((x)) *p)`.
+	if tok.text == '__attribute__' || tok.text == '__attribute' {
 		return true
 	}
 	// A name that is not a type name can only be a declarator's name. An abstract
