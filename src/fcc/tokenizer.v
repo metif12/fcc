@@ -247,7 +247,7 @@ fn tokenize_with(src string, first_at_bol bool, file &ast.File) []ast.Token {
 fn (mut t Tokenizer) skip_insignificant() {
 	for t.pos < t.src.len {
 		c := t.src[t.pos]
-		if c == `\\` && t.peek_at(t.pos + 1) == `\n` {
+		if c == `\\` && (t.peek_at(t.pos + 1) == `\n` || (t.peek_at(t.pos + 1) == `\r` && t.peek_at(t.pos + 2) == `\n`)) {
 			t.skip_splice()
 			continue
 		}
@@ -298,7 +298,13 @@ fn (mut t Tokenizer) skip_insignificant() {
 // lines repeated because a splice can also land inside a token, where `skip_insignificant`
 // has already stopped — see `read_ident`.
 fn (mut t Tokenizer) skip_splice() {
-	t.pos += 2
+	if t.pos + 2 < t.src.len && t.src[t.pos + 1] == `\r` && t.src[t.pos + 2] == `\n` {
+		t.pos += 3
+	} else if t.pos + 1 < t.src.len && t.src[t.pos + 1] == `\n` {
+		t.pos += 2
+	} else {
+		t.pos += 2
+	}
 	t.line++
 	t.line_start = t.pos
 }
@@ -417,7 +423,7 @@ fn (mut t Tokenizer) read_ident() ast.Token {
 	start := t.pos
 	mut spliced := false
 	for t.pos < t.src.len {
-		if t.src[t.pos] == `\\` && t.peek_at(t.pos + 1) == `\n` {
+		if t.src[t.pos] == `\\` && (t.peek_at(t.pos + 1) == `\n` || (t.peek_at(t.pos + 1) == `\r` && t.peek_at(t.pos + 2) == `\n`)) {
 			spliced = true
 			t.skip_splice()
 			continue
@@ -447,9 +453,15 @@ fn remove_splices(s string) string {
 	mut out := []u8{}
 	mut i := 0
 	for i < s.len {
-		if s[i] == `\\` && i + 1 < s.len && s[i + 1] == `\n` {
-			i += 2
-			continue
+		if s[i] == `\\` {
+			if i + 2 < s.len && s[i + 1] == `\r` && s[i + 2] == `\n` {
+				i += 3
+				continue
+			}
+			if i + 1 < s.len && s[i + 1] == `\n` {
+				i += 2
+				continue
+			}
 		}
 		out << s[i]
 		i++
@@ -501,7 +513,7 @@ fn (mut t Tokenizer) read_punct() ast.Token {
 	// would mean matching the table against a spliced-out view of the source, which is
 	// the pre-pass `docs/PLAN.md` recommends and the reason this is recorded rather than
 	// left silent. No ordinary C and none of the suite's 18 files writes that spelling.
-	if t.pos < t.src.len && t.src[t.pos] == `\\` && t.peek_at(t.pos + 1) == `\n` {
+	if t.pos < t.src.len && t.src[t.pos] == `\\` && (t.peek_at(t.pos + 1) == `\n` || (t.peek_at(t.pos + 1) == `\r` && t.peek_at(t.pos + 2) == `\n`)) {
 		t.skip_splice()
 	}
 	for p in punctuators {
@@ -597,7 +609,7 @@ fn (mut t Tokenizer) read_number() ast.Token {
 	// `1p` followed by `+3`. gcc reports the whole `p+3` as the invalid suffix.
 	for t.pos < t.src.len {
 		c := t.src[t.pos]
-		if c == `\\` && t.peek_at(t.pos + 1) == `\n` {
+		if c == `\\` && (t.peek_at(t.pos + 1) == `\n` || (t.peek_at(t.pos + 1) == `\r` && t.peek_at(t.pos + 2) == `\n`)) {
 			t.skip_splice()
 			spliced = true
 			continue
@@ -646,7 +658,7 @@ fn (t &Tokenizer) at(c u8) bool {
 fn (mut t Tokenizer) scan(pred fn (u8) bool) bool {
 	mut spliced := false
 	for t.pos < t.src.len {
-		if t.src[t.pos] == `\\` && t.peek_at(t.pos + 1) == `\n` {
+		if t.src[t.pos] == `\\` && (t.peek_at(t.pos + 1) == `\n` || (t.peek_at(t.pos + 1) == `\r` && t.peek_at(t.pos + 2) == `\n`)) {
 			t.skip_splice()
 			spliced = true
 			continue
