@@ -1042,10 +1042,12 @@ fn vemit_unit(globals []&ast.Obj, typedefs map[string]&ast.Type) string {
 			mut fields := []string{}
 			for m in t.members {
 				vemit_collect_type(m.ty, mut seen, mut structs)
-				fields << '\t' + v_safe_name(m.name) + ' ' + v_type(m.ty)
+				fields << '\t' + 'mut ' + v_safe_name(m.name) + ' ' + v_type(m.ty)
 			}
 			keyword := if t.kind == .union_ { 'union' } else { 'struct' }
-			structs << '${keyword} ${v_safe_name(name)} {\n' + fields.join('\n') + '\n}'
+			cap := v_safe_name(name)
+			cap_name := cap[0..1].to_upper() + cap[1..]
+			structs << '${keyword} ${cap_name} {\n' + fields.join('\n') + '\n}'
 		}
 	}
 	for obj in globals {
@@ -1145,26 +1147,33 @@ fn vemit_collect_type(t &ast.Type, mut seen map[string]bool, mut out []string) {
 	}
 	match t.kind {
 		.struct_, .union_ {
-			name := if t.tag != '' { v_safe_name(t.tag) } else if t.name != '' { v_safe_name(t.name) } else { '' }
-			if name != '' && !(name in seen) {
-				seen[name] = true
+					name := if t.tag != '' { v_safe_name(t.tag) } else if t.name != '' { v_safe_name(t.name) } else { '' }
+			cap_name := if name != '' { name[0..1].to_upper() + name[1..] } else { '' }
+			if cap_name != '' && !(cap_name in seen) {
+				seen[cap_name] = true
 				mut fields := []string{}
 				for m in t.members {
 					vemit_collect_type(m.ty, mut seen, mut out)
-					fields << '${v_safe_name(m.name)} ${v_type(m.ty)}'
+					fields << 'mut ${v_safe_name(m.name)} ${v_type(m.ty)}'
 				}
 				keyword := if t.kind == .union_ { 'union' } else { 'struct' }
 				mut body := []string{}
 				for f in fields {
 					body << '\t' + f
 				}
-				out << '${keyword} ${name} {\n' + body.join('\n') + '\n}'
+				out << '${keyword} ${cap_name} {\n' + body.join('\n') + '\n}'
 			}
 			for m in t.members {
 				vemit_collect_type(m.ty, mut seen, mut out)
 			}
 		}
-		.pointer { vemit_collect_type(t.base, mut seen, mut out) }
+		.enum_ {
+			name := if t.tag != '' { v_safe_name(t.tag) } else if t.origin != unsafe { nil } && t.origin.name != '' { v_safe_name(t.origin.name) } else if t.name != '' { v_safe_name(t.name) } else { '' }
+			if name != '' && !(name in seen) {
+				seen[name] = true
+				out << '// enum ${name} { ... }  (members not translated)'
+			}
+		}
 		.array, .vla { vemit_collect_type(t.base, mut seen, mut out) }
 		.func {
 			vemit_collect_type(t.base, mut seen, mut out)
@@ -1220,20 +1229,37 @@ fn v_type(t &ast.Type) string {
 			return 'fn (${params.join(', ')}) ${ret}'
 		}
 		.struct_ {
+			mut name := ''
 			if t.tag != '' {
-				return v_safe_name(t.tag)
+				name = v_safe_name(t.tag)
+			} else if t.origin != unsafe { nil } && t.origin.name != '' {
+				name = v_safe_name(t.origin.name)
+			} else if t.name != '' {
+				name = v_safe_name(t.name)
 			}
-			if t.name != '' {
-				return v_safe_name(t.name)
+			if name != '' {
+				// V requires type names to start with an uppercase letter.
+				name = name[0..1].to_upper() + name[1..]
+			}
+			if name != '' {
+				return name
 			}
 			return 'struct { }'
 		}
 		.union_ {
+			mut name := ''
 			if t.tag != '' {
-				return v_safe_name(t.tag)
+				name = v_safe_name(t.tag)
+			} else if t.origin != unsafe { nil } && t.origin.name != '' {
+				name = v_safe_name(t.origin.name)
+			} else if t.name != '' {
+				name = v_safe_name(t.name)
 			}
-			if t.name != '' {
-				return v_safe_name(t.name)
+			if name != '' {
+				name = name[0..1].to_upper() + name[1..]
+			}
+			if name != '' {
+				return name
 			}
 			return 'struct { }'
 		}
@@ -1282,6 +1308,7 @@ fn v_stmts(nodes []&ast.Node, in_main bool) string {
 	mut out := []string{}
 	for n in nodes {
 		r := v_stmt(n, in_main)
+		eprintln('VSTMT kind=' + int(n.kind).str() + ' -> [' + r + ']')
 		if r != '' && r != '0;' {
 			out << r
 		}
@@ -1296,6 +1323,7 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 	match n.kind {
 		.null_stmt { return '' }
 		.expr_stmt {
+			eprintln('EXPRSTMT lhs.kind=' + (if n.lhs != unsafe { nil } { int(n.lhs.kind).str() } else { 'nil' }))
 			if n.lhs != unsafe { nil } {
 				if n.lhs.kind == .comma {
 					mut parts := []string{}
@@ -1305,11 +1333,12 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 					mut stack := [n.lhs]
 					for stack.len > 0 {
 						cur := stack.pop()
-						if cur.kind == .comma {
+									if cur.kind == .comma {
 							stack << cur.lhs
 							stack << cur.rhs
 						} else {
 							r := v_expr(cur)
+							eprintln('FLATLEAF kind=' + int(cur.kind).str() + ' -> [' + r + ']')
 							if r != '' && r != '0' && !r.starts_with('/*expr') {
 								parts << r + ';'
 							}
@@ -1380,11 +1409,36 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 			}
 			mut inc := ''
 			if n.inc != unsafe { nil } {
-				eprintln('FORINC kind=' + int(n.inc.kind).str())
-				inc = v_expr(n.inc)
+				inc_raw := v_expr(n.inc)
+				if inc_raw.contains('tmp_') {
+					// Postfix ++/-- was rewritten into a pointer dance; recover
+					// the loop variable from the init and emit a readable inc.
+					mut var_name := 'i'
+					if n.init != unsafe { nil } {
+						if n.init.kind == .assign {
+							var_name = v_expr(n.init.lhs)
+						} else if n.init.kind == .block_ {
+							for st in n.init.body {
+								if st.kind == .expr_stmt && st.lhs != unsafe { nil } && st.lhs.kind == .assign {
+									var_name = v_expr(st.lhs.lhs)
+									break
+								}
+							}
+						}
+					}
+					if inc_raw.contains('+ 1') {
+						inc = var_name + '++'
+					} else if inc_raw.contains('- 1') {
+						inc = var_name + '--'
+					} else {
+						inc = '/* inc */'
+					}
+				} else {
+					inc = inc_raw
+				}
 			}
 			mut s := 'for ' + init + '; ' + cond + '; ' + inc + ' {\n'
-			s += indent_block(v_stmts(n.body, in_main))
+			s += indent_block(v_stmt(n.then, in_main))
 			s += '\n}'
 			return s
 		}
@@ -1488,7 +1542,51 @@ fn v_expr(n &ast.Node) string {
 		.ne { return '(' + v_expr(n.lhs) + ' != ' + v_expr(n.rhs) + ')' }
 		.lt { return '(' + v_expr(n.lhs) + ' < ' + v_expr(n.rhs) + ')' }
 		.le { return '(' + v_expr(n.lhs) + ' <= ' + v_expr(n.rhs) + ')' }
-		.assign { return v_expr(n.lhs) + ' = ' + v_expr(n.rhs) }
+		.assign {
+			if n.lhs != unsafe { nil } && n.lhs.kind == .deref {
+				if n.lhs.lhs != unsafe { nil } && n.lhs.lhs.kind == .add {
+					eprintln('    add.lhs.kind=' + (if n.lhs.lhs.lhs != unsafe { nil } { int(n.lhs.lhs.lhs.kind).str() } else { 'nil' }))
+					eprintln('    add.rhs.kind=' + (if n.lhs.lhs.rhs != unsafe { nil } { int(n.lhs.lhs.rhs.kind).str() } else { 'nil' }))
+				}
+			}
+			// Array element assignment `*(arr + (i * 4)) = v` is not legal V;
+			// render it as `arr[i] = v`.
+			mut add_node := n.lhs.lhs
+			for add_node != unsafe { nil } && add_node.kind == .cast {
+				add_node = add_node.lhs
+			}
+			mut base_var := &ast.Obj(unsafe { nil })
+			if add_node != unsafe { nil } && add_node.kind == .add
+				&& add_node.lhs != unsafe { nil } {
+				mut b := add_node.lhs
+				for b != unsafe { nil } && b.kind == .cast {
+					b = b.lhs
+				}
+				if b != unsafe { nil } && b.kind == .var_ref {
+					base_var = b.var
+				}
+			}
+			mut mul_node := &ast.Node(unsafe { nil })
+			if add_node != unsafe { nil } && add_node.kind == .add
+				&& add_node.rhs != unsafe { nil } {
+				mut r := add_node.rhs
+				for r != unsafe { nil } && r.kind == .cast {
+					r = r.lhs
+				}
+				if r != unsafe { nil } && r.kind == .mul {
+					mul_node = r
+				}
+			}
+			if n.lhs != unsafe { nil } && n.lhs.kind == .deref && base_var != unsafe { nil } && mul_node != unsafe { nil } {
+				mut idx := v_expr(mul_node.lhs)
+				name := v_safe_name(base_var.name)
+				return 'unsafe { ' + '${name}[${idx}] = ' + v_expr(n.rhs) + ' }'
+			}
+			if n.lhs != unsafe { nil } && n.lhs.kind == .deref {
+				return 'unsafe { ' + v_expr(n.lhs) + ' = ' + v_expr(n.rhs) + ' }'
+			}
+			return v_expr(n.lhs) + ' = ' + v_expr(n.rhs)
+		}
 		.cond_expr {
 			return 'if ' + v_expr(n.cond) + ' { ' + v_expr(n.then) + ' } else { ' + v_expr(n.els) + ' }'
 		}
@@ -1501,7 +1599,31 @@ fn v_expr(n &ast.Node) string {
 			return v_expr(n.lhs) + '.' + v_safe_name(name)
 		}
 		.addr { return '&' + v_expr(n.lhs) }
-		.deref { return '*' + v_expr(n.lhs) }
+		.deref {
+			// Array subscript lowers to `*(base + index * stride)` in this
+			// generator; render it as `base[index]` so the V side is legal.
+			mut add_node := n.lhs
+			for add_node != unsafe { nil } && add_node.kind == .cast {
+				add_node = add_node.lhs
+			}
+			if add_node != unsafe { nil } && add_node.kind == .add {
+				mut base := add_node.lhs
+				for base != unsafe { nil } && base.kind == .cast {
+					base = base.lhs
+				}
+				mut mul_node := add_node.rhs
+				for mul_node != unsafe { nil } && mul_node.kind == .cast {
+					mul_node = mul_node.lhs
+				}
+				if base != unsafe { nil } && base.kind == .var_ref && base.var != unsafe { nil }
+					&& mul_node != unsafe { nil } && mul_node.kind == .mul {
+					mut idx := v_expr(mul_node.lhs)
+					name := v_safe_name(base.var.name)
+					return '${name}[${idx}]'
+				}
+			}
+			return '*' + v_expr(n.lhs)
+		}
 		.not { return '!' + v_expr(n.lhs) }
 		.bit_not { return '~' + v_expr(n.lhs) }
 		.log_and { return '(' + v_expr(n.lhs) + ' && ' + v_expr(n.rhs) + ')' }
@@ -1514,8 +1636,20 @@ fn v_expr(n &ast.Node) string {
 				name = v_expr(n.lhs)
 			}
 			mut args := []string{}
-			for a in n.args {
-				args << v_expr(a)
+			for i, a in n.args {
+				mut arg_node := a
+				for arg_node != unsafe { nil } && arg_node.kind == .cast {
+					arg_node = arg_node.lhs
+				}
+				mut rendered := v_expr(a)
+				// V does not decay arrays to pointers; pass the address of
+				// the first element when the callee expects a pointer.
+				if arg_node != unsafe { nil } && arg_node.kind == .var_ref && arg_node.var != unsafe { nil } && arg_node.var.ty != unsafe { nil } && arg_node.var.ty.kind == .array
+					&& n.lhs != unsafe { nil } && n.lhs.ty != unsafe { nil }
+					&& i < n.lhs.ty.params.len && n.lhs.ty.params[i].kind == .pointer {
+					rendered = '&' + v_safe_name(arg_node.var.name) + '[0]'
+				}
+				args << rendered
 			}
 			return '${name}(${args.join(', ')})'
 		}
@@ -1592,7 +1726,12 @@ fn v_zero(t &ast.Type) string {
 		return '0'
 	}
 	match t.kind {
-		.pointer { return 'unsafe { nil }' }
+		.pointer {
+			if t.base != unsafe { nil } {
+				return '&' + v_type(t.base) + '(unsafe { nil })'
+			}
+			return 'unsafe { nil }'
+		}
 		.basic {
 			if t.basic == .float_ || t.basic == .double_ || t.basic == .ldouble_ {
 				return '0.0'
