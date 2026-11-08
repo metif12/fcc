@@ -1407,6 +1407,49 @@ fn (mut g AsmGen) gen_stmt(node &ast.Node) {
 	g.errors << 'statement at line ${node.tok.line.disp_line} is not a statement this generator emits'
 }
 
+// size_reg returns the width-appropriate spelling of one of the scratch registers
+// in asm_scratch, so a sized `mov`/`cmpxchg` can name it without a width
+// mismatch. Only the six scratch registers are handled.
+fn size_reg(reg string, sz int) string {
+	name := reg.trim_left('%')
+	match sz {
+		1 {
+			match name {
+				'rcx' { return '%cl' }
+				'rdx' { return '%dl' }
+				'r8' { return '%r8b' }
+				'r9' { return '%r9b' }
+				'r10' { return '%r10b' }
+				'r11' { return '%r11b' }
+				else { return reg }
+			}
+		}
+		2 {
+			match name {
+				'rcx' { return '%cx' }
+				'rdx' { return '%dx' }
+				'r8' { return '%r8w' }
+				'r9' { return '%r9w' }
+				'r10' { return '%r10w' }
+				'r11' { return '%r11w' }
+				else { return reg }
+			}
+		}
+		4 {
+			match name {
+				'rcx' { return '%ecx' }
+				'rdx' { return '%edx' }
+				'r8' { return '%r8d' }
+				'r9' { return '%r9d' }
+				'r10' { return '%r10d' }
+				'r11' { return '%r11d' }
+				else { return reg }
+			}
+		}
+		else { return reg }
+	}
+}
+
 // gen_asm emits a GNU `__asm__` statement.
 //
 // Each operand's address is materialised into its own scratch register, and `%N` is
@@ -1429,7 +1472,11 @@ fn (mut g AsmGen) gen_asm(node &ast.Node) {
 		return
 	}
 	for i in 0 .. node.asm_ops.len {
-		g.gen_addr(node.asm_ops[i])
+		if i < node.asm_constraints.len && node.asm_constraints[i] == 'r' {
+			g.gen_expr(node.asm_ops[i])
+		} else {
+			g.gen_addr(node.asm_ops[i])
+		}
 		g.line('  mov %rax, ${asm_scratch[i]}')
 	}
 
@@ -1438,12 +1485,41 @@ fn (mut g AsmGen) gen_asm(node &ast.Node) {
 	// become `(%rcx)0`.
 	mut out := node.asm_template
 	for i := node.asm_ops.len - 1; i >= 0; i-- {
-		out = out.replace('%${i}', '(${asm_scratch[i]})')
+		mem := if i < node.asm_constraints.len { node.asm_constraints[i] != 'r' } else { true }
+		if mem {
+			out = out.replace('%${i}', '(${asm_scratch[i]})')
+		} else {
+			out = out.replace('%${i}', asm_scratch[i])
+		}
 	}
 	for line in out.split_into_lines() {
 		t := line.trim_space()
 		if t != '' {
 			g.line('  ${t}')
+		}
+	}
+
+	// Register outputs are written into a scratch register by the template; copy
+	// them back to the operand's address so the C variable sees the new value.
+	// Memory outputs already live in memory through the pointer, so they need
+	// nothing here.
+	for i in 0 .. node.asm_ops.len {
+		is_out := if i < node.asm_is_output.len { node.asm_is_output[i] } else { false }
+		is_reg := if i < node.asm_constraints.len { node.asm_constraints[i] == 'r' } else { false }
+		if is_out && is_reg {
+			sz := if node.asm_ops[i].ty != unsafe { nil } { node.asm_ops[i].ty.size } else { 8 }
+			suffix := match sz {
+				1 { 'b' }
+				2 { 'w' }
+				4 { 'l' }
+				else { 'q' }
+			}
+			scratch := asm_scratch[i]
+			// The scratch register used in the template is a full 64-bit one;
+			// writing it back with a sized `mov` needs the matching width name.
+			store_reg := size_reg(scratch, sz)
+			g.gen_addr(node.asm_ops[i])
+			g.line('  mov${suffix} ${store_reg}, (%rax)')
 		}
 	}
 }

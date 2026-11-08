@@ -420,6 +420,7 @@ fn (mut p Parser) asm_stmt() &ast.Node {
 
 	mut ops := []&ast.Node{}
 	mut constraints := []string{}
+	mut is_output := []bool{}
 
 	// Group 0 is the outputs, group 1 the inputs, group 2 the clobbers.
 	for p.at(':') {
@@ -459,10 +460,11 @@ fn (mut p Parser) asm_stmt() &ast.Node {
 					break
 				}
 			}
-			if bare != 'm' {
-				p.error_at(c, 'asm constraint "${cs}" is not supported; only "m" is')
+			if bare != 'm' && bare != 'r' {
+				p.error_at(c, 'asm constraint "${cs}" is not supported; only "m" and "r" are')
 			}
 			constraints << bare
+			is_output << (cs.contains('=') || cs.contains('+'))
 			ops << exp
 		}
 	}
@@ -473,6 +475,7 @@ fn (mut p Parser) asm_stmt() &ast.Node {
 	node.asm_template = tmpl
 	node.asm_ops = ops
 	node.asm_constraints = constraints
+	node.asm_is_output = is_output
 	return node
 }
 

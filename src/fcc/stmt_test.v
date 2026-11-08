@@ -470,11 +470,11 @@ fn test_an_asm_statement_keeps_its_operands() {
 }
 
 // An unsupported *constraint* is reported rather than guessed at, because a wrong
-// constraint is a silently wrong program. `"=m"` is the only one modelled — it is the
-// whole of what `tcc/tcc_libm.h` uses — so a register constraint still reaches the
-// error.
+// constraint is a silently wrong program. `"=m"` and `"r"` are modelled; a
+// named-register constraint like `"a"` (which names %rax specifically) is not,
+// so it still reaches the error.
 fn test_an_unsupported_asm_constraint_is_reported() {
-	r := parsed_src('void f(int x) { int r; asm("mov %1, %0" : "=r" (r) : "r" (x)); }\n')
+	r := parsed_src('void f(int x) { int r; asm("mov %1, %0" : "=a" (r) : "r" (x)); }\n')
 	assert r.errors.len > 0, 'expected a diagnostic, got none'
-	assert r.errors[0].contains('asm constraint "=r" is not supported')
+	assert r.errors[0].contains('asm constraint "=a" is not supported')
 }
