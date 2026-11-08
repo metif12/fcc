@@ -70,7 +70,7 @@ guessing.** `-target=<triple>` selects the machine fcc compiles *for*:
 | triple | data model | codegen |
 |---|---|---|
 | `x86_64-windows` (default) | `long` 4, `long double` 8, `wchar_t` 2, `__LLP64__`, `_WIN32` | Microsoft x64 ABI |
-| `x86_64-linux` | `long` 8, `long double` 16, `wchar_t` 4 **signed**, `__LP64__`, `__linux__` | refused — no System V backend |
+| `x86_64-linux` | `long` 8, `long double` 16, `wchar_t` 4 **signed**, `__LP64__`, `__linux__` | System V ABI |
 
 Each also answers to the spellings the two toolchains use: `amd64-windows`,
 `x86_64-windows-msvc`, `x86_64-pc-windows-msvc`, `amd64-linux`,
@@ -80,17 +80,13 @@ default, because that is what an unset variable expands to. The default is the
 target fcc was **built** for, not the one it happens to run on — a compiler that
 infers its target from its host cannot cross-compile at all.
 
-`-S` on `x86_64-linux` exits non-zero and says which calling convention is
-missing rather than emitting Microsoft x64 code under a Linux name.
-`--preprocess` and `--dump-ast` accept any known target, because the data model
-and the predefined macros are the front end's and the ABI is not.
+`-S` and `-c` now work on `x86_64-linux` too, emitting the System V calling
+convention. `--preprocess` and `--dump-ast` accept any known target, because the
+data model and the predefined macros are the front end's and the ABI is not.
 
 ```console
 $ fcc -target=x86_64-linux --preprocess probe.c   # __SIZE_TYPE__ expands to `unsigned long`
-$ fcc -target=x86_64-linux -S -o x.s x.c
-fcc: no code generator for x86_64-linux: it needs the sysv-x64 calling convention,
-and fcc implements only microsoft-x64. The front end is target-aware, so
---preprocess and --dump-ast accept this target.
+$ fcc -target=x86_64-linux -S -o x.s x.c          # emits System V ABI assembly
 ```
 
 **Why this shape and not a second platform** (decision D4, "one platform at a
