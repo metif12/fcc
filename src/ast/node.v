@@ -267,4 +267,8 @@ pub mut:
 	asm_template    string
 	asm_ops         []&Node
 	asm_constraints []string
+	// asm_is_output is parallel to asm_ops: true when the constraint carried a
+	// `=` or `+` modifier, so the backend knows it must write the scratch
+	// register back to the operand's address after the template runs.
+	asm_is_output []bool
 }
