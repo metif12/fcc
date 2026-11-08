@@ -1050,6 +1050,10 @@ fn vemit_unit(globals []&ast.Obj) string {
 		if !obj.is_definition {
 			continue
 		}
+		if is_string_global(obj) {
+			lines << 'const ${v_safe_name(obj.name)} = ${v_string_literal(obj.init_data)}'
+			continue
+		}
 		lines << '__global ('
 		lines << '\t${v_safe_name(obj.name)} ${v_type(obj.ty)}'
 		lines << ')'
@@ -1270,13 +1274,36 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 		.null_stmt { return '' }
 		.expr_stmt {
 			if n.lhs != unsafe { nil } {
+				if n.lhs.kind == .comma {
+					mut parts := []string{}
+					// Flatten nested commas so every assignment in an
+					// initializer (or comma expression) is emitted, not just
+					// the last one.
+					mut stack := [n.lhs]
+					for stack.len > 0 {
+						cur := stack.pop()
+						if cur.kind == .comma {
+							stack << cur.lhs
+							stack << cur.rhs
+						} else {
+							r := v_expr(cur)
+							if r != '' && r != '0' && !r.starts_with('/*expr') {
+								parts << r + ';'
+							}
+						}
+					}
+					// stack is LIFO; reverse to source order.
+					parts = parts.reverse()
+					return parts.join('\n')
+				}
 				return v_expr(n.lhs) + ';'
 			}
 			return ';'
 		}
+		.assign { return v_expr(n) + ';' }
 		.return_ {
 			if in_main && n.lhs != unsafe { nil } {
-				return '// return ' + v_expr(n.lhs)
+				return v_expr(n.lhs) + ';'
 			}
 			if n.lhs != unsafe { nil } {
 				return 'return ' + v_expr(n.lhs)
@@ -1342,7 +1369,17 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 			s += '\n}'
 			return s
 		}
-		.label { return v_safe_name(n.label_name) + ':' }
+		.comma {
+			mut s := v_stmt(n.lhs, in_main)
+			rhs := v_stmt(n.rhs, in_main)
+			if rhs != '' {
+				if s != '' {
+					s += '\n'
+				}
+				s += rhs
+			}
+			return s
+		}
 		.goto_ { return '// goto ' + v_safe_name(n.label_name) }
 		.switch_ {
 			mut s := 'match ' + v_expr(n.cond) + ' {\n'
@@ -1404,6 +1441,9 @@ fn v_expr(n &ast.Node) string {
 		}
 		.var_ref {
 			if n.var != unsafe { nil } {
+				if is_string_global(n.var) {
+					return v_string_literal(n.var.init_data)
+				}
 				return v_safe_name(n.var.name)
 			}
 			return '/*var*/'
@@ -1463,6 +1503,63 @@ fn v_expr(n &ast.Node) string {
 		.goto_expr { return '/*goto_expr*/' }
 		else { return '/*expr ' + int(n.kind).str() + '*/' }
 	}
+}
+
+// is_string_global reports whether obj is an anonymous global holding a
+// NUL-terminated byte string, which is what string_literal_expr creates.
+// Such globals are emitted as V string constants rather than byte arrays.
+fn is_string_global(obj &ast.Obj) bool {
+	if obj == unsafe { nil } || !obj.is_definition || obj.is_function {
+		return false
+	}
+	if !obj.name.starts_with('.L..') {
+		return false
+	}
+	if obj.init_data.len < 2 {
+		return false
+	}
+	// Must be NUL-terminated.
+	if obj.init_data[obj.init_data.len - 1] != 0 {
+		return false
+	}
+	// Every byte before the terminator must be printable or a common escape.
+	for i in 0 .. obj.init_data.len - 1 {
+		b := obj.init_data[i]
+		if b == 0 {
+			return false // embedded NUL -> not a simple string
+		}
+		if b < 32 || b == 127 {
+			// allow \t \n \r only
+			if b != 9 && b != 10 && b != 13 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// v_string_literal renders a NUL-terminated byte buffer as a V string literal.
+fn v_string_literal(buf []u8) string {
+	mut out := '"'
+	for i in 0 .. buf.len - 1 {
+		b := buf[i]
+		match b {
+			`"` { out += '\\"' }
+			`\\` { out += '\\\\' }
+			`\n` { out += '\\n' }
+			`\t` { out += '\\t' }
+			`\r` { out += '\\r' }
+			else {
+				if b >= 32 && b < 127 {
+					out += b.ascii_str()
+				} else {
+					out += '\\x${b:02x}'
+				}
+			}
+		}
+	}
+	out += '"'
+	return out
 }
 
 fn v_zero(t &ast.Type) string {
