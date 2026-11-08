@@ -1010,7 +1010,7 @@ fn emit_v(o &Options) {
 		}
 
 		all << '// translated from ${path}'
-		all << vemit_unit(parsed.globals)
+		all << vemit_unit(parsed.globals, parsed.typedefs)
 	}
 
 	if failed {
@@ -1028,9 +1028,26 @@ fn emit_v(o &Options) {
 	}
 }
 
-fn vemit_unit(globals []&ast.Obj) string {
+fn vemit_unit(globals []&ast.Obj, typedefs map[string]&ast.Type) string {
 	mut seen := map[string]bool{}
 	mut structs := []string{}
+	// Emit typedef'd structs/unions under their alias name first, so the rest
+	// of the unit can refer to them by name.
+	for name, t in typedefs {
+		if t.kind == .struct_ || t.kind == .union_ {
+			if name in seen {
+				continue
+			}
+			seen[name] = true
+			mut fields := []string{}
+			for m in t.members {
+				vemit_collect_type(m.ty, mut seen, mut structs)
+				fields << '\t' + v_safe_name(m.name) + ' ' + v_type(m.ty)
+			}
+			keyword := if t.kind == .union_ { 'union' } else { 'struct' }
+			structs << '${keyword} ${v_safe_name(name)} {\n' + fields.join('\n') + '\n}'
+		}
+	}
 	for obj in globals {
 		vemit_collect_obj(obj, mut seen, mut structs)
 	}
@@ -1128,7 +1145,7 @@ fn vemit_collect_type(t &ast.Type, mut seen map[string]bool, mut out []string) {
 	}
 	match t.kind {
 		.struct_, .union_ {
-			name := if t.tag != '' { v_safe_name(t.tag) } else { '' }
+			name := if t.tag != '' { v_safe_name(t.tag) } else if t.name != '' { v_safe_name(t.name) } else { '' }
 			if name != '' && !(name in seen) {
 				seen[name] = true
 				mut fields := []string{}
@@ -1206,11 +1223,17 @@ fn v_type(t &ast.Type) string {
 			if t.tag != '' {
 				return v_safe_name(t.tag)
 			}
+			if t.name != '' {
+				return v_safe_name(t.name)
+			}
 			return 'struct { }'
 		}
 		.union_ {
 			if t.tag != '' {
 				return v_safe_name(t.tag)
+			}
+			if t.name != '' {
+				return v_safe_name(t.name)
 			}
 			return 'struct { }'
 		}
