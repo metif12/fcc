@@ -795,6 +795,14 @@ fn (mut g AsmGen) gen_bitfield_extract(node &ast.Node) {
 // The address is evaluated first and pushed, so the operands are evaluated in the
 // order C requires and a target with a side effect is evaluated once.
 fn (mut g AsmGen) gen_assign(node &ast.Node) {
+	if node.lhs.ty.is_atomic && fcc.is_integer(node.lhs.ty) {
+		g.gen_atomic_assign(node)
+		return
+	}
+	if node.lhs.ty.is_atomic {
+		g.errors << 'compound assignment to an atomic object of non-integer type is not supported yet (line ${node.tok.line.disp_line})'
+		return
+	}
 	g.gen_addr(node.lhs)
 	g.push()
 	g.gen_expr(node.rhs)
@@ -811,6 +819,60 @@ fn (mut g AsmGen) gen_assign(node &ast.Node) {
 	// no-op in the table, so this is free where nothing needs doing.
 	g.cast(node.rhs.ty, node.ty)
 	g.store(node.ty)
+}
+
+// gen_atomic_assign emits a compound assignment to an _Atomic integer as a
+// compare-and-swap loop, so concurrent writers cannot lose an update.
+//
+// The loop re-reads the current value each iteration and recomputes the
+// candidate from it, then commits with `lock cmpxchg`. A failed commit
+// retries; a successful one leaves the new value in %rax as the expression's
+// result.
+fn (mut g AsmGen) gen_atomic_assign(node &ast.Node) {
+	suffix := match node.ty.size {
+		1 { 'b' }
+		2 { 'w' }
+		4 { 'l' }
+		else { 'q' }
+	}
+	old_reg := match node.ty.size {
+		1 { '%al' }
+		2 { '%ax' }
+		4 { '%eax' }
+		else { '%rax' }
+	}
+	src_reg := match node.ty.size {
+		1 { '%al' }
+		2 { '%ax' }
+		4 { '%eax' }
+		else { '%rax' }
+	}
+	new_reg := match node.ty.size {
+		1 { '%dl' }
+		2 { '%dx' }
+		4 { '%edx' }
+		else { '%rdx' }
+	}
+	lbl := g.next_label()
+	g.gen_addr(node.lhs) // %rax = addr
+	g.line('  mov %rax, %r10') // %r10 = addr, kept across the loop
+	g.line('.L.atomic.loop.${lbl}:')
+	g.line('  mov${suffix} (%r10), ${old_reg}') // expected = old
+	g.line('  push %rax') // save expected on the value stack
+	g.gen_expr(node.rhs) // %rax = new candidate
+	g.line('  mov ${src_reg}, ${new_reg}') // new
+	g.line('  pop %rax') // expected
+	g.line('  lock cmpxchg${suffix} ${new_reg}, (%r10)')
+	g.line('  jne .L.atomic.loop.${lbl}')
+	if node.ty.size == 1 {
+		g.line('  movzbl ${new_reg}, %eax') // result = new value
+	} else if node.ty.size == 2 {
+		g.line('  movzwl ${new_reg}, %eax') // result = new value
+	} else if node.ty.size == 4 {
+		g.line('  movl ${new_reg}, %eax') // result = new value
+	} else {
+		g.line('  mov ${new_reg}, %rax') // result = new value
+	}
 }
 
 // bitfield_of returns the member of a node that is a bitfield assignment's target.

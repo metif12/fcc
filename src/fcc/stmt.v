@@ -600,11 +600,12 @@ fn (mut p Parser) to_assign(binary &ast.Node) &ast.Node {
 	add_type(mut rhs)
 	tok := binary.tok
 
-	if lhs.ty.is_atomic {
-		// chibicc expands this into a compare-and-swap loop in a statement
-		// expression. The node kind that needs does not exist yet, and emitting the
-		// non-atomic form instead would silently drop the atomicity, so it is reported.
-		p.error_at(tok, 'compound assignment to an atomic object is not supported yet')
+	if lhs.ty.is_atomic && !is_integer(lhs.ty) {
+		// chibicc expands integer atomics into a compare-and-swap loop in a
+		// statement expression. The node kind that needs does not exist yet,
+		// and emitting the non-atomic form would silently drop the atomicity,
+		// so non-integer atomics are still reported.
+		p.error_at(tok, 'compound assignment to an atomic object of non-integer type is not supported yet')
 	}
 
 	// The conversion the binary operator's own typing inserted has to be looked through

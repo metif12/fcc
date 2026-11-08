@@ -116,9 +116,8 @@ flag is parity with tcc rather than a contract item.
 and function with its layout, initial data, relocations and frame, and every
 function body as parsed statements.
 
-Two constructs are reported rather than translated, and both need a node kind
-the backend must implement anyway: `asm` statements with register constraints,
-and compound assignment to an `_Atomic` object.
+One construct is reported rather than translated, and needs a node kind the
+backend must implement anyway: `asm` statements with register constraints.
 
 ## Layout
 
