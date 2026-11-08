@@ -119,6 +119,9 @@ pub fn target_by_triple(triple string) ?&Target {
 		'x86_64-linux', 'x86_64-linux-gnu', 'x86_64-unknown-linux-gnu', 'amd64-linux' {
 			return linux_x86_64()
 		}
+		'aarch64-linux', 'aarch64-linux-gnu', 'aarch64-unknown-linux-gnu', 'arm64-linux' {
+			return linux_aarch64()
+		}
 		else {
 			return none
 		}
@@ -161,6 +164,10 @@ pub fn known_triples() []string {
 		'x86_64-linux-gnu',
 		'x86_64-unknown-linux-gnu',
 		'amd64-linux',
+		'aarch64-linux',
+		'aarch64-linux-gnu',
+		'aarch64-unknown-linux-gnu',
+		'arm64-linux',
 	]
 }
 
@@ -391,6 +398,45 @@ fn linux_x86_64() &Target {
 		size:  4
 		align: 4
 	}
+	return t
+}
+
+// linux_aarch64 is the AAPCS64 ABI on Linux: the LP64 model, `long` eight
+// bytes, `long double` sixteen bytes, and a signed four-byte `wchar_t`.
+//
+// The backend does not implement this ABI yet, so code generation is refused
+// (abi_for_triple returns none) even though the front end types it fully. The
+// data model and predefined macros are enough for headers to be preprocessed
+// and the AST dumped, which is what makes a future port debuggable.
+fn linux_aarch64() &Target {
+	mut t := &Target{
+		triple:        'aarch64-linux'
+		abi:           .sysv_x64
+		long_size:     8
+		long_align:    8
+		ldouble_size:  16
+		ldouble_align: 16
+		wchar_is_int:  true
+		macros:        [
+			TargetMacro{name: '__SIZE_TYPE__', value: 'unsigned long'},
+			TargetMacro{name: '__PTRDIFF_TYPE__', value: 'long'},
+			TargetMacro{name: '__WCHAR_TYPE__', value: 'int'},
+			TargetMacro{name: '__WINT_TYPE__', value: 'unsigned int'},
+			TargetMacro{name: '__INTPTR_TYPE__', value: 'long'},
+			TargetMacro{name: '__UINTPTR_TYPE__', value: 'unsigned long'},
+			TargetMacro{name: '__INT64_TYPE__', value: 'long'},
+			TargetMacro{name: '__INT32_TYPE__', value: 'int'},
+			TargetMacro{name: '__aarch64__', value: '1'},
+			TargetMacro{name: '__arm64__', value: '1'},
+			TargetMacro{name: '__linux__', value: '1'},
+			TargetMacro{name: '__unix__', value: '1'},
+			TargetMacro{name: '__LP64__', value: '1'},
+		]
+	}
+	t.ty_long = &Type{kind: .basic, basic: .long_, size: 8, align: 8}
+	t.ty_ulong = &Type{kind: .basic, basic: .long_, size: 8, align: 8, is_unsigned: true}
+	t.ty_ldouble = &Type{kind: .basic, basic: .ldouble_, size: 16, align: 16}
+	t.ty_wchar = &Type{kind: .basic, basic: .int_, size: 4, align: 4}
 	return t
 }
 

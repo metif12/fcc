@@ -368,12 +368,17 @@ fn resolve_triple(o &Options) !string {
 	if o.target == '' {
 		return ast.host_triple
 	}
-	if ast.abi_for_triple(o.target) == none {
+	// A target the front end can type but the backend cannot emit is still a
+	// known target: `--preprocess` and `--dump-ast` must work on it, and the
+	// refusal happens later, in `refuse_unimplemented_codegen`, only when code
+	// generation is actually requested.
+	if ast.target_by_triple(o.target) == none {
 		return error('unknown target: ${o.target} (known: ${ast.known_triples().join(', ')})')
 	}
 	return match o.target {
 		'amd64-windows', 'x86_64-windows-msvc', 'x86_64-pc-windows-msvc' { 'x86_64-windows' }
 		'amd64-linux', 'x86_64-linux-gnu', 'x86_64-unknown-linux-gnu' { 'x86_64-linux' }
+		'aarch64-linux-gnu', 'aarch64-unknown-linux-gnu', 'arm64-linux' { 'aarch64-linux' }
 		else { o.target }
 	}
 }
@@ -410,10 +415,13 @@ fn refuse_unimplemented_codegen(o &Options) ! {
 	if ast.codegen_ready_for_triple(triple) {
 		return
 	}
-	// The message is assembled rather than written as one long literal because a
-	// string cannot be wrapped here, and a wrapped one is a diagnostic nobody reads
-	// to the end.
-	abi := ast.abi_for_triple(triple) or { return error('unknown target: ${triple}') }
+	// A target the front end can type but the backend cannot emit is not an
+	// "unknown target": it is known, and the refusal has to say so, otherwise a
+	// user who passed a recognised triple gets a misleading diagnostic.
+	if ast.target_by_triple(triple) == none {
+		return error('unknown target: ${triple}')
+	}
+	abi := ast.abi_for_triple(triple) or { return error('no code generator for ${triple}: this architecture has no backend yet (front end only). --preprocess and --dump-ast accept this target.') }
 	return error('no code generator for ${triple}: it needs the ' +
 		'${ast.abi_name_of(abi)} calling convention, and fcc implements only ' +
 		'${ast.abi_name_of(.microsoft_x64)}. The front end is target-aware, so ' +
