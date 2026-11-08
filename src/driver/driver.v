@@ -1154,9 +1154,9 @@ fn vemit_collect_type(t &ast.Type, mut seen map[string]bool, mut out []string) {
 				mut fields := []string{}
 				for m in t.members {
 					vemit_collect_type(m.ty, mut seen, mut out)
-					fields << 'mut ${v_safe_name(m.name)} ${v_type(m.ty)}'
+					fields << (if m.is_bitfield { 'mut ' + v_safe_name(m.name) + ' ' + v_type(m.ty) + ' // bitfield: ' + m.bit_width.str() + ' bits' } else { 'mut ' + v_safe_name(m.name) + ' ' + v_type(m.ty) })
 				}
-				keyword := if t.kind == .union_ { 'union' } else { 'struct' }
+				keyword := if t.kind == .union_ { 'struct /* union */' } else { 'struct' }
 				mut body := []string{}
 				for f in fields {
 					body << '\t' + f
@@ -1460,6 +1460,7 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 			return s
 		}
 		.goto_ { return '// goto ' + v_safe_name(n.label_name) }
+		.label { return v_safe_name(n.label_name) + ':' }
 		.switch_ {
 			mut s := 'match ' + v_expr(n.cond) + ' {\n'
 			for c in n.cases {
