@@ -34,7 +34,7 @@
 </p>
 
 <h2>Status</h2>
-<p>fcc is a working, plugin-able C compiler: it translates whole C programs to x86-64 assembly, assembles that text in-process to machine code, and writes COFF (Windows) and ELF (Linux) objects, with no external assembler involved. It supports both x86-64 ABIs (Microsoft and System V), `_Atomic` integer compound assignment via compare-and-swap, and `__asm__` with memory and general-register constraints. The C front end is validated against three independent oracles; the plugin system is exercised by the Brainfuck language plugin and by the CLI/config/build commands that ship with it.</p>
+<p>fcc is a working, plugin-able C compiler: it translates whole C programs to x86-64 assembly, assembles that text in-process to machine code, and writes COFF (Windows) and ELF (Linux) objects, with no external assembler involved. It supports both x86-64 ABIs (Microsoft and System V), `_Atomic` integer compound assignment via compare-and-swap, `__asm__` with memory and general-register constraints, and a best-effort C→V translator (`--to-v`). The C front end is validated against three independent oracles; the plugin system is exercised by the Brainfuck language plugin and by the CLI/config/build commands that ship with it.</p>
 <table>
 <tr><th>Suite</th><th>Result</th></tr>
 <tr><td>Differential end-to-end (<code>tests/endtoend/</code>)</td><td><strong>20 of 20 match</strong> tcc/gcc</td></tr>
