@@ -1322,6 +1322,7 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 	}
 	match n.kind {
 		.null_stmt { return '' }
+		.decl_stmt { return '' }
 		.expr_stmt {
 			eprintln('EXPRSTMT lhs.kind=' + (if n.lhs != unsafe { nil } { int(n.lhs.kind).str() } else { 'nil' }))
 			if n.lhs != unsafe { nil } {
