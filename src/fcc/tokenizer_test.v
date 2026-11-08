@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 
 // Tokenizer tests.
@@ -158,8 +159,7 @@ fn test_a_hash_after_a_token_is_not_a_directive() {
 int x = Q;') == ['#define Q 9', 'int', 'x', '=', 'Q', ';']
 	// Mid-line it is not, even on a later line than one that did start with a token.
 	assert texts('int x = 0; # define Q 9
-int y = Q;') == ['int', 'x', '=', '0', ';', '#', 'define', 'Q', '9', 'int', 'y',
-		'=', 'Q', ';']
+int y = Q;') == ['int', 'x', '=', '0', ';', '#', 'define', 'Q', '9', 'int', 'y', '=', 'Q', ';']
 }
 
 fn test_line_comment_ends_at_newline() {
@@ -262,7 +262,6 @@ fn test_an_invalid_pp_number_is_one_token() {
 	assert texts('0zz') == ['0zz']
 	assert texts('1abc') == ['1abc']
 }
-
 
 fn test_decimal_float() {
 	assert fval('1.5') == 1.5

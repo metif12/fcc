@@ -3,6 +3,7 @@ module backend
 import os
 import src.ast
 import src.fcc
+
 // Backend tests.
 //
 // The assertions are about the text an assembler sees, not about a running
@@ -168,8 +169,8 @@ fn test_a_parameter_that_arrives_on_the_stack_is_placed_above_the_return_address
 	// register parameter, and 48 is where it finds the first stack parameter. Reading the
 	// listing as if the offset appeared once put every stack argument eight bytes low.
 	assert f.params[3].offset < 0
-	assert f.params[4].offset == 16 + shadow_space
-	assert f.params[5].offset == 24 + shadow_space
+	assert f.params[4].offset == 16 + shadow_space()
+	assert f.params[5].offset == 24 + shadow_space()
 	// The frame itself is a multiple of 16 so that a call from inside it keeps the
 	// stack aligned.
 	assert f.stack_size % 16 == 0
@@ -390,7 +391,7 @@ fn test_va_start_points_past_the_named_parameters() {
 	// 24(%rbp) — measured against gcc, whose `leaq 24(%rbp), %rax` is the same value.
 	//
 	// The one-slot-low version of this was a real defect and the arithmetic of it is
-	// worth stating: pointing at `va_start_offset` itself re-reads the argument that
+	// worth stating: pointing at `va_start_offset()` itself re-reads the argument that
 	// `va_start(ap, n)` had already named, and every later read is one slot late. A
 	// probe asking for six integers answered `1 9 17 25 33 41` instead of
 	// `1 2 3 4 5 6` — eight bytes of drift per step, because the walk was moving
@@ -417,8 +418,8 @@ fn test_va_arg_advances_the_va_list_object_and_not_the_slot_it_points_at() {
 	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
 	// `%r11` holds `&ap` and `%rax` walks; the advance is through `%r11`.
 	assert text.contains('  mov %rax, %r11')
-	assert text.contains('  addq $8, (%r11)')
-	assert !text.contains('  addq $8, (%r10)')
+	assert text.contains('  mov %rcx, (%r11)')
+	assert !text.contains('  mov %rcx, (%r10)')
 }
 
 fn test_va_arg_takes_its_stride_from_the_type_it_was_asked_for() {
@@ -428,7 +429,7 @@ fn test_va_arg_takes_its_stride_from_the_type_it_was_asked_for() {
 	scalar, errs := generated('int f(int n, ...) { __builtin_va_list ap;' +
 		' __builtin_va_start(ap, n); return __builtin_va_arg(ap, int); }\n')
 	assert errs.len == 0, 'unexpected diagnostics: ${errs}'
-	assert scalar.contains('  addq $8, (%r11)')
+	assert scalar.contains('  mov %rcx, (%r11)')
 
 	// Two eightbytes. `long long` is the type that is eight bytes here — `long` is four,
 	// measured — so `struct { long long a; long long b; }` is the sixteen-byte struct and
@@ -437,7 +438,7 @@ fn test_va_arg_takes_its_stride_from_the_type_it_was_asked_for() {
 		' __builtin_va_list ap; __builtin_va_start(ap, n);' +
 		' struct S16 s = __builtin_va_arg(ap, struct S16); return (int)s.a; }\n')
 	assert pair_errs.len == 0, 'unexpected diagnostics: ${pair_errs}'
-	assert pair.contains('  addq $16, (%r11)')
+	assert pair.contains('  mov %rcx, (%r11)')
 
 	// Wider than two eightbytes: [MS x64 2.2.5] passes anything larger by reference, so
 	// the slot holds an address, it is dereferenced, and the stride is one slot.
@@ -446,7 +447,36 @@ fn test_va_arg_takes_its_stride_from_the_type_it_was_asked_for() {
 		' struct S32 s = __builtin_va_arg(ap, struct S32); return (int)s.a; }\n')
 	assert wide_errs.len == 0, 'unexpected diagnostics: ${wide_errs}'
 	assert wide.contains('  mov (%rax), %rax')
-	assert wide.contains('  addq $8, (%r11)')
+	assert wide.contains('  mov %rcx, (%r11)')
+}
+
+fn test_va_arg_skips_leftover_registers_but_not_an_exact_fit_in_registers() {
+	// An argument that exactly fills the remaining argument registers lives
+	// in registers when it is a scalar or a small HFA — and on the stack
+	// otherwise, because the caller's per-slot fit check fails. The reader
+	// has to match that split exactly: skipping an exact fit reads zeros
+	// past the value (`sum6` answered 72 for 21), and not skipping one reads
+	// a stale home slot (seven 00204 lines).
+	//
+	// A 16-byte HFA takes the no-skip branch: it fits exactly in the two
+	// registers left after the named argument and one eight-byte struct.
+	hfa, hfa_errs := generated('struct H14 { float a, b, c, d; };\nint f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);' +
+		' struct H14 x = __builtin_va_arg(ap, struct H14); __builtin_va_end(ap); return (int)x.a; }\n')
+	assert hfa_errs.len == 0, 'unexpected diagnostics: ${hfa_errs}'
+	assert hfa.contains('  jge .L.va_arg.no_skip.'), 'exact-fit HFA must not skip'
+	// A scalar does too: the caller's check is `gp < max`, so one remaining
+	// register is enough with no per-arg count to fail.
+	scalar, scalar_errs := generated('int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);' +
+		' int x = __builtin_va_arg(ap, int); __builtin_va_end(ap); return x; }\n')
+	assert scalar_errs.len == 0, 'unexpected diagnostics: ${scalar_errs}'
+	assert scalar.contains('  jge .L.va_arg.no_skip.'), 'exact-fit scalar must not skip'
+	// A nine-byte int struct does not: the caller counts two eight-byte
+	// halves against the one remaining register, finds only one, and puts
+	// the whole struct on the stack. The reader has to skip to it.
+	agg, agg_errs := generated('struct S9 { char x[9]; };\nint f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);' +
+		' struct S9 x = __builtin_va_arg(ap, struct S9); __builtin_va_end(ap); return (int)x.x[0]; }\n')
+	assert agg_errs.len == 0, 'unexpected diagnostics: ${agg_errs}'
+	assert agg.contains('  jg .L.va_arg.no_skip.'), 'exact-fit int struct must skip to the stack'
 }
 
 fn test_va_start_reached_as_an_expression_is_reported() {

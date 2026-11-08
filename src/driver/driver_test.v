@@ -94,6 +94,30 @@ fn test_compile_only_and_shared() {
 	assert !o2.compile_only
 }
 
+fn test_extern_as_is_off_by_default_and_opt_in() {
+	// `--extern-as` is the phase-3 bisection hatch: native emission is the
+	// default, the system assembler only on request.
+	assert !opts(['-c', 'x.c']).extern_as
+	assert opts(['-c', '--extern-as', '-o', 'x.obj', 'x.c']).extern_as
+}
+
+fn emit_for(args []string) string {
+	mut o := opts(args)
+	return pipeline_emit_for(&o)
+}
+
+fn test_pipeline_emit_for_maps_modes() {
+	// Modes with an output plugin divert; raw-text and --to-v modes stay
+	// legacy (no plugin consumes them).
+	assert emit_for(['--dump-ast', 'x.c']) == 'ast'
+	assert emit_for(['-S', 'x.c']) == 'asm'
+	assert emit_for(['-c', 'x.c']) == 'obj'
+	assert emit_for(['x.c']) == 'exe'
+	assert emit_for(['-E', 'x.c']) == ''
+	assert emit_for(['--dump-tokens', 'x.c']) == ''
+	assert emit_for(['--to-v', 'x.c']) == ''
+}
+
 fn test_bt_without_a_number_defaults_to_twenty_five() {
 	// V always sends a number, but `-bt` alone must not silently disable the
 	// backtrace, because V's backtraces.c.v calls tcc_backtrace unconditionally.
@@ -234,18 +258,9 @@ fn test_every_advertised_triple_resolves() {
 // compiler has to say so rather than generate Microsoft-ABI code, and the
 // diagnostic has to name the convention that is missing rather than reporting the
 // target as unknown — it is known, and every header already agrees.
-fn test_codegen_is_refused_for_a_target_the_backend_cannot_emit() {
-	assert !ast.codegen_ready_for_triple('x86_64-linux')
+fn test_codegen_is_available_for_both_targets() {
+	assert ast.codegen_ready_for_triple('x86_64-linux')
 	assert ast.codegen_ready_for_triple('x86_64-windows')
-	// The refusal, as `-S` would print it.
-	assert codegen_refusal(['-target=x86_64-linux', 'x.c']).contains('x86_64-linux')
-	assert codegen_refusal(['-target=x86_64-linux', 'x.c']).contains('sysv-x64')
-	// The message names the convention that does exist, so a reader knows it is not
-	// a typo or an unsupported flag…
-	assert codegen_refusal(['-target=x86_64-linux', 'x.c']).contains('microsoft-x64')
-	// …and it names the modes that do work, because refusing everything would make
-	// the flag look unsupported rather than partially supported.
-	assert codegen_refusal(['-target=x86_64-linux', 'x.c']).contains('--preprocess')
 	// The default target generates, and an alias for it generates too.
 	assert codegen_refusal(['x.c']) == ''
 	assert codegen_refusal(['-target=amd64-windows', 'x.c']) == ''

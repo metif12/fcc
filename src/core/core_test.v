@@ -1,0 +1,152 @@
+module core
+
+fn test_blip_desugar_task_block() {
+	blip := 'task "build" {\n  run = "fcc"\n}\n'
+	out := desugar_blip(blip)
+	assert out.contains('[task."build"]')
+	assert out.contains('run = "fcc"')
+	assert !out.contains('}')
+}
+
+fn test_blip_desugar_build_block() {
+	out := desugar_blip('build {\n  target = "x86_64-windows"\n}\n')
+	assert out.contains('[build]')
+}
+
+fn test_parse_toml_config() {
+	cfg := parse_config_text('[build]\ntarget = "x86_64-linux"\nstd = "gnu11"\ninputs = ["main.c"]\n', 'fcc.toml')!
+	assert cfg.target == 'x86_64-linux'
+	assert cfg.inputs == ['main.c']
+}
+
+fn test_parse_blip_config() {
+	cfg := parse_config_text('build {\n  target = "x86_64-linux"\n}\n', 'fcc.blip')!
+	assert cfg.target == 'x86_64-linux'
+}
+
+fn test_parse_blip_task() {
+	cfg := parse_config_text('task "build" {\n  run = "fcc -S"\n}\n', 'build.blip')!
+	assert 'build' in cfg.tasks
+	assert cfg.tasks['build'].run == 'fcc -S'
+}
+
+fn test_plugin_registry_roundtrip() {
+	reset_registries()
+	reset_commands()
+	register_input(TestInput{})
+	register_output(TestOutput{})
+	register_hook(TestHook{})
+	register_command(CliCommand{
+		name:        'test-cmd'
+		description: 'test'
+		handler:     fn (args []string, cfg FccConfig) int {
+			return 0
+		}
+	})
+	assert find_input('x.c') or { panic('no input') }.name() == 'test-in'
+	assert find_output('asm') or { panic('no output') }.name() == 'test-out'
+	assert list_hooks().len == 1
+	assert find_command('test-cmd') or { panic('no cmd') }.name == 'test-cmd'
+	assert dispatch_verb(['test-cmd'], default_config()) == 0
+	assert dispatch_verb(['--help'], default_config()) == -1
+	reset_registries()
+	reset_commands()
+}
+
+struct TestInput {}
+
+fn (p TestInput) name() string {
+	return 'test-in'
+}
+
+fn (p TestInput) extensions() []string {
+	return ['.c']
+}
+
+fn (p TestInput) can_handle(path string) bool {
+	return true
+}
+
+fn (p TestInput) load(path string, mut ctx PipelineContext) ! {
+	ctx.inputs << path
+}
+
+struct TestOutput {}
+
+fn (p TestOutput) name() string {
+	return 'test-out'
+}
+
+fn (p TestOutput) formats() []string {
+	return ['asm']
+}
+
+fn (p TestOutput) emit(mut ctx PipelineContext) ! {
+	ctx.units << 'out'
+}
+
+struct TestHook {}
+
+fn (p TestHook) name() string {
+	return 'test-hook'
+}
+
+fn (p TestHook) stage() Stage {
+	return .pre_parse
+}
+
+fn (p TestHook) priority() int {
+	return 0
+}
+
+fn (p TestHook) run(mut ctx PipelineContext) ! {
+	ctx.data['hook'] = 'ran'
+}
+
+fn test_run_hooks_and_pipeline() {
+	reset_registries()
+	register_input(TestInput{})
+	register_output(TestOutput{})
+	register_hook(TestHook{})
+	mut ctx := PipelineContext{
+		emit: 'asm'
+	}
+	run_pipeline(mut ctx, ['a.c'])!
+	assert ctx.inputs == ['a.c']
+	assert ctx.units == ['out']
+	assert ctx.data['hook'] == 'ran'
+	reset_registries()
+}
+
+__global test_order []string
+
+fn test_task_runner_orders_deps_and_detects_cycle() {
+	test_order = []string{}
+	tasks := {
+		'a': TaskDef{
+			run:     'echo a'
+			depends: ['b']
+		}
+		'b': TaskDef{ run: 'echo b' }
+	}
+	run_tasks(tasks, ['a'], fn (run string) int {
+		test_order << run
+		return 0
+	}) or { panic(err.msg()) }
+	assert test_order == ['echo b', 'echo a']
+	bad := {
+		'x': TaskDef{
+			run:     'echo x'
+			depends: ['x']
+		}
+	}
+	if _ := run_tasks_ids(bad) {
+		assert false, 'expected cycle error'
+	}
+}
+
+fn run_tasks_ids(tasks map[string]TaskDef) ! {
+	run_tasks(tasks, ['x'], fn (run string) int {
+		return 0
+	})!
+}

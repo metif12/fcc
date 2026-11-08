@@ -166,6 +166,12 @@ pub mut:
 	// copy of the calling convention, and a second copy is what this project has
 	// already been bitten by twice.
 	va_start_offset int
+	// SysV varargs: counts of named GP and FP arguments, used by gen_va_start
+	// to set gp_offset and fp_offset in the va_list struct.
+	va_gp_count int
+	va_fp_count int
+	// SysV varargs: frame offset of the 176-byte register save area.
+	va_reg_save_offset int
 	// alloca_bottom is the local holding the high-water mark of the stack a VLA has
 	// claimed. The backend restores it on every return and on every `goto` out of a
 	// block, which is the only way a VLA's storage ends when control leaves its scope.
@@ -258,7 +264,7 @@ pub mut:
 	//
 	// The three are parallel slices rather than one slice of a struct because a Node is
 	// flat by design and this is the only place more than one list is needed.
-	asm_template     string
-	asm_ops          []&Node
-	asm_constraints  []string
+	asm_template    string
+	asm_ops         []&Node
+	asm_constraints []string
 }

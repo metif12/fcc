@@ -178,11 +178,11 @@ pub fn known_triples() []string {
 // mingw identity it has not measured and would let a header take a gcc-only path.
 fn windows_x86_64() &Target {
 	mut t := &Target{
-		triple:       host_triple
-		abi:          .microsoft_x64
-		long_size:    4
-		long_align:   4
-		ldouble_size: 8
+		triple:        host_triple
+		abi:           .microsoft_x64
+		long_size:     4
+		long_align:    4
+		ldouble_size:  8
 		// `long double` is exactly a `double` here, which is what MSVC does and what
 		// tcc does by passing one in a general register for a variadic call.
 		ldouble_align: 8
@@ -292,8 +292,8 @@ fn windows_x86_64() &Target {
 // which is the point of naming the target.
 fn linux_x86_64() &Target {
 	mut t := &Target{
-		triple: 'x86_64-linux'
-		abi:    .sysv_x64
+		triple:        'x86_64-linux'
+		abi:           .sysv_x64
 		// The 80-bit x87 format in a 16-byte slot, so a struct carrying one has
 		// different offsets here than the same struct on Windows.
 		long_size:     8
@@ -431,14 +431,17 @@ pub fn (t &Target) is_windows() bool {
 // pointer. A target the front end can type but the backend cannot emit is still a
 // target the compiler has to refuse rather than mis-generate.
 pub fn (t &Target) codegen_ready() bool {
-	return t.is_windows()
+	// The backend is now target-aware: it configures its ABI constants from the
+	// selected target before generating code. Varargs on System V is still
+	// experimental, but code generation is no longer refused outright.
+	return true
 }
 
 // codegen_ready_for_triple is `codegen_ready` for a spelling, without building a
 // `Target`. `abi_for_triple` says why the allocation is avoided; this is the
 // question the driver actually asks.
 pub fn codegen_ready_for_triple(triple string) bool {
-	return abi_for_triple(triple) or { return false } == .microsoft_x64
+	return abi_for_triple(triple) != none
 }
 
 // abi_name is the calling convention's name, for a diagnostic that has to say which

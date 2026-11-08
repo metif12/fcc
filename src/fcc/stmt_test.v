@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 
 // Statement and expression tests.
@@ -477,4 +478,3 @@ fn test_an_unsupported_asm_constraint_is_reported() {
 	assert r.errors.len > 0, 'expected a diagnostic, got none'
 	assert r.errors[0].contains('asm constraint "=r" is not supported')
 }
-

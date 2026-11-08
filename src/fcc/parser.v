@@ -1232,6 +1232,7 @@ fn (mut p Parser) parse_suffix() Suffix {
 		mut len := p.const_expr_node()
 		if is_const_expr(mut len) {
 			s.array_len = int(eval(mut len))
+			p.flush_const_errors()
 		} else {
 			// A length that is not a constant makes the type a variable-length array,
 			// whose extent is only known at run time.
@@ -2392,12 +2393,34 @@ fn (mut p Parser) initializer2(mut init &Initializer) {
 		// A struct can be initialized from another struct of the same type: `struct T
 		// x = y;`. That has to be tried before treating the braces as a member list,
 		// because the source may have neither.
+		//
+		// The probe is speculative: when the value is not a struct after all
+		// (brace elision, e.g. `struct U gu = {3, 5,6,7,8, ...}` where the
+		// member `s` starts at `5`), the parse has already consumed the
+		// first element, and `struct_initializer2` below would restart at
+		// member zero without consuming its comma — reporting
+		// `expected an expression` at the second element. So the position,
+		// diagnostics and any anonymous globals the probe created are
+		// rewound unless the value really is a struct.
+		save := p.pos
+		saved_errors := p.errors.len
+		saved_warnings := p.warnings.len
+		saved_globals := p.globals.len
+		saved_counter := p.counter
+		p.quiet++
 		mut node := p.const_expr_node()
 		add_type(mut node)
+		p.quiet--
 		if node.ty.kind == .struct_ {
+			p.errors = p.errors[..saved_errors]
 			init.expr = node
 			return
 		}
+		p.pos = save
+		p.errors = p.errors[..saved_errors]
+		p.warnings = p.warnings[..saved_warnings]
+		p.globals = p.globals[..saved_globals]
+		p.counter = saved_counter
 		p.struct_initializer2(mut init, 0)
 		return
 	}
@@ -2645,9 +2668,17 @@ fn (mut p Parser) array_initializer1(mut init &Initializer) {
 				init.ty.array_len = init.children.len
 				init.ty.size = init.ty.base.size * init.children.len
 			}
-			for j in begin .. end + 1 {
-				mut child := init.children[j]
-				p.designation(mut child)
+			// A range names several elements but carries one value:
+			// `[1 ... 5] = 9` is five elements, not five `= 9`s. Parsing
+			// the value once and sharing it is what keeps the second
+			// designator from being read as the value of the first.
+			mut first_child := init.children[begin]
+			p.designation(mut first_child)
+			for j in begin + 1 .. end + 1 {
+				mut dst := init.children[j]
+				dst.expr = first_child.expr
+				dst.children = first_child.children
+				dst.mem_index = first_child.mem_index
 			}
 			i = end + 1
 			continue
@@ -2811,10 +2842,20 @@ fn (mut p Parser) struct_initializer1(mut init &Initializer) {
 		}
 		first = false
 		if p.at('.') {
-			index = p.struct_designator(init.ty)
-			mut child := init.children[index]
-			p.designation(mut child)
-			index = next_init_member(init.ty, index + 1)
+			dot := p.tok()
+			p.pos++
+			nametok := p.tok()
+			if nametok.kind != .ident {
+				p.error_at(nametok, 'expected a field designator')
+				p.pos++
+				continue
+			}
+			p.pos++
+			t, outer := p.designate_field(mut init, init.ty, nametok.text,
+				nametok, dot)
+			mut target := t
+			p.designation(mut target)
+			index = next_init_member(init.ty, outer + 1)
 			continue
 		}
 		if index < init.ty.members.len {
@@ -2851,12 +2892,34 @@ fn (mut p Parser) struct_initializer2(mut init &Initializer, start int) {
 // Unlike a struct, a union takes one initializer, which initializes its first member
 // unless a designator names another.
 fn (mut p Parser) union_initializer(mut init &Initializer) {
+	// A braced union initializer with designators may name several members:
+	// `union UV guv3 = {.b = 8, .a = 7}` initializes `.b`, then `.a` —
+	// the last one wins. tcc and gcc both take it, so the loop does too.
 	if p.at('{') && p.tok_at(1).text == '.' {
 		p.pos++
-		index := p.struct_designator(init.ty)
-		init.mem_index = index
-		mut child := init.children[index]
-		p.designation(mut child)
+		for {
+			dot := p.tok()
+			p.pos++
+			nametok := p.tok()
+			if nametok.kind != .ident {
+				p.error_at(nametok, 'expected a field designator')
+				p.pos++
+				break
+			}
+			p.pos++
+			t, outer := p.designate_field(mut init, init.ty, nametok.text,
+				nametok, dot)
+			mut target := t
+			init.mem_index = outer
+			p.designation(mut target)
+			if p.at('}') {
+				break
+			}
+			p.expect(',')
+			if p.at('}') {
+				break
+			}
+		}
 		p.expect('}')
 		return
 	}
@@ -2890,22 +2953,42 @@ fn (mut p Parser) designation(mut init &Initializer) {
 			return
 		}
 		begin, end := p.array_designator(init.ty)
-		for i in begin .. end + 1 {
-			mut child := init.children[i]
-			p.designation(mut child)
+		// A range carries one value for all its elements (see
+		// `array_initializer1`): parse once, share with the rest.
+		mut first_child := init.children[begin]
+		p.designation(mut first_child)
+		for i in begin + 1 .. end + 1 {
+			mut dst := init.children[i]
+			dst.expr = first_child.expr
+			dst.children = first_child.children
+			dst.mem_index = first_child.mem_index
 		}
 		p.array_initializer2(mut init, end + 1)
 		return
 	}
 	if p.at('.') && (init.ty.kind == .struct_ || init.ty.kind == .union_) {
-		index := p.struct_designator(init.ty)
-		if init.ty.kind == .union_ {
-			init.mem_index = index
+		// A designator through an anonymous member names a field of the
+		// inner aggregate: `.b` on `union UV` means the `b` inside member
+		// 0, not member 0 itself. Filling the outer member positionally
+		// would write `a = 8` for `.b = 8`, so the descent goes through
+		// `designate_field` instead.
+		dot := p.tok()
+		p.pos++
+		nametok := p.tok()
+		if nametok.kind != .ident {
+			p.error_at(nametok, 'expected a field designator')
+			p.pos++
+			return
 		}
-		mut child := init.children[index]
-		p.designation(mut child)
+		p.pos++
+		t, outer := p.designate_field(mut init, init.ty, nametok.text, nametok, dot)
+		mut target := t
+		if init.ty.kind == .union_ {
+			init.mem_index = outer
+		}
+		p.designation(mut target)
 		if init.ty.kind == .struct_ {
-			p.struct_initializer2(mut init, index + 1)
+			p.struct_initializer2(mut init, outer + 1)
 		}
 		return
 	}
@@ -2938,23 +3021,34 @@ fn (mut p Parser) array_designator(ty &ast.Type) (int, int) {
 	return begin, end
 }
 
-// struct_designator parses `.name` and returns the member's index.
-fn (mut p Parser) struct_designator(ty &ast.Type) int {
-	p.expect('.')
-	tok := p.tok()
-	if tok.kind != .ident {
-		p.error_here('expected a field designator')
-		p.pos++
-		return 0
+// designate_field resolves `.name` against an aggregate, descending through
+// anonymous members, and returns the initializer to fill plus the top-level
+// member index (which is what a union's active-member tracking and a struct's
+// positional continuation after the designator both need).
+//
+// A designator that names a field of an anonymous member — `.b` on `union UV`,
+// whose `b` lives in the unnamed struct member 0 — must fill that field, not
+// member 0 positionally. Returning the field's own initializer is what keeps
+// `.b = 8` from becoming `a = 8`.
+fn (mut p Parser) designate_field(mut init &Initializer, ty &ast.Type, name string, nametok ast.Token, dottok ast.Token) (&Initializer, int) {
+	for i, mem in ty.members {
+		if mem.name == '' && (mem.ty.kind == .struct_ || mem.ty.kind == .union_) {
+			if p.get_struct_member(mem.ty, name) != none {
+				mut child := init.children[i]
+				target, _ := p.designate_field(mut child, mem.ty, name, nametok,
+					dottok)
+				return target, i
+			}
+			continue
+		}
+		if mem.name == name {
+			mut child := init.children[i]
+			return child, i
+		}
 	}
-	index := p.get_struct_member(ty, tok.text) or {
-		p.error_here('struct has no member named "${tok.text}"')
-		0
-	}
-	// An anonymous member's field is reached through the anonymous member itself, so
-	// the designator has to name the member the parser will descend into.
-	p.pos++
-	return index
+	p.error_at(nametok, 'struct has no member named "${name}"')
+	mut child := init.children[0]
+	return child, 0
 }
 
 // skip_excess_element parses an initializer the target type has no room for.
@@ -2976,7 +3070,21 @@ fn (mut p Parser) skip_excess_element() {
 // const_expr parses a constant expression and returns its value.
 fn (mut p Parser) const_expr() i64 {
 	mut node := p.const_expr_node()
-	return eval(mut node)
+	value := eval(mut node)
+	p.flush_const_errors()
+	return value
+}
+
+// flush_const_errors reports every problem the constant folder recorded while
+// evaluating, at the token that locates it. Folding is a free function with
+// no parser to report through, so the errors wait in the module sink; every
+// entry point that evaluates must drain it, or a `division by zero in
+// constant` would silently become a zero.
+fn (mut p Parser) flush_const_errors() {
+	for e in const_eval_errors {
+		p.error_at(e.tok, e.msg)
+	}
+	const_eval_errors = []ConstEvalError{}
 }
 
 // const_expr_node parses a constant expression and returns the node.
@@ -3794,6 +3902,17 @@ fn (mut p Parser) size_of_type(ty &ast.Type, tok ast.Token) &ast.Node {
 		mut node := p.new_binary(.comma, sized, product, tok)
 		add_type(mut node)
 		return node
+	}
+	if (ty.kind == .struct_ || ty.kind == .union_) && ty.is_flexible
+		&& ty.members.len > 0 {
+		// A flexible array member contributes no size: `sizeof` on a struct
+		// completed by its initializer excludes the flex extent, even though
+		// the completed type carries the elements for member access.
+		// `struct W gw = {{1,2,3,4}, {1,2,3,4,5}}` prints 22 bytes, not 30.
+		last := ty.members.last().ty
+		if last != unsafe { nil } {
+			return p.new_size_t(i64(ty.size - last.size), tok)
+		}
 	}
 	return p.new_size_t(i64(ty.size), tok)
 }

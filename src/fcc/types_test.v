@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 
 // Type system tests.
@@ -421,6 +422,33 @@ fn test_a_hexadecimal_constant_without_a_suffix_may_be_unsigned() {
 	// 0xFFFFFFFF does not fit an int, and C says such a constant has an unsigned type.
 	t := first_token('0xFFFFFFFF')
 	assert numeric_type(t) == ty_uint
+}
+
+fn test_a_hexadecimal_constant_wider_than_32_bits_climbs_past_unsigned_int() {
+	// C11 6.4.4.1p5: hex candidates are int, unsigned int, long, unsigned long,
+	// long long, unsigned long long. A 64-bit value is a long long when it fits
+	// signed 64 bits and an unsigned long long otherwise. The old code answered
+	// unsigned int without asking, which truncated every 64-bit hex constant
+	// (`pll(0xffffabcdffffffff)` printed -1: the full value was loaded, then a
+	// spurious 32-bit conversion `movsxd`'d it away).
+	t := first_token('0xffffabcdffffffff')
+	assert numeric_type(t) == ty_ullong
+	assert numeric_type(t).size == 8
+	mut s := first_token('0xabcd00000000')
+	assert numeric_type(s) == ty_llong
+	assert !numeric_type(s).is_unsigned
+	// The suffix still decides first: a `long` spelling that overflows 32 bits
+	// climbs to `unsigned long`, not back to `unsigned int`.
+	mut l := first_token('0x80000000L')
+	assert numeric_type(l) == ty_ulong()
+	// So does an unsigned decimal that overflows 32 bits: `u` climbs to
+	// `unsigned long long` on this target (and to `unsigned long` on LP64).
+	mut u := first_token('9999999999u')
+	assert numeric_type(u) == ty_ullong
+	with_target(linux_target(), fn () {
+		mut lu := first_token('9999999999u')
+		assert numeric_type(lu) == ty_ulong()
+	})
 }
 
 fn test_numeric_suffix_is_found_by_difference_with_the_digit_run() {

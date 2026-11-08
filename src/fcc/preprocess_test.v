@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 import os
 
@@ -176,7 +177,6 @@ fn test_a_header_conditional_takes_the_other_branch() {
 	assert ppb_linux('linux').text == '1'
 	assert ppb('linux').text == 'linux'
 }
-
 
 // --- object-like macros ---
 
@@ -404,7 +404,6 @@ fn test_paste_handles_a_chain() {
 	// its last token onto `2`. Confirmed against gcc, which answers the same.
 	assert preprocessed('#define P(a,b) a##b\n#define Q(x) P(x##1, 2)\nQ(3)') == '312'
 }
-
 
 // --- conditionals ---
 
@@ -694,7 +693,6 @@ fn test_a_self_referential_macro_is_expanded_once_inside_an_argument() {
 	assert preprocessed('#define M3 M2 + 3\n#define M2 M2 + 3\nint r = M3;') == 'int r = M2 + 3 + 3 ;'
 }
 
-
 // [C11 6.10.8p1] `__STDC__` is the integer constant 1.
 //
 // It was missing, and emitting it as a *string* — which is what every other builtin
@@ -926,4 +924,3 @@ fn test_counter_starts_at_zero_and_increments_after_use() {
 	nums := r.tokens.filter(it.kind == .num_).map(it.text)
 	assert nums == ['0', '1', '2'], 'got ${nums}'
 }
-

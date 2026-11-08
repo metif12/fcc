@@ -93,6 +93,6 @@ fn test_notes_follow_the_origin_chain() {
 	mut def_ := def_tok
 	use_.origin = &def_
 	n := diag_notes(use_)
-	assert n.contains("expanded from here"), 'missing note: ${n}'
+	assert n.contains('expanded from here'), 'missing note: ${n}'
 	assert n.contains('foo.c:1:9'), 'note points at the wrong place: ${n}'
 }

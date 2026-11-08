@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 
 // Constant expressions, and the writing of initializer byte images.
@@ -57,6 +58,7 @@ fn is_address_form(mut n &ast.Node) bool {
 	}
 	return false
 }
+
 // ConstValue is what evaluating a constant expression produced.
 //
 // The label and the flag are kept apart from the value because a symbol is only legal
@@ -66,9 +68,36 @@ fn is_address_form(mut n &ast.Node) bool {
 // have an empty name.
 struct ConstValue {
 mut:
-	value i64
-	label string
+	value     i64
+	label     string
 	has_label bool
+}
+
+// ConstEvalError is a problem found while folding a constant expression: the
+// evaluator is a free function with no parser to report through, so the error
+// waits here with the token that locates it until a caller with a parser
+// drains it via `flush_const_errors`. A constant division by zero is the
+// case that matters: V panics on a host divide-by-zero, so without this the
+// *compiler* crashes on `int x = 1/0;` instead of reporting it the way tcc
+// does (`division by zero in constant`).
+struct ConstEvalError {
+	msg string
+	tok ast.Token
+}
+
+__global (
+	const_eval_errors []ConstEvalError
+)
+
+// const_eval_error records a folding problem against the token that locates
+// it. The value returned for the expression is 0, which keeps the parse going
+// so one bad constant does not hide the next diagnostic.
+fn const_eval_error(msg string, tok &ast.Token) ConstValue {
+	const_eval_errors << ConstEvalError{
+		msg: msg
+		tok: *tok
+	}
+	return ConstValue{}
 }
 
 // eval returns the value of a constant expression.
@@ -96,53 +125,75 @@ fn eval2(mut node &ast.Node) ConstValue {
 		// number, so `sym + 8` and `8 + sym` both keep the symbol and add the offsets.
 		// Building a fresh ConstValue from the value alone — which is what this did first —
 		// silently turns every address constant back into a plain integer.
+		//
+		// Pointer arithmetic needs no scaling here: `new_add` and `new_sub`
+		// scale the integer side at parse time (`(int*)0 + 2` is already
+		// `0 + 2*4`), and a pointer difference is wrapped in its
+		// divide-by-element-size, so plain sums and differences fold to the
+		// right values.
 		.add {
 			return offset(eval2(mut node.lhs), eval(mut node.rhs))
 		}
 		.sub {
 			return offset(eval2(mut node.lhs), -eval(mut node.rhs))
 		}
-		.mul { return ConstValue{value: eval(mut node.lhs) * eval(mut node.rhs)} }
+		.mul { return ConstValue{ value: eval(mut node.lhs) * eval(mut node.rhs) } }
 		.div {
+			rhs := eval(mut node.rhs)
+			if rhs == 0 {
+				return const_eval_error('division by zero in constant', node.tok)
+			}
 			if node.ty.is_unsigned {
 				return ConstValue{
-					value: i64(u64(eval(mut node.lhs)) / u64(eval(mut node.rhs)))
+					value: i64(u64(eval(mut node.lhs)) / u64(rhs))
 				}
 			}
 			return ConstValue{
-				value: eval(mut node.lhs) / eval(mut node.rhs)
+				value: eval(mut node.lhs) / rhs
 			}
 		}
-		.neg { return ConstValue{value: -eval(mut node.lhs)} }
+		.neg { return ConstValue{ value: -eval(mut node.lhs) } }
 		.mod {
+			rhs := eval(mut node.rhs)
+			if rhs == 0 {
+				return const_eval_error('division by zero in constant', node.tok)
+			}
 			if node.ty.is_unsigned {
 				return ConstValue{
-					value: i64(u64(eval(mut node.lhs)) % u64(eval(mut node.rhs)))
+					value: i64(u64(eval(mut node.lhs)) % u64(rhs))
 				}
 			}
 			return ConstValue{
-				value: eval(mut node.lhs) % eval(mut node.rhs)
+				value: eval(mut node.lhs) % rhs
 			}
 		}
-		.bit_and { return ConstValue{value: eval(mut node.lhs) & eval(mut node.rhs)} }
-		.bit_or { return ConstValue{value: eval(mut node.lhs) | eval(mut node.rhs)} }
-		.bit_xor { return ConstValue{value: eval(mut node.lhs) ^ eval(mut node.rhs)} }
-		.shl { return ConstValue{value: eval(mut node.lhs) << eval(mut node.rhs)} }
+		.bit_and { return ConstValue{ value: eval(mut node.lhs) & eval(mut node.rhs) } }
+		.bit_or { return ConstValue{ value: eval(mut node.lhs) | eval(mut node.rhs) } }
+		.bit_xor { return ConstValue{ value: eval(mut node.lhs) ^ eval(mut node.rhs) } }
+		.shl {
+			// The count is masked to the operand width the way the shift
+			// instruction does: a 32-bit `shl` uses the low 5 bits, a 64-bit
+			// one the low 6. `((long)1<<62)` with a 4-byte `long` is
+			// `1<<30`, which is also what the emitted code computes at run
+			// time — folding `2**62` and truncating to 0 instead divided by
+			// zero two nodes up and crashed the compiler.
+			return ConstValue{ value: eval(mut node.lhs) << shift_count(mut node) }
+		}
 		.shr {
 			// Only a 64-bit unsigned shift goes through the unsigned path: a signed right
 			// shift has to keep its sign, which is why the width is part of the test
 			// rather than just the signedness.
 			if node.ty.is_unsigned && node.ty.size == 8 {
 				return ConstValue{
-					value: i64(u64(eval(mut node.lhs)) >> eval(mut node.rhs))
+					value: i64(u64(eval(mut node.lhs)) >> shift_count(mut node))
 				}
 			}
 			return ConstValue{
-				value: eval(mut node.lhs) >> eval(mut node.rhs)
+				value: eval(mut node.lhs) >> shift_count(mut node)
 			}
 		}
-		.eq { return ConstValue{value: b2i(eval(mut node.lhs) == eval(mut node.rhs))} }
-		.ne { return ConstValue{value: b2i(eval(mut node.lhs) != eval(mut node.rhs))} }
+		.eq { return ConstValue{ value: b2i(eval(mut node.lhs) == eval(mut node.rhs)) } }
+		.ne { return ConstValue{ value: b2i(eval(mut node.lhs) != eval(mut node.rhs)) } }
 		.lt {
 			if node.lhs.ty.is_unsigned {
 				return ConstValue{
@@ -170,8 +221,8 @@ fn eval2(mut node &ast.Node) ConstValue {
 			return eval2(mut node.els)
 		}
 		.comma { return eval2(mut node.rhs) }
-		.not { return ConstValue{value: b2i(eval(mut node.lhs) == 0)} }
-		.bit_not { return ConstValue{value: ~eval(mut node.lhs)} }
+		.not { return ConstValue{ value: b2i(eval(mut node.lhs) == 0) } }
+		.bit_not { return ConstValue{ value: ~eval(mut node.lhs) } }
 		.log_and {
 			return ConstValue{
 				value: b2i(eval(mut node.lhs) != 0 && eval(mut node.rhs) != 0)
@@ -213,7 +264,7 @@ fn eval2(mut node &ast.Node) ConstValue {
 				has_label: true
 			}
 		}
-		.num { return ConstValue{value: node.num} }
+		.num { return ConstValue{ value: node.num } }
 		// [GNU] A label as a value. `unique_label` is the spelling the backend emits for
 		// the label, so the relocation names exactly what the definition will be called.
 		//
@@ -263,6 +314,16 @@ fn eval_rval(mut node &ast.Node) ConstValue {
 		}
 		else { return ConstValue{} }
 	}
+}
+
+// shift_count masks a shift's count to the operand width the way the target's
+// shift instruction does, so the folded value is the one the emitted code
+// computes at run time.
+fn shift_count(mut node &ast.Node) i64 {
+	if node.ty != unsafe { nil } && node.ty.size >= 8 {
+		return eval(mut node.rhs) & 63
+	}
+	return eval(mut node.rhs) & 31
 }
 
 // truncate reduces val to the width and signedness of ty, which is what a cast does.
@@ -319,7 +380,8 @@ fn is_const_expr(mut node &ast.Node) bool {
 	}
 	add_type(mut node)
 	match node.kind {
-		.add, .sub, .mul, .div, .bit_and, .bit_or, .bit_xor, .shl, .shr, .eq, .ne, .lt, .le, .log_and, .log_or {
+		.add, .sub, .mul, .div, .bit_and, .bit_or, .bit_xor, .shl, .shr, .eq, .ne, .lt, .le,
+		.log_and, .log_or {
 			return is_const_expr(mut node.lhs) && is_const_expr(mut node.rhs)
 		}
 		.cond_expr {
@@ -434,6 +496,7 @@ fn (mut p Parser) write_gvar_bytes(mut obj &ast.Obj, init &Initializer, ty &ast.
 	mut buf := []u8{len: ty.size, init: 0}
 	mut rels := []ast.Relocation{}
 	p.write_gvar_data(mut rels, init, ty, mut buf, 0)
+	p.flush_const_errors()
 	obj.init_data = buf
 	obj.rel = rels
 }
@@ -560,6 +623,30 @@ fn (mut p Parser) compute_vla_size(mut ty &ast.Type, tok ast.Token) &ast.Node {
 // "unspecified elements are zero" rule is implemented — nothing has to check for it.
 fn (mut p Parser) write_gvar_data(mut rels []ast.Relocation, init &Initializer,
 	ty &ast.Type, mut buf []u8, offset int) {
+	// An aggregate initialized from a single value of the same type carries
+	// that value in `init.expr`: `struct S gs = ((struct S){1, 2, 3, 4})`
+	// parses the compound literal into an anonymous global and records a
+	// reference to it. The member loop below would ignore the reference and
+	// lay down zeros, so the byte image (and any relocations in it, shifted
+	// by the offset) is copied straight across.
+	if init.expr != unsafe { nil }
+		&& (ty.kind == .array || ty.kind == .struct_ || ty.kind == .union_) {
+		if init.expr.kind == .var_ref && init.expr.var != unsafe { nil } {
+			src := init.expr.var
+			n := if src.init_data.len < ty.size { src.init_data.len } else { ty.size }
+			for i in 0 .. n {
+				buf[offset + i] = src.init_data[i]
+			}
+			for r in src.rel {
+				rels << ast.Relocation{
+					offset: offset + r.offset
+					label:  r.label
+					addend: r.addend
+				}
+			}
+			return
+		}
+	}
 	if ty.kind == .array {
 		sz := ty.base.size
 		for i in 0 .. ty.array_len {

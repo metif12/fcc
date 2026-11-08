@@ -120,7 +120,7 @@ pub mut:
 	// association never matches — so the parser records what it sees rather
 	// than dropping it, and the generic selection strips the controlling
 	// expression's qualifiers before comparing.
-	is_const   bool
+	is_const    bool
 	is_volatile bool
 	// is_signed marks an explicitly `signed` character type. Plain `char` and
 	// `signed char` are the same representation on this target, but C11

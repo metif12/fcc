@@ -569,6 +569,40 @@ is why the target carries a *type* and not just a width.
 
 ---
 
+## D37. Phase 3 assembles the emitted text instead of implementing Backend twice
+
+**Decision.** The machine-code emitter is `src/masm`, a two-pass assembler for
+exactly the dialect AsmGen prints — not a second `backend.Backend`
+implementation in bytes, which is what the strategy section planned.
+
+**Why.** A byte-level `gen.v` would duplicate ~2,350 lines of ABI logic to
+diverge from: every register class, home-area offset and variadic spill would
+exist twice with no check relating them. Assembling the tested text reuses all
+of it, and the assembler refuses anything outside the emitted dialect by name
+rather than guessing. The equivalence is measured, not asserted:
+`tools/objtest` compares native `.text` against GAS's instruction for
+instruction (18 match, 0 differ), and a flipped `mov` opcode turned both the
+unit tests and objtest red before the revert turned them green.
+
+## D38. The driver diverts only non-default inputs to the plugin pipeline
+
+**Decision.** Legacy `fcc [options] file...` keeps the direct C path for every
+input a `default-*` plugin claims. Only modes with an output plugin
+(`--dump-ast`, `-S`, `-c`, link) *and* an input claimed by a non-default
+plugin (`example-bf-input` today) go through `core.run_pipeline`
+(`pipeline_emit_for` in `src/driver/driver.v`). Raw-text modes and `--to-v`
+stay legacy; a disabled plugin falls back to the legacy parse.
+
+**Why.** Routing everything through the pipeline would change stock behaviour
+in untestable corners (e.g. `fcc -c x.s` currently fails loudly in the C
+parser; the raw-text input plugin would silently produce an empty object).
+The gate keeps the legacy contract bit-for-bit — objtest still reports
+18/0/0/2 after the divert landed — while third-party and example languages
+compose with every output. The mapping itself is unit-tested; the registry
+half is covered by the pipeline tests.
+
+---
+
 ## Open items for the end of the project
 
 Recorded rather than decided, because each of them is a question about the finished

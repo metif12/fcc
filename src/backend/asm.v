@@ -1,6 +1,7 @@
 module backend
 
 import src.ast
+import src.fcc
 
 // The text-assembly backend.
 //
@@ -14,36 +15,85 @@ import src.ast
 // What is here is the part that can be checked on its own: a data section is
 // either right or wrong, and `as` and the linker will say which.
 
-// gp_max, fp_max, shadow_space, incoming_base, va_start_offset and va_slot live
+// gp_max(), fp_max(), shadow_space(), incoming_base(), va_start_offset() and va_slot() live
 // in src/ast/abi.v, and are used from there: the front end needs the frame
 // arithmetic too and cannot import the backend without a cycle. Reading them
 // rather than declaring them here is what makes the register counts the backend
 // emits for and the frame sizes the front end lays out the same numbers by
 // construction. These aliases exist so the rest of the backend reads as one name
 // rather than `ast.` everywhere.
-const gp_max = ast.gp_max
-const fp_max = ast.fp_max
-const shadow_space = ast.shadow_space
-const incoming_base = ast.incoming_base
-const va_slot = ast.va_slot
-const va_start_offset = ast.va_start_offset
+// ABI constants are functions of the selected target, so the backend can serve
+// more than one calling convention without a separate copy of every function.
+fn gp_max() int {
+	if fcc.current_target().abi == .sysv_x64 { return 6 }
+	return ast.gp_max
+}
 
-// arg_regs and its byte and word forms are the argument registers in Windows x64 order:
+fn fp_max() int {
+	if fcc.current_target().abi == .sysv_x64 { return 8 }
+	return ast.fp_max
+}
+
+fn shadow_space() int {
+	if fcc.current_target().abi == .sysv_x64 { return 0 }
+	return ast.shadow_space
+}
+
+fn incoming_base() int {
+	if fcc.current_target().abi == .sysv_x64 { return 16 }
+	return ast.incoming_base
+}
+
+fn va_slot() int {
+	return ast.va_slot
+}
+
+fn va_start_offset() int {
+	if fcc.current_target().abi == .sysv_x64 { return 16 }
+	return ast.va_start_offset
+}
+
+// arg_regs() and its byte and word forms are the argument registers in Windows x64 order:
 // `%rcx`, `%rdx`, `%r8`, `%r9`. A parameter is spilled from whichever form matches its
 // width.
-const arg_regs = ['%rcx', '%rdx', '%r8', '%r9']
-const arg_regs8 = ['%cl', '%dl', '%r8b', '%r9b']
-const arg_regs16 = ['%cx', '%dx', '%r8w', '%r9w']
-const arg_regs32 = ['%ecx', '%edx', '%r8d', '%r9d']
+fn arg_regs() []string {
+	if fcc.current_target().abi == .sysv_x64 {
+		return ['%rdi', '%rsi', '%rdx', '%rcx', '%r8', '%r9']
+	}
+	return ['%rcx', '%rdx', '%r8', '%r9']
+}
 
-// arg_regs_mirror is where a floating-point argument is *also* written when the callee is
+fn arg_regs8() []string {
+	if fcc.current_target().abi == .sysv_x64 {
+		return ['%dil', '%sil', '%dl', '%cl', '%r8b', '%r9b']
+	}
+	return ['%cl', '%dl', '%r8b', '%r9b']
+}
+
+fn arg_regs16() []string {
+	if fcc.current_target().abi == .sysv_x64 {
+		return ['%di', '%si', '%dx', '%cx', '%r8w', '%r9w']
+	}
+	return ['%cx', '%dx', '%r8w', '%r9w']
+}
+
+fn arg_regs32() []string {
+	if fcc.current_target().abi == .sysv_x64 {
+		return ['%edi', '%esi', '%edx', '%ecx', '%r8d', '%r9d']
+	}
+	return ['%ecx', '%edx', '%r8d', '%r9d']
+}
+
+// arg_regs_mirror() is where a floating-point argument is *also* written when the callee is
 // variadic.
 //
 // [MS x64 3.2] the caller must store the first four floating-point arguments into the
 // integer registers, so that a callee that saves its register save area can find them
 // without a fixed-point instruction. `printf("%d", 1.0)` depends on it. There is no
 // counterpart for a non-variadic call, and gcc emits none for `dadd(1.0, 2.0)`.
-const arg_regs_mirror = arg_regs
+fn arg_regs_mirror() []string {
+	return arg_regs()
+}
 
 // TextEmitter writes AT&T assembly lines.
 //
@@ -599,10 +649,11 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 		// the listing and means two different things. Reading it as one thing put every
 		// stack argument eight bytes low, which is why `f5(1,2,3,4,5)` returned 3: it
 		// read the slot holding the third *register* argument.
-		mut top := incoming_base
+		mut top := incoming_base()
 		mut bottom := 0
 		mut gp := 0
 		mut fp := 0
+		mut seen_stack := false
 		// va_slots counts the eight-byte argument slots the *named* parameters occupy,
 		// which is what tells `va_start` where the variadic ones begin. It is counted
 		// here, inside the loop that already decides each parameter's register class,
@@ -627,12 +678,14 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			// A struct or union of at most two words goes in registers, and how many
 			// of each kind depends on whether its first and second eight bytes are all
 			// floating-point.
-			if ty.kind == .struct_ || ty.kind == .union_ {
+			if seen_stack {
+				passed = false
+			} else if ty.kind == .struct_ || ty.kind == .union_ {
 				if ty.size <= 16 {
 					fp1 := has_flonum(ty, 0, 8, 0)
 					fp2 := has_flonum(ty, 8, 16, 8)
-					if fp + b2i(fp1) + b2i(fp2) < fp_max
-						&& gp + b2i(!fp1) + b2i(!fp2) < gp_max {
+					if fp + b2i(fp1) + (if ty.size > 8 { b2i(fp2) } else { 0 }) < fp_max()
+						&& gp + b2i(!fp1) + (if ty.size > 8 { b2i(!fp2) } else { 0 }) < gp_max() {
 						fp += b2i(fp1) + (if ty.size > 8 { b2i(fp2) } else { 0 })
 						gp += b2i(!fp1) + (if ty.size > 8 { b2i(!fp2) } else { 0 })
 						passed = true
@@ -652,7 +705,7 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			// half of why `sprintf(buf, "%Lf", x)` never worked.
 			is_float := ty.kind == .basic
 				&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_)
-			if !passed && is_float && fp < fp_max {
+			if !seen_stack && !passed && is_float && fp < fp_max() {
 				fp++
 				passed = true
 			}
@@ -663,9 +716,13 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			// the caller laid it out on the stack: the callee then reads registers for
 			// a value that was never there, which is an access violation rather than a
 			// wrong answer.
-			if !passed && !is_float && ty.kind != .struct_ && ty.kind != .union_ && gp < gp_max {
+			if !seen_stack && !passed && !is_float && ty.kind != .struct_ && ty.kind != .union_ && gp < gp_max() {
 				gp++
 				passed = true
+			}
+
+			if !passed {
+				seen_stack = true
 			}
 
 			if passed {
@@ -680,14 +737,14 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 		}
 
 		// A parameter that arrived on the stack is not in the register run at all: it
-		// lives above `incoming_base`, past every home slot. So it does not advance
+		// lives above `incoming_base()`, past every home slot. So it does not advance
 		// `va_slots`, and the count above is exactly "the named parameters that
 		// arrived in registers" — which is what `leaq 24(%rbp)` is for a function with
 		// one.
 		if fun.ty.is_variadic {
-			// `va_start_offset` is measured from `%rbp` to the first variadic slot. The
-			// home area is *below* `incoming_base`, so a function with `va_slots` named
-			// register parameters starts its walk at `va_start_offset + va_slots` slots —
+			// `va_start_offset()` is measured from `%rbp` to the first variadic slot. The
+			// home area is *below* `incoming_base()`, so a function with `va_slots` named
+			// register parameters starts its walk at `va_start_offset() + va_slots` slots —
 			// which for the common `f(int n, ...)` is slot 1, at 24(%rbp).
 			//
 			// This was `va_slots` *below* the base at first, i.e. pointing into the
@@ -697,7 +754,7 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			// `1 9 17 25 33 41` instead of `1 2 3 4 5 6`, each eight bytes of drift per
 			// step — which is what a walk that starts one slot too low and then steps
 			// eight bytes looks like, because it is walking addresses rather than values.
-			fun.va_start_offset = va_start_offset + va_slots * va_slot
+			fun.va_start_offset = va_start_offset() + va_slots * va_slot()
 		}
 
 		for li in 0 .. fun.locals.len {
@@ -730,6 +787,15 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			fun.locals[li].offset = -bottom
 		}
 
+		// SysV varargs needs a 176-byte register save area (6 GP + 8 XMM) in the
+		// frame, written by the prologue. Track its offset for gen_va_start.
+		if fun.ty.is_variadic && fcc.current_target().abi == .sysv_x64 {
+			bottom += 176
+			bottom = align_to(bottom, 16)
+			fun.va_reg_save_offset = -bottom
+			fun.va_gp_count = gp
+			fun.va_fp_count = fp
+		}
 		fun.stack_size = align_to(bottom, 16)
 	}
 }

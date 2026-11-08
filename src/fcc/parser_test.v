@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 
 // Parser tests.
@@ -756,6 +757,65 @@ fn test_braces_may_be_elided_inside_an_aggregate() {
 	assert bytes_of(obj) == '0100000002000000 0300000004000000'
 }
 
+fn test_braces_may_be_elided_for_structs_in_an_array() {
+	// 00205 is an array of structs with no braces around each element: the
+	// members fill positionally across the commas. The struct-copy probe used
+	// to consume the first element and then restart at member zero without
+	// rewinding, reporting `expected an expression` at the second value.
+	obj := global('struct P { int c[2]; int b; };\nstruct P p[] = {1, 2, 3, 4, 5, 6};\n')
+	assert obj.ty.array_len == 2
+	assert bytes_of(obj) == '0100000002000000 0300000004000000 0500000006000000'
+}
+
+fn test_braces_may_be_elided_for_a_nested_struct() {
+	// 00216's `struct U gu = {3, 5,6,7,8, 4, ...}` fills the member struct
+	// `s` from the flat list. Same probe bug as above, one level down.
+	obj := global('struct S { unsigned char a; unsigned char b; unsigned char c[2]; };\nstruct U { unsigned char x; struct S s; unsigned char y; };\nstruct U gu = {3, 5, 6, 7, 8, 4};\n')
+	assert bytes_of(obj) == '030506070804'
+}
+
+fn test_a_union_initializer_may_name_several_members() {
+	// `{.b = 8, .a = 7}` initializes `.b` and then `.a`; the last one wins
+	// for the shared bytes. tcc and gcc both take it.
+	obj := global('union U { int a; int b; };\nunion U u = {.b = 8, .a = 7};\n')
+	assert bytes_of(obj) == '07000000'
+}
+
+fn test_a_designator_through_an_anonymous_member_names_the_field() {
+	// `.b` on a union whose `b` lives in the anonymous struct member must fill
+	// `b`, not member zero positionally (which made 00216's guv3 `7 0` for `7 8`).
+	obj := global('union UV { struct { unsigned char a; unsigned char b; }; unsigned char s[2]; };\nunion UV u = {.b = 8, .a = 7};\n')
+	assert bytes_of(obj) == '0708'
+}
+
+fn test_a_range_designator_initializes_every_element_once() {
+	// `[1 ... 5] = 9` carries one value for five elements. Parsing the value
+	// once per element read the second designator as the first value's
+	// continuation and reported `expected an expression`.
+	obj := global('int a[8] = {[1 ... 3] = 9, [4 ... 5] = 7};\n')
+	assert bytes_of(obj) == '0000000009000000 0900000009000000 0700000007000000 0000000000000000'
+}
+
+fn test_a_global_struct_may_copy_a_compound_literal() {
+	// `struct S gs = ((struct S){1, 2})` parses the literal into an anonymous
+	// global; the byte image must copy it rather than lay down zeros.
+	r := parsed('struct S { int a; int b; };\nstruct S gs = ((struct S){1, 2});\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals.len == 2, 'expected the object and its literal, got ${r.globals.len}'
+	assert bytes_of(r.globals[0]) == '0100000002000000'
+	assert bytes_of(r.globals[1]) == '0100000002000000'
+}
+
+fn test_sizeof_excludes_a_flexible_array_member() {
+	// The completed type carries the flex elements for member access, but
+	// `sizeof` answers as if they were omitted: 00216's `gw` prints 22 bytes.
+	r := parsed('struct S { int a; int b; };\nstruct W { struct S t; struct S s[]; };\nstruct W gw = {{1, 2}, {3, 4, 5, 6}};\nunsigned long long n = sizeof(gw);\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals.len == 2, 'expected two globals, got ${r.globals.len}'
+	assert r.globals[0].ty.size == 24, 'the object keeps its flex extent'
+	assert bytes_of(r.globals[1]) == '0800000000000000'
+}
+
 fn test_a_string_initializer_includes_the_terminator() {
 	obj := global('char s[] = "ab";\n')
 	assert obj.ty.array_len == 3
@@ -876,6 +936,35 @@ fn test_an_unsigned_right_shift_is_logical() {
 fn test_a_64_bit_unsigned_shift_is_logical() {
 	assert bytes_of(global('unsigned long long x = 0xffffffffffffffffULL >> 32;\n')) ==
 		'ffffffff00000000'
+}
+
+fn test_a_constant_shift_count_is_masked_to_the_operand_width() {
+	// The target's shift instruction uses the low 5 bits of the count for a
+	// 32-bit shift, so `((long)1<<62)` with a 4-byte `long` is `1<<30` —
+	// the same value the emitted code computes at run time. Folding `2**62`
+	// and truncating to 0 instead fed a division two nodes up and crashed
+	// the compiler with a host `division by zero` panic (chibicc constexpr).
+	assert bytes_of(global('long s = ((long)1<<62);\n')) == '00000040'
+}
+
+fn test_a_constant_division_by_zero_is_reported_not_crashed() {
+	// tcc says `division by zero in constant`; fcc used to die with a V
+	// host panic instead, which is never a valid response to any input.
+	for src in ['int x = 1/0;\n', 'int y = 1%0;\n'] {
+		r := parsed(src)
+		assert r.errors.len > 0, 'no diagnostic for ${src}'
+		assert r.errors.any(it.contains('division by zero')), 'for ${src}: ${r.errors}'
+	}
+}
+
+fn test_constant_pointer_arithmetic_scales_by_the_element_size() {
+	// The parse already scales (`(int*)0 + 2` is `0 + 2*4` in the tree), so
+	// plain folding gives 8, 12 and 3 for chibicc constexpr's bounds.
+	r := parsed('char a[(int*)0+2];\nchar b[(int*)16-1];\nchar c[(int*)16-(int*)4];\n')
+	assert r.errors.len == 0, 'unexpected diagnostics: ${r.errors}'
+	assert r.globals[0].ty.array_len == 8
+	assert r.globals[1].ty.array_len == 12
+	assert r.globals[2].ty.array_len == 3
 }
 
 // --- typeof, _Atomic, alignment ---

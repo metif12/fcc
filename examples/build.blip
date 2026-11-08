@@ -1,0 +1,19 @@
+# build.blip: declarative build (like build.zig steps, but data).
+# Run with: fcc build [task]
+
+task "build" {
+  inputs = ["main.c"]
+  run = "fcc -S -o main.s main.c"
+  depends = []
+}
+
+task "tokens" {
+  inputs = ["main.c"]
+  run = "fcc --dump-tokens main.c"
+  depends = []
+}
+
+task "all" {
+  run = "echo done"
+  depends = ["build", "tokens"]
+}

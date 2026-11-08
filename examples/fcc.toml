@@ -1,0 +1,34 @@
+# fcc example project config (TOML).
+# Every key has a CLI override; CLI wins over file, file wins over builtins.
+# Copy to fcc.toml at your project root.
+
+[build]
+target = "x86_64-windows"
+std = "gnu11"
+emit = "asm"
+output = "main.s"
+inputs = ["main.c"]
+includes = []
+defines = []
+undefines = []
+pre_includes = []
+lib_paths = []
+libs = []
+
+[plugins]
+# disable any default extension by name; see `fcc plugin list`.
+disabled = []
+
+# external / third-party plugins (in-process V plugins register
+# themselves; external CLI tools are found as fcc-<verb> on PATH).
+# [plugin."my-lexer"]
+# enabled = true
+# command = "my-lexer --stdin"
+
+[task.build]
+run = "fcc -S -o main.s main.c"
+desc = "compile to assembly"
+
+[task.tokens]
+run = "fcc --dump-tokens -o tokens.txt main.c"
+desc = "dump token stream"

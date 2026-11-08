@@ -2,9 +2,18 @@
 
 ## Goal
 
-`fcc` replaces the bundled TinyCC that `vlang/v` uses as its default C backend on
-Windows, so that the dependency becomes pure V and is built from V source like the
-rest of the toolchain.
+`fcc` is a fast, plugin-able and extendable C compiler written in pure V. It
+compiles C (`-std=gnu11`) to x86-64 assembly, assembles that text in-process
+to machine code, and writes COFF (Windows) and ELF (Linux) objects, with no
+external assembler and no bundled `tcc` binary.
+
+It began as a pure-V replacement for the TinyCC that `vlang/v` uses as its
+default C backend on Windows, and that remains a supported use — but the
+primary goal is a compiler whose every stage (input, preprocessing, parsing,
+codegen, assembly, object writing, linking, CLI) is an extension behind a
+registry (`src/core`), so a new language, backend, target or output format can
+be added without forking the front end. The stock compiler ships as default
+extensions (`src/ext`); Brainfuck (`src/ext/bf.v`) is the worked example.
 
 ## Strategy: two stages behind one interface
 
@@ -779,6 +788,81 @@ twelve still recorded above. `vla.c` is the one that moved; the five that alread
 still pass, and nothing regressed. `function.c` still fails at compile time on
 `undefined variable "__va_area__"`, because the suite declares its own 24-byte `va_list`
 and reads the local the variadic work removed.
+
+### Phase 3 — machine-code emitter + object writer *(done)*
+
+`-c` no longer shells to the system assembler. `emit_obj` feeds AsmGen's text
+through `src/masm` (a two-pass x86-64 assembler for exactly the dialect the
+backend prints) and `src/coff` (a COFF object writer), and writes the `.o`
+directly. `--extern-as` keeps the old `as` path as a bisection escape hatch;
+the Linux target still uses WSL `as` (no native ELF writer yet).
+
+**Deliberate deviation from the strategy above.** The plan said phase 3 would
+implement `backend.Backend` a second time, in bytes. What was built instead is
+a text→bytes assembler behind the *existing* text backend: the encoder covers
+the ~60 mnemonics and the operand shapes (base+displacement memory,
+RIP-relative, `*%reg` indirect calls, `;`-packed multi-statements, numeric
+`1b`/`2f` labels, `.quad`/`.byte`/`.zero`/`.align`, x87 and SSE) that `fcc -S`
+emits for the whole endtoend corpus, and refuses anything else by name. A
+second `gen.v` in bytes would duplicate the ABI logic to diverge from;
+assembling the tested text reuses all of it, and the byte-compare below proves
+the bytes are the ones GAS produces.
+
+**Measured against GAS, not recalled.** Every COFF convention was read off
+`objdump` of GAS-assembled fcc output on this host: section order and
+characteristics, the 20-byte header + 40-byte header layout, raw sections
+padded to 16 (code with `0x90`), REL32 with the in-section offset carried in
+the field, ADDR64 for `.quad`, relocations against *section* symbols for
+defined labels, aux-record symbol indices (file=0, `.text`=2, `.data`=4,
+`.bss`=6), File and section aux records with scnlen and relocation counts,
+GAS's jump relaxation to the 2-byte form, and its accumulator and
+operand-size special cases (`test $imm,%rax` is A9, `%al` ALU ops are
+04+ext*8, `%rax`/`%eax` large immediates are 05+ext*8, `$0xfffffff0`
+truncates to -16 for the 83/81 choice).
+
+**Acceptance: `tools/objtest/objtest.v`.** For each of the 20 endtoend
+programs: (1) native `.text` disassembly is byte-identical to GAS's
+(`objdump -d -j .text` compared line for line); (2) the native-linked exe
+behaves identically to the gas-linked exe. Result: **18 match, 0 differ,
+0 blocked, 2 flaky**. The 2 flaky programs (`varargs.c`, `va_arg_stride.c`)
+read out-of-bounds varargs — a known frontend gap, which is also why probe
+differs from tcc on them — and their output varies across *identical* gas
+links (argv bytes, link time and stack ASLR leak into the garbage), so strict
+comparison is invalid for them; the tool measures the flakiness with a relink
+control instead of assuming it. `v test .` is 15/15, including the masm
+encoder tests (every byte string read off `objdump -d` of the same line
+through GAS), the COFF structural tests (including the `.bss` VirtualSize
+case below), the `--extern-as` and divert-mapping driver tests, and the ext
+plugin-pipeline `-c` and Brainfuck tests.
+
+**Break-fix controls.** The encoder's `mov` reg-reg opcode was flipped to a
+wrong-but-valid encoding: masm unit tests went red and objtest reported
+`.text` differs. Reverted; both green again.
+
+**Open follow-ups, recorded not worked on.** A native ELF writer for
+`-target=x86_64-linux` (currently WSL `as`); link.exe compatibility is
+unverified (only GNU ld links these objects today); `.tls$` is still refused
+with a diagnostic naming the object writer.
+
+### Example language plugin: Brainfuck, via the driver divert
+
+`src/ext/bf.v` (`example-bf-input`) proves the plugin seam composes: it claims
+`.bf`/`.b`, transpiles to C, and reuses the frontend, both emitters and the
+object writer untouched. The driver diverts any input a non-default plugin
+claims into `core.run_pipeline` (`pipeline_emit_for` in `src/driver/driver.v`);
+raw-text modes and `--to-v` stay legacy, defaults keep the legacy path
+bit-for-bit, and a disabled plugin falls back to the legacy C parse with a
+normal diagnostic. Building the example caught a real phase-3 bug: `.bss`
+VirtualSize was written as 0 (like `.text`/`.data`, where it is correctly 0),
+so the loader allocated nothing and the zero-init tape came up non-zero —
+measured as `Hello World!` turning into garbage, fixed with a `vsize` field
+and a structural test. Acceptance is `v test .` (transpile unit tests plus the
+pipeline-to-object test) and a linked `examples/hello.bf` run printing
+`Hello World!`. Known limits, all parity rather than regressions: no `#line`
+mapping (generated-line diagnostics, which never occur — the generator emits
+only corpus-covered shapes); multi-file `.L` collisions fail identically on
+the legacy path; the pipeline always emits natively (`--extern-as` is a
+legacy-path hatch).
 
 ## The Windows x64 calling convention, measured
 

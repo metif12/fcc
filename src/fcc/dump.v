@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 
 // Rendering the parse result as text.
@@ -139,7 +140,11 @@ fn dump_obj(obj &ast.Obj) string {
 		b << '  bytes=${hex_bytes(obj.init_data)}'
 	}
 	for rel in obj.rel {
-		b << '  reloc at ${rel.offset}: ${rel.label}${if rel.addend < 0 { rel.addend.str() } else { '+' + rel.addend.str() }}'
+		b << '  reloc at ${rel.offset}: ${rel.label}${if rel.addend < 0 {
+			rel.addend.str()
+		} else {
+			'+' + rel.addend.str()
+		}}'
 	}
 	if obj.ty.kind == .struct_ || obj.ty.kind == .union_ {
 		b << dump_members(obj.ty)

@@ -192,6 +192,26 @@ pub const ty_size_t = ty_ullong
 // through a cast to whatever type is asked for, and `char` is what makes the
 // arithmetic on it well defined in C.
 pub fn ty_va_list() &ast.Type {
+	if current_target().abi == .sysv_x64 {
+		// SysV: va_list is a 24-byte struct { gp_offset, fp_offset,
+		// overflow_arg_area, reg_save_area }.
+		mut t := &ast.Type{
+			kind:  .struct_
+			size:  24
+			align: 8
+			tag:   '__va_list_tag'
+		}
+		mut gp := &ast.Type{ kind: .basic, basic: .int_, size: 4, align: 4 }
+		mut fp := &ast.Type{ kind: .basic, basic: .int_, size: 4, align: 4 }
+		mut ptr := &ast.Type{ kind: .pointer, base: ty_char, size: 8, align: 8 }
+		t.members = [
+			ast.Member{ name: 'gp_offset', ty: gp, offset: 0, align: 4 },
+			ast.Member{ name: 'fp_offset', ty: fp, offset: 4, align: 4 },
+			ast.Member{ name: 'overflow_arg_area', ty: ptr, offset: 8, align: 8 },
+			ast.Member{ name: 'reg_save_area', ty: ptr, offset: 16, align: 8 },
+		]
+		return t
+	}
 	return pointer_to(ty_char)
 }
 
@@ -766,14 +786,18 @@ pub fn numeric_type(tok &ast.Token) &ast.Type {
 	unsigned := suffix.contains('u') || suffix.contains('U')
 	// `ll` is two letters, so counting them is what distinguishes `1l` from `1ll`.
 	wide := count_byte(suffix, `l`) >= 2 || count_byte(suffix, `L`) >= 2
+	long_suffix := !wide && (suffix.contains('l') || suffix.contains('L'))
+	if is_nondecimal(tok.text) {
+		return nondecimal_type(u64(tok.val), wide, long_suffix, unsigned)
+	}
 	mut ty := ty_int
 	if wide {
 		ty = ty_llong
-	} else if suffix.contains('l') || suffix.contains('L') {
+	} else if long_suffix {
 		ty = ty_long()
 	}
 	if unsigned {
-		return unsigned_version(ty)
+		return unsigned_decimal_type(u64(tok.val), ty)
 	}
 	if tok.val <= i64(max_int32) {
 		return ty
@@ -785,15 +809,71 @@ pub fn numeric_type(tok &ast.Token) &ast.Type {
 	// bytes, it is a `long`. Returning `long long` unconditionally gets the Windows
 	// answer right and the LP64 one wrong, and the symptom would be a constant typed
 	// wider than the source asked for, which `sizeof` on a `_Generic` would report.
-	if !is_nondecimal(tok.text) {
-		return if ty_long().size >= 8 { ty_long() } else { ty_llong }
+	return if ty_long().size >= 8 { ty_long() } else { ty_llong }
+}
+
+// nondecimal_type implements C11 6.4.4.1p5 for hexadecimal, octal and binary
+// constants: the candidate list depends on the suffix, and the type is the
+// first candidate whose range holds the value. `uval` is the mathematical
+// value (tok.val wrapped mod 2^64); hex spellings are non-negative, so the
+// wrap is exact.
+//
+// The old code answered `unsigned int` without asking whether the value fits
+// in 32 bits — right for every hex constant that does, and silently truncating
+// for the rest (`pll(0xffffabcdffffffff)` loaded all 64 bits and then
+// `movsxd`'d them away, printing -1). That gap predates the target work.
+fn nondecimal_type(uval u64, wide bool, long_suffix bool, unsigned bool) &ast.Type {
+	mut cands := [ty_int, ty_uint, ty_long(), ty_ulong(), ty_llong, ty_ullong]
+	if unsigned && wide {
+		cands = [ty_ullong]
+	} else if wide {
+		cands = [ty_llong, ty_ullong]
+	} else if unsigned && long_suffix {
+		cands = [ty_ulong(), ty_ullong]
+	} else if long_suffix {
+		cands = [ty_long(), ty_ulong(), ty_llong, ty_ullong]
+	} else if unsigned {
+		cands = [ty_uint, ty_ulong(), ty_ullong]
 	}
-	// A constant written in a base other than ten may be written to mean an
-	// unsigned type without saying so; a decimal one may not. This answers `unsigned
-	// int` without asking whether the value fits in 32 bits, which is right for every
-	// hex constant that does and truncates one that does not. That gap predates the
-	// target work and is recorded in `docs/PLAN.md` rather than fixed here.
-	return ty_uint
+	for c in cands {
+		if fits_range(c, uval) {
+			return c
+		}
+	}
+	return ty_ullong
+}
+
+// unsigned_decimal_type implements the unsigned half of C11 6.4.4.1p5: an
+// unsigned decimal constant is `unsigned int`, `unsigned long` or
+// `unsigned long long`, whichever first holds it. `ty` is the suffix's
+// signed type (`int` for `u`, `long` for `ul`, `long long` for `ull`); the
+// unsigned counterpart of a fitting signed type is what the programmer asked
+// for, so only an overflowing value climbs.
+fn unsigned_decimal_type(uval u64, ty &ast.Type) &ast.Type {
+	if fits_range(unsigned_version(ty), uval) {
+		return unsigned_version(ty)
+	}
+	if ty.basic == .int_ {
+		if fits_range(ty_ulong(), uval) {
+			return ty_ulong()
+		}
+	}
+	return ty_ullong
+}
+
+// fits_range reports whether the mathematical value uval fits type t,
+// following the target's `long` width rather than assuming LP64.
+fn fits_range(t &ast.Type, uval u64) bool {
+	if t.size >= 8 {
+		if t.is_unsigned {
+			return true
+		}
+		return uval <= u64(0x7fffffffffffffff)
+	}
+	if t.is_unsigned {
+		return uval <= u64(0xffffffff)
+	}
+	return uval <= u64(max_int32)
 }
 
 // numeric_suffix returns the type suffix of a literal's spelling.

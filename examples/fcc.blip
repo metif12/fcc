@@ -1,0 +1,19 @@
+# fcc example project config (blip). Same keys as fcc.toml.
+# Copy to fcc.blip at your project root. `task` / `plugin` / `build`
+# blocks desugar to TOML tables (see src/core/blip.v).
+
+build {
+  target = "x86_64-windows"
+  std = "gnu11"
+  emit = "asm"
+  output = "main.s"
+}
+
+# plugin "my-lexer" {
+#   enabled = true
+#   command = "my-lexer --stdin"
+# }
+
+task "build" {
+  run = "fcc -S -o main.s main.c"
+}

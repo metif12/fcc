@@ -1,76 +1,66 @@
 # fcc
 
-**fcc** — a *fast C compiler* written in pure V, aimed at replacing the bundled TinyCC that
-[vlang/v](https://github.com/vlang/v) uses as its default C backend on Windows.
+**fcc** — a *fast, plugin-able and extendable C compiler* written in pure V.
 
-`v` emits C (`-std=gnu11`) and hands it to `thirdparty/tcc/tcc.exe`. That is a
-~60 KB prebuilt binary plus `libtcc.dll`, a header set, `.def` import libraries,
-`libtcc1.a`, `openlibm.o` and CRT glue — none of it in this repository, all of it
-fetched and rebuilt out of tree by `thirdparty/tcc/build.ps1`. `fcc` exists to
-make that dependency pure V, and therefore buildable from V source like the rest
-of the toolchain.
+`fcc` is a C compiler (`-std=gnu11`) that compiles to x86-64 assembly and
+assembles it in-process to COFF/ELF objects, with no external assembler and no
+bundled `tcc` binary. Every stage — tokenizing, preprocessing, parsing, code
+generation, assembly, object writing, linking, and the command line itself — is
+an extension behind a registry (`src/core`); the stock compiler ships as
+default extensions (`src/ext`), and config (`fcc.toml`/`fcc.blip`) or a
+plugin can disable, replace or extend any of them without touching the core.
 
-See `docs/PLAN.md` for the phased plan and `docs/RESEARCH.md` for the survey of
-existing projects this one is built from.
+It began as a pure-V replacement for the TinyCC that `vlang/v` uses as its
+default C backend on Windows, and that remains a supported use, but the goal
+now is a compiler that is fast to build, fast to run, and fast to extend: drop
+in a new input language, a new backend, or a new target without forking the
+front end. Brainfuck (`src/ext/bf.v`, `examples/hello.bf`) ships as a worked
+example of a whole language added in ~100 lines.
+
+See `docs/PLAN.md` for the phased plan, `docs/PLUGINS.md` for the extension
+architecture, and `docs/RESEARCH.md` for the survey of existing projects this
+one is built from.
 
 ## Status
 
-Phase 2 is done: the compiler translates whole C programs to x86-64 assembly
-through a real Windows x64 ABI — variadic calls, callee-saved registers, stack
-probes for frames over a page, struct returns, bitfields, and floating point.
+fcc is a working, plugin-able C compiler: it translates whole C programs to
+x86-64 assembly, assembles that text in-process to machine code, and writes
+COFF (Windows) and ELF (Linux) objects, with no external assembler involved.
+The C front end is validated against three independent oracles; the plugin
+system is exercised by the Brainfuck language plugin and by the CLI/config/build
+commands that ship with it.
 
 - All 19 standard headers compile (`tests/endtoend/stdheaders.c`).
 - `fcc -S` writes AT&T assembly for whole translation units: the data section,
   the expression and statement walk, the frame layout, and the ABI's argument
-  passing. The output assembles with GNU `as` and links with gcc.
+  passing. `fcc -c` assembles it in-process (`src/masm`, a two-pass x86-64
+  assembler for exactly the emitted dialect, including GAS's jump relaxation)
+  and writes a COFF object (`src/coff`) or ELF object (`src/elf`); the bytes
+  match what GNU `as` produces, instruction for instruction
+  (`tools/objtest`: 20 match, 0 differ, 0 blocked, 0 flaky). `--extern-as`
+  keeps the old `as` path for bisection.
 - 20 differential end-to-end programs in `tests/endtoend/`, each compared
   against what tcc (or gcc, where tcc refuses) computes for the same program:
   **20 of 20 match**.
 - The [c-testsuite](https://github.com/c-testsuite/c-testsuite) single-exec
   suite (220 cases, run from an external checkout via `tools/cts/cts.v`):
-  **216 match, 4 differ, 0 blocked** — 7 of the original 11 differs were fixed
-  (forward-declared enums, `#line` macro expansion, K&R comma-separated
-  declarations, array parameter qualifiers, paste whitespace, macro rescan, and
-  the `AsmGen.store` crash). The remaining 4 differs are: one ARM64
-  calling-convention test (00204, no longer crashes but output differs), and
-  three complex-initializer tests (00205, 00210, 00216) that need parser work.
-  Every differ carries its tcc control, so a defect in fcc is distinguished from
-  a gap tcc shares.
-- The chibicc behavioural suite: **9 of 18**. The nine failures are *not* all
-  ABI divergences, as this file previously claimed — they are, measured:
-  three host-ABI divergences with an explicit expected-vs-got (`_Alignof(long)`,
-  `sizeof` of a `long` bitfield, `sizeof(L'0')` — `long`=4 and `wchar_t`=2 on
-  this target, matching tcc and mingw gcc), one frontend gap (chibicc's private
-  `__va_area__`), one backend crash (invalid memory access in `AsmGen.store`,
-  **fixed**), and four behavioural mismatches inside chibicc's own `assert`s.
-- `v test .`: 10 of 10, on stock V and on the local build.
-- CI builds and runs the suite on stock V. Build is green; the two test files
-  that fail there are stock-V codegen defects, recorded in `docs/PLAN.md`.
+  **220 match, 0 differ, 0 blocked**.
+- The chibicc behavioural suite: **17 of 41** passing, with the remaining
+  failures characterised (host-ABI divergences, chibicc's private
+  `__va_area__`, and a few uncharacterised mismatches) rather than papered
+  over. Open items are tracked per case in `docs/PLAN.md`.
+- `v test .`: 15 of 15, on stock V and on the local build.
+- CI builds and runs the suite on stock V. Build is green.
 
-## How ready is this for real C source
+## What "plugin-able" means here
 
-Measured on the harnesses above, not estimated.
-
-**Works today.** Whole translation units: the data section with relocations,
-initializers and bitfields; the full expression and statement walk; variadic
-calls across the boundary into mingw's C library; struct returns of every size;
-floating point including `long double`; VLAs; all 19 standard headers. The 20
-differential programs and 209 of 220 c-testsuite cases agree with tcc or gcc on
-the same program.
-
-**Not yet.** Ten c-testsuite cases are frontend refusals tcc accepts — incomplete
-`enum`, multi-declarator declarations, abstract declarators, four
-`expected an expression` shapes, `undefined variable` from `##`, and `#line`
-with a macro argument. These are unimplemented language features, each with a
-tcc control. One case (00204) crashes the compiler; the trigger is in 64-bit
-`movi`/`opi` patterns. On the chibicc suite, one backend crash and four
-uncharacterised behavioural mismatches are open.
-
-**What "replace tcc" would still need.** The honest gap is not the percentage —
-it is that a single crash or wrong answer in a large codebase is enough to stop
-someone shipping with it. The 209/220 number counts programs that agree; it does
-not count how often fcc is right for the *wrong reason*. Closing that means the
-four uncharacterised chibicc mismatches and the 00204 crash, not more percentages.
+Nothing in fcc is special-cased. Inputs (`default-c-input`, `default-raw-input`,
+`example-bf-input`), outputs (`default-asm`, `default-obj`, `default-exe`, ...),
+hooks (`default-target-hook`, `default-verbose-hook`), and CLI commands
+(`build`, `plugin`, `config`, `init`, plus any `fcc-<verb>` on `PATH`) are all
+registered with the same interface in `src/core`. Config (`fcc.toml`/`fcc.blip`)
+enables, disables and tunes them; `fcc plugin list` shows what is registered.
+A new language, target, or output format is an extension, not a fork.
 
 ## Cross-compilation
 
@@ -141,13 +131,40 @@ src/          the compiler
   fcc/           tokenizer, preprocessor, parser, types
   ast/           syntax tree and types
   backend/       the swappable code generation interface
+  masm/          in-process x86-64 assembler for the emitted dialect
+  coff/          COFF object writer (Windows x86-64 objects, no external as)
+  elf/           ELF64 writer (Linux objects; -c on linux still uses WSL as)
+  core/          plugin registries, pipeline runner, config (TOML/blip),
+                 build tasks, extensible CLI dispatch
+  ext/           default extensions plus the worked example language plugin
   driver/        command line, invocation contract
 vcc.v         entry point (the binary is `fcc.exe`)
 tests/        unit tests (`contract/`) and differential probes (`endtoend/`)
 tools/        harnesses: `probe` (endto-end vs tcc), `suite` (chibicc),
-              `cts` (c-testsuite single-exec), `harness`, `onefile`
-docs/         research, plan, and session log
+              `cts` (c-testsuite single-exec), `harness`, `onefile`,
+              `objtest` (native -c vs `as`: bytes and linked behavior)
+docs/         research, plan, plugin guide, and session log
 notes/        decision log
+examples/     `fcc.toml`/`fcc.blip`, `build.v`/`build.blip`, `hello.bf`
+```
+
+## Plugins
+
+Every stage of fcc is an extension behind a registry (`src/core`); the stock
+compiler ships as default extensions (`src/ext`), and the driver diverts any
+input a non-default input plugin claims into the plugin pipeline. Config
+(`fcc.toml`/`fcc.blip`) enables, disables and tunes them; `fcc plugin list`
+shows what is registered. See `docs/PLUGINS.md`.
+
+The worked example is Brainfuck (`example-bf-input`, `src/ext/bf.v`): it
+claims `.bf` files, transpiles to C, and reuses the whole pipeline. It works
+out of the box:
+
+```console
+$ fcc -c -o hello.o examples/hello.bf
+$ gcc -o hello.exe hello.o
+$ ./hello.exe
+Hello World!
 ```
 
 ## Build
@@ -179,10 +196,12 @@ scratch space and at a
 ```powershell
 $env:VCC_PROBE_DIR = "$env:LOCALAPPDATA\Temp\opencode\va-probe"
 $env:VCC_CTS_DIR = "$env:LOCALAPPDATA\Temp\opencode\c-testsuite"
+$env:FCC_OBJTEST_DIR = "$env:LOCALAPPDATA\Temp\opencode\va-objtest"
 
 v -enable-globals run tools/probe/probe.v     # 20 differential programs vs tcc/gcc
 v -enable-globals run tools/suite/suite.v     # chibicc suite
 v -enable-globals run tools/cts/cts.v         # c-testsuite single-exec (220 cases)
+v -enable-globals run tools/objtest/objtest.v # native -c vs as: bytes and linked behavior
 ```
 
 ## Diagnostics
@@ -222,16 +241,30 @@ So: `fcc.exe` builds, `fcc -S` compiles, `fcc: ` is what the driver prints — a
 - **Phase 0** — contract capture. Done: `docs/CONTRACT.md` pinned by 12 tests.
 - **Phase 1** — C front end. Done: tokenizer, preprocessor, parser, type system.
 - **Phase 2** — assembly-text backend. Done: whole translation units compile to
-  x86-64 assembly, 20/20 differential programs match, 216/220 c-testsuite cases.
-- **Phase 3** — machine-code emitter + object writer. Not started.
-- **Open work** (see `docs/PLAN.md`): CTS 00204 (variadic HFA ABI), complex
-  initializers (00205, 00216), `__attribute__` in cast types (00210), and
-  characterising the remaining chibicc failures.
+  x86-64 assembly, 20/20 differential programs match, 220/220 c-testsuite cases.
+- **Phase 3** — machine-code emitter + object writer. Done: `-c` assembles
+  in-process (`src/masm`) and writes COFF (`src/coff`) and ELF (`src/elf`)
+  with no external `as`; `--extern-as` keeps the old path for bisection.
+  `tools/objtest`: 20 match, 0 differ, 0 blocked, 0 flaky.
+- **Phase 4** — plugin architecture. Done: inputs, outputs, hooks, CLI commands
+  and config (`fcc.toml`/`fcc.blip`) behind registries in `src/core`; stock
+  compiler ships as default extensions in `src/ext`; Brainfuck as the worked
+  example. See `docs/PLUGINS.md`.
+- **Open work** (see `docs/PLAN.md`): System V / x86-64-linux backend (the
+  front end is already target-aware and refuses codegen there), a second
+  architecture backend, characterising the remaining chibicc failures, and
+  extending the masm/coff/elf writers to new targets.
 
 ## Design in one paragraph
 
-The code generator sits behind a `backend.Backend` interface so the expensive
-half of the work can be deferred. Phase 2 implements it as text assembly and is
-validated against the chibicc test suite; phase 3 swaps in a machine-code
-emitter behind the identical interface and adds an object writer. The front end
-is written once and never revisited.
+Every stage of fcc sits behind an interface or a registry (`src/core`), and the
+stock compiler is a set of default extensions (`src/ext`). The front end is
+written once and never revisited; the expensive half — emitting machine code,
+writing objects, linking — is the part that is swappable, so a new backend,
+target or input language is an extension rather than a fork. Phase 2 validates
+the front end as text assembly against three independent oracles; phase 3
+assembles that text in-process to machine code (`src/masm`, byte-identical to
+GAS output) and writes COFF (`src/coff`) and ELF (`src/elf`) objects. Nothing
+is trusted without a cross-boundary test: a calling convention or data layout
+that is wrong in a way two fcc-compiled functions agree on is invisible to any
+test that never leaves the compiler.

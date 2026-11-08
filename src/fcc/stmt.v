@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 
 // Statements, assignment and function calls.
@@ -54,7 +55,8 @@ fn (mut p Parser) stmt() &ast.Node {
 		return p.asm_stmt()
 	}
 
-	if p.at('if') {		p.pos++
+	if p.at('if') {
+		p.pos++
 		mut node := p.new_node(.if_, tok)
 		p.expect('(')
 		mut cond := p.expr()

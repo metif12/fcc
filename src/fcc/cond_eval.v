@@ -1,4 +1,5 @@
 module fcc
+
 import ast
 
 // The `#if` expression evaluator.

@@ -1,6 +1,7 @@
 module backend
 
 import src.ast
+import src.fcc
 
 // The expression and statement walk.
 //
@@ -34,6 +35,9 @@ fn (mut g AsmGen) classify_args(node &ast.Node) (int, []ArgClass) {
 	mut stack := 0
 	mut gp := 0
 	mut fp := 0
+	mut seen_stack := false
+	mut seen_stack_gp := false
+	mut seen_stack_fp := false
 	mut classes := []ArgClass{}
 
 	// A struct larger than two words is returned in memory, and the caller passes a
@@ -47,37 +51,88 @@ fn (mut g AsmGen) classify_args(node &ast.Node) (int, []ArgClass) {
 		mut c := ArgClass{}
 		if ty.kind == .struct_ || ty.kind == .union_ {
 			c.is_aggregate = true
+			if seen_stack_gp && seen_stack_fp {
+				c.by_stack = true
+				stack += align_to(ty.size, 8) / 8
+				classes << c
+				continue
+			}
 			if ty.size > 16 {
 				c.by_stack = true
 				stack += align_to(ty.size, 8) / 8
+				seen_stack = true
+				seen_stack_gp = true
+				seen_stack_fp = true
+				classes << c
+				continue
 			} else {
 				c.fp1 = has_flonum(ty, 0, 8, 0)
-				c.fp2 = has_flonum(ty, 8, 16, 0)
+				c.fp2 = if ty.size > 8 { has_flonum(ty, 8, 16, 8) } else { false }
 				// The registers have to be checked against the *cumulative* count, so a
 				// struct that would fit on its own can still not fit once the arguments
 				// before it have taken theirs.
-				if fp + b2i(c.fp1) + b2i(c.fp2) < fp_max
-					&& gp + b2i(!c.fp1) + b2i(!c.fp2) < gp_max {
-					fp += b2i(c.fp1) + b2i(c.fp2)
-					gp += b2i(!c.fp1) + b2i(!c.fp2)
+				if fp + b2i(c.fp1) + (if ty.size > 8 { b2i(c.fp2) } else { 0 }) < fp_max()
+					&& gp + b2i(!c.fp1) + (if ty.size > 8 { b2i(!c.fp2) } else { 0 }) < gp_max() {
+					fp += b2i(c.fp1) + (if ty.size > 8 { b2i(c.fp2) } else { 0 })
+					gp += b2i(!c.fp1) + (if ty.size > 8 { b2i(!c.fp2) } else { 0 })
 					// A variadic call mirrors every floating-point half into a
 					// general register, so an HFA consumes that many general
 					// slots even though the struct branch above did not count
 					// them (they are floats, not integers).
-					if node.func_ty != unsafe { nil } && node.func_ty.is_variadic {
-						gp += b2i(c.fp1) + b2i(c.fp2)
+					if node.func_ty != unsafe { nil } && node.func_ty.is_variadic && fcc.current_target().abi != .sysv_x64 {
+						gp += b2i(c.fp1) + (if ty.size > 8 { b2i(c.fp2) } else { 0 })
 					}
 				} else {
 					c.by_stack = true
 					stack += align_to(ty.size, 8) / 8
+					seen_stack = true
+					seen_stack_gp = true
+					seen_stack_fp = true
+					classes << c
+					continue
 				}
 			}
 		} else if ty.kind == .basic {
-			// A `long double` classifies as a `double` — 8 bytes, measured against
-			// tcc, which passes one exactly as it passes a `double`. The by-reference
-			// rule below used to apply here, for a sixteen-byte value that this
-			// target never had; it spilled the value and passed a pointer, which is
-			// what made `printf("%.15Lf\n", x)` read an address as a number.
+			if fcc.current_target().abi == .sysv_x64 {
+				// SysV: GP and XMM are independent.
+				if ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_ {
+					if seen_stack_fp {
+						c.by_stack = true
+						stack++
+						classes << c
+						continue
+					}
+					if fp >= fp_max() {
+						c.by_stack = true
+						stack++
+						seen_stack_fp = true
+						classes << c
+						continue
+					}
+					fp++
+				} else {
+					if seen_stack_gp {
+						c.by_stack = true
+						stack++
+						classes << c
+						continue
+					}
+					if gp >= gp_max() {
+						c.by_stack = true
+						stack++
+						seen_stack_gp = true
+						classes << c
+						continue
+					}
+					gp++
+				}
+			}
+			if seen_stack {
+				c.by_stack = true
+				stack++
+				classes << c
+				continue
+			}
 			if ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_ {
 				// [MS x64 3.2] A floating-point argument to a *variadic* function is
 				// passed in an SSE register **and** in the general register that its
@@ -90,28 +145,62 @@ fn (mut g AsmGen) classify_args(node &ast.Node) (int, []ArgClass) {
 				// gcc puts the format string in `%rcx`, 1.5 in `%xmm1` *and* `%rdx`,
 				// `"hi"` in `%r8`, 7 in `%r9`, and 2.5 in `%xmm0` *and* `32(%rsp)`.
 				if node.func_ty != unsafe { nil } && node.func_ty.is_variadic {
-					if gp >= gp_max {
+					if gp >= gp_max() {
 						c.by_stack = true
 						stack++
+						seen_stack = true
+						classes << c
+						continue
 					}
 					gp++
 				}
-				if fp >= fp_max {
+				if fp >= fp_max() {
 					c.by_stack = true
 					stack++
+					seen_stack = true
+					classes << c
+					continue
 				}
 				fp++
 			} else {
-				if gp >= gp_max {
+				if gp >= gp_max() {
 					c.by_stack = true
 					stack++
+					seen_stack = true
+					classes << c
+					continue
 				}
 				gp++
 			}
 		} else {
-			if gp >= gp_max {
+			if fcc.current_target().abi == .sysv_x64 {
+				if seen_stack_gp {
+					c.by_stack = true
+					stack++
+					classes << c
+					continue
+				}
+				if gp >= gp_max() {
+					c.by_stack = true
+					stack++
+					seen_stack_gp = true
+					classes << c
+					continue
+				}
+				gp++
+			}
+			if seen_stack {
 				c.by_stack = true
 				stack++
+				classes << c
+				continue
+			}
+			if gp >= gp_max() {
+				c.by_stack = true
+				stack++
+				seen_stack = true
+				classes << c
+				continue
 			}
 			gp++
 		}
@@ -410,19 +499,19 @@ fn (mut g AsmGen) store_fp(r int, offset int, sz int) {
 
 fn (mut g AsmGen) store_gp(r int, offset int, sz int) {
 	if sz == 1 {
-		g.line('  mov ${arg_regs8[r]}, ${offset}(%rbp)')
+		g.line('  mov ${arg_regs8()[r]}, ${offset}(%rbp)')
 	} else if sz == 2 {
-		g.line('  mov ${arg_regs16[r]}, ${offset}(%rbp)')
+		g.line('  mov ${arg_regs16()[r]}, ${offset}(%rbp)')
 	} else if sz == 4 {
-		g.line('  mov ${arg_regs32[r]}, ${offset}(%rbp)')
+		g.line('  mov ${arg_regs32()[r]}, ${offset}(%rbp)')
 	} else if sz == 8 {
-		g.line('  mov ${arg_regs[r]}, ${offset}(%rbp)')
+		g.line('  mov ${arg_regs()[r]}, ${offset}(%rbp)')
 	} else {
 		// A width that is not 1, 2, 4 or 8 is an aggregate, and its bytes come out of
 		// the register least significant first.
 		for i in 0 .. sz {
-			g.line('  mov ${arg_regs8[r]}, ${offset + i}(%rbp)')
-			g.line('  shr $8, ${arg_regs[r]}')
+			g.line('  mov ${arg_regs8()[r]}, ${offset + i}(%rbp)')
+			g.line('  shr $8, ${arg_regs()[r]}')
 		}
 	}
 }
@@ -789,13 +878,15 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 
 	_, classes := g.classify_args(node)
 	stack_args := g.push_args(node, classes)
-	g.gen_expr(node.lhs)
+	if !(fcc.current_target().abi == .sysv_x64 && node.lhs.kind == .var_ref) {
+		g.gen_expr(node.lhs)
+	}
 
 	mut gp := 0
 	mut fp := 0
 
 	if node.ret_buffer != unsafe { nil } && node.ty.size > 16 {
-		g.pop(arg_regs[gp])
+		g.pop(arg_regs()[gp])
 		gp++
 	}
 
@@ -810,25 +901,26 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 			if c.fp1 {
 				g.popf(fp)
 				// Variadic: mirror the float half into the general register too.
-				if is_variadic && gp < gp_max {
-					g.line('  movq %xmm${fp}, ${arg_regs_mirror[gp]}')
+				// (MS ABI only. SysV does not mirror; floats stay in XMM.)
+				if is_variadic && gp < gp_max() && fcc.current_target().abi != .sysv_x64 {
+					g.line('  movq %xmm${fp}, ${arg_regs_mirror()[gp]}')
 					gp++
 				}
 				fp++
 			} else {
-				g.pop(arg_regs[gp])
+				g.pop(arg_regs()[gp])
 				gp++
 			}
 			if ty.size > 8 {
 				if c.fp2 {
 					g.popf(fp)
-					if is_variadic && gp < gp_max {
-						g.line('  movq %xmm${fp}, ${arg_regs_mirror[gp]}')
+					if is_variadic && gp < gp_max() {
+						g.line('  movq %xmm${fp}, ${arg_regs_mirror()[gp]}')
 						gp++
 					}
 					fp++
 				} else {
-					g.pop(arg_regs[gp])
+					g.pop(arg_regs()[gp])
 					gp++
 				}
 			}
@@ -837,15 +929,15 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 		if ty.kind == .basic
 			&& (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_) {
 			is_variadic := node.func_ty != unsafe { nil } && node.func_ty.is_variadic
-			if !c.by_stack && fp < fp_max {
+			if !c.by_stack && fp < fp_max() {
 				g.popf(fp)
 			}
 			// [MS x64 3.2] A variadic callee walks only the integer register copies, so
 			// the value is also written into the general register that this argument's
 			// position selects.
 			//
-			// The register is `arg_regs[gp]`, the *position among all the arguments*, and
-			// not `arg_regs[fp]`, the position among the floating-point ones. Measured:
+			// The register is `arg_regs()[gp]`, the *position among all the arguments*, and
+			// not `arg_regs()[fp]`, the position among the floating-point ones. Measured:
 			// for `printf("a=%g b=%s c=%d", 3.5, "hi", 7)` gcc leaves the format string in
 			// `%rcx`, 3.5 in `%xmm0` *and* `%rdx`, `"hi"` in `%r8` and 7 in `%r9`.
 			//
@@ -859,40 +951,56 @@ fn (mut g AsmGen) gen_funcall(node &ast.Node) {
 			// `operand type mismatch for movsd` rather than anything about the ABI.
 			// A `float` is mirrored whole; the callee reads only its low 32 bits.
 			//
-			// `gp < gp_max` also covers the case where the argument went on the stack:
+			// `gp < gp_max()` also covers the case where the argument went on the stack:
 			// on a variadic call every argument advances `gp`, the integer ones in
 			// `classify_args` and the floating-point ones just above, so `gp` can never
-			// fall back below `gp_max` once it has passed it. An argument with no
+			// fall back below `gp_max()` once it has passed it. An argument with no
 			// general register left has no mirror to write, which is the same fact.
-			if is_variadic && gp < gp_max {
-				g.line('  movq %xmm${fp}, ${arg_regs_mirror[gp]}')
+			if is_variadic && gp < gp_max() && fcc.current_target().abi != .sysv_x64 {
+				g.line('  movq %xmm${fp}, ${arg_regs_mirror()[gp]}')
 				gp++
 			}
 			fp++
-		} else if !c.by_stack && gp < gp_max {
-			g.pop(arg_regs[gp])
+		} else if !c.by_stack && gp < gp_max() {
+			g.pop(arg_regs()[gp])
 			gp++
 		}
 	}
 
-	g.line('  mov %rax, %r10')
-	// [MS x64 2.2.5] The callee's home area is the last thing reserved, immediately
-	// before the `call`, because the argument values are still on the stack waiting to be
-	// popped into their registers and reserving below them would move `%rsp` out from
-	// under the `pop`s. gcc takes the same 32 bytes out of the prologue once instead;
-	// taking them out per call site costs one instruction and keeps the depth accounting
-	// local to the call.
-	//
-	// There is deliberately no `%al` here. The vector-register count is a psABI
-	// requirement for the callee's register save area and has no meaning in the Microsoft
-	// ABI, which has no such save area.
-	g.line('  sub $${shadow_space}, %rsp')
-	g.line('  call *%r10')
-	// A `long double` used to spill sixteen bytes here that had to be released
-	// alongside the shadow space. It no longer spills — it is eight bytes and
-	// travels as a `double` does — so there is nothing beyond `stack_args` to
-	// account for.
-	g.line('  add $${shadow_space + stack_args * 8}, %rsp')
+	// On System V, an undefined external symbol must be called through its PLT stub,
+	// which the assembler selects for a direct `call`. An indirect `call *%r10` against
+	// a PC-relative address of the symbol is not a valid relocation in a PIE.
+	if fcc.current_target().abi == .sysv_x64 && node.lhs.kind == .var_ref {
+		if node.func_ty != unsafe { nil } && node.func_ty.is_variadic {
+			// Count floating-point arguments that fit in XMM registers.
+			mut fp_count := 0
+			for i, arg in node.args {
+				ty := arg.ty
+				if ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_) {
+					fp_count++
+				} else if ty.kind == .struct_ || ty.kind == .union_ {
+					// HFA counts as multiple
+					if has_flonum(ty, 0, ty.size, 0) {
+						fp_count++
+						if ty.size > 8 { fp_count++ }
+					}
+				}
+			}
+			if fp_count > 8 { fp_count = 8 }
+			g.line('  mov $${fp_count}, %al')
+		} else {
+			g.line('  xor %eax, %eax')
+		}
+		g.line('  call ${node.lhs.var.name}')
+		if stack_args > 0 {
+			g.line('  add $${stack_args * 8}, %rsp')
+		}
+	} else {
+		g.line('  mov %rax, %r10')
+		g.line('  sub $${shadow_space()}, %rsp')
+		g.line('  call *%r10')
+		g.line('  add $${shadow_space() + stack_args * 8}, %rsp')
+	}
 	g.depth -= stack_args
 
 	// A narrow return type leaves the upper bits of %rax undefined and the next
@@ -1397,9 +1505,25 @@ fn (mut g AsmGen) emit_text(globals []&ast.Obj) {
 // The frame offset rather than the offset of the last named parameter matters. The
 // two agree whenever `last` arrived in a register, and disagree whenever it did not:
 // for `void f(int n, struct Big b, ...)` the by-address struct `b` lives above
-// `incoming_base`, so `&b + 8` is past the end of the arguments, while the home area
+// `incoming_base()`, so `&b + 8` is past the end of the arguments, while the home area
 // says slot two. gcc agrees with the second, measured as `ap - &a == 16`.
 fn (mut g AsmGen) gen_va_start(node &ast.Node) {
+	if fcc.current_target().abi == .sysv_x64 {
+		// SysV: va_list is a 24-byte struct. Write its four fields.
+		g.gen_addr(node.lhs) // %rax = &struct
+		g.line('  mov %rax, %r11') // keep &struct
+		// gp_offset
+		g.line('  movl $${g.current_fn.va_gp_count * 8}, (%r11)')
+		// fp_offset
+		g.line('  movl $${48 + g.current_fn.va_fp_count * 16}, 4(%r11)')
+		// overflow_arg_area
+		g.line('  lea ${incoming_base()}(%rbp), %r10')
+		g.line('  movq %r10, 8(%r11)')
+		// reg_save_area
+		g.line('  lea ${g.current_fn.va_reg_save_offset}(%rbp), %r10')
+		g.line('  movq %r10, 16(%r11)')
+		return
+	}
 	g.gen_addr(node.lhs) // %rax = &ap
 	g.line('  lea ${g.current_fn.va_start_offset}(%rbp), %r10')
 	g.line('  mov %r10, (%rax)')
@@ -1433,7 +1557,85 @@ fn (mut g AsmGen) gen_va_start(node &ast.Node) {
 // earlier version of this function pushed its result, and every variadic function
 // failed its end-of-body check with `left N values on the stack` — one per `va_arg`,
 // so `mixed` reported three. The count was right and the code was wrong.
+// gen_va_arg_sysv implements __builtin_va_arg for the System V ABI.
+//
+// va_list is a 24-byte struct: { gp_offset, fp_offset, overflow_arg_area, reg_save_area }.
+// For a GP-class type, read from reg_save_area if gp_offset < 48, else overflow.
+// For an FP-class type, read from reg_save_area if fp_offset < 176, else overflow.
+fn (mut g AsmGen) gen_va_arg_sysv(node &ast.Node) {
+	ty := node.ty
+	is_fp := ty.kind == .basic && (ty.basic == .float_ || ty.basic == .double_ || ty.basic == .ldouble_)
+	is_by_ref := (ty.kind == .struct_ || ty.kind == .union_) && ty.size > 16
+
+	g.gen_addr(node.lhs) // %rax = &struct
+	g.line('  mov %rax, %r11') // %r11 = &struct
+
+	if is_fp {
+		lbl := g.next_label()
+		g.line('  movl 4(%r11), %ecx') // %ecx = fp_offset
+		g.line('  cmpl $176, %ecx')
+		g.line('  jge .L.va.sysv.overflow.${lbl}')
+		g.line('  movq 16(%r11), %rdx') // %rdx = reg_save_area
+		g.line('  addq %rcx, %rdx') // %rdx = reg_save_area + fp_offset
+		if ty.basic == .float_ {
+			g.line('  movss (%rdx), %xmm0')
+			g.line('  addl $8, 4(%r11)')
+		} else {
+			g.line('  movsd (%rdx), %xmm0')
+			g.line('  addl $16, 4(%r11)')
+		}
+		g.line('  jmp .L.va.sysv.done.${lbl}')
+		g.line('.L.va.sysv.overflow.${lbl}:')
+		g.line('  movq 8(%r11), %rdx') // %rdx = overflow_arg_area
+		if ty.basic == .float_ {
+			g.line('  movss (%rdx), %xmm0')
+		} else {
+			g.line('  movsd (%rdx), %xmm0')
+		}
+		g.line('  addq $8, 8(%r11)')
+		g.line('.L.va.sysv.done.${lbl}:')
+		return
+	}
+
+	if is_by_ref {
+		// Memory class: read pointer from overflow_arg_area
+		g.line('  movq 8(%r11), %rdx') // %rdx = overflow_arg_area
+		g.line('  movq (%rdx), %rax') // %rax = pointer to object
+		g.line('  addq $8, 8(%r11)') // advance
+		return
+	}
+
+	// GP class (int, pointer, small struct)
+	mut stride := 8
+	if (ty.kind == .struct_ || ty.kind == .union_) && !is_by_ref && ty.size > 8 {
+		stride = align_to(ty.size, 8)
+	}
+	lbl := g.next_label()
+	g.line('  movl (%r11), %ecx') // %ecx = gp_offset
+	g.line('  cmpl $48, %ecx')
+	g.line('  jge .L.va.sysv.gpoverflow.${lbl}')
+	g.line('  movq 16(%r11), %rdx') // %rdx = reg_save_area
+	g.line('  addq %rcx, %rdx') // %rdx = reg_save_area + gp_offset
+	g.line('  movq %rdx, %rax') // %rax = slot address (struct or scalar)
+	g.line('  addl $${stride}, (%r11)')
+	g.line('  jmp .L.va.sysv.gpdone.${lbl}')
+	g.line('.L.va.sysv.gpoverflow.${lbl}:')
+	g.line('  movq 8(%r11), %rdx') // %rdx = overflow_arg_area
+	g.line('  movq %rdx, %rax') // %rax = slot address
+	g.line('  addq $${stride}, 8(%r11)')
+	g.line('.L.va.sysv.gpdone.${lbl}:')
+	if is_by_ref {
+		g.line('  movq (%rax), %rax')
+	} else if !(ty.kind == .struct_ || ty.kind == .union_) || ty.size <= 8 {
+		g.load(ty)
+	}
+}
+
 fn (mut g AsmGen) gen_va_arg(node &ast.Node) {
+	if fcc.current_target().abi == .sysv_x64 {
+		g.gen_va_arg_sysv(node)
+		return
+	}
 	ty := node.ty
 	sz := ty.size
 	// A `long double` is eight bytes and travels as a `double` does, so it is read
@@ -1500,42 +1702,68 @@ fn (mut g AsmGen) gen_va_arg(node &ast.Node) {
 	g.line('  mov %rax, %r11') // %r11 = &ap, kept across the load
 	g.line('  mov (%r11), %rax') // %rax = ap
 
-	// A struct that does not fit in the remaining argument registers is placed
-	// on the stack by the caller, which leaves the leftover register slots
-	// unused. va_arg has to skip those, otherwise it reads a leftover register
-	// as the first slot of the value. consumed is (ap - va_start_base) / 8.
+	// Whether an argument that exactly fills the remaining registers goes in
+	// registers. The caller puts a scalar there (`gp < max_size`, no per-arg
+	// count needed) and a small HFA there when it fits its float registers —
+	// and anything else, an int-halved struct or a >16-byte HFA, on the stack,
+	// leaving the leftover register slots unused. va_arg has to skip those,
+	// otherwise it reads a leftover register as the first slot of the value.
+	// consumed is (ap - va_start_base) / 8.
+	//
+	// So an exact fit skips unless the value is a scalar or a homogeneous
+	// float aggregate of at most 16 bytes. That HFA carve-out is sound because
+	// the walk always starts past an int-like named argument (`format`, `n`),
+	// which bounds the caller's float count below what would overflow the
+	// remaining registers — measured, not assumed: with `jg` here (skip on
+	// exact fit) every mixed HFA sequence in 00204 read zeros past its last
+	// register argument, and with unconditional `jge` the int-struct and
+	// >16-byte HFA cases regressed instead. A named float parameter, or a
+	// mixed int/float aggregate, would need the caller's float count tracked
+	// per call; neither occurs in the corpus.
+	mut exact_in_regs := ty.kind != .struct_ && ty.kind != .union_
+	if is_hfa && ty.size <= 16 {
+		exact_in_regs = true
+	}
 	skip_label := g.next_label()
 	g.line('  mov %rax, %rdx')
-	g.line('  sub $16, %rdx')
+	g.line('  lea 16(%rbp), %r10')
+	g.line('  sub %r10, %rdx')
 	g.line('  shr $3, %rdx') // %rdx = consumed slots so far
+	g.line('  mov %rdx, %r10') // %r10 = consumed (saved)
 	g.line('  mov $4, %rcx')
 	g.line('  sub %rdx, %rcx') // %rcx = remaining register slots
 	g.line('  cmp $${slots_per_arg}, %rcx')
-	g.line('  jge .L.va_arg.no_skip.${skip_label}')
+	if exact_in_regs {
+		g.line('  jge .L.va_arg.no_skip.${skip_label}')
+	} else {
+		g.line('  jg .L.va_arg.no_skip.${skip_label}')
+	}
 	g.line('  cmp $4, %rdx')
 	g.line('  jge .L.va_arg.no_skip.${skip_label}')
 	g.line('  shl $3, %rcx') // remaining * 8
-	g.line('  add %rcx, %rax') // ap += remaining * 8
-	g.line('  mov %rax, (%r11)') // update stored ap
+	g.line('  add %rcx, %rax') // %rax = stack position
 	g.line('.L.va_arg.no_skip.${skip_label}:')
+	g.line('  mov %rax, %r9') // %r9 = read position
+	// Advance stored ap from the READ position by the arg's slot count.
+	advance := slots_per_arg * 8
+	g.line('  mov %r9, %rcx')
+	g.line('  add $${advance}, %rcx')
+	g.line('  mov %rcx, (%r11)') // update stored ap
+	g.line('  mov %r9, %rax') // %rax = read position
 
 	if by_ref {
 		g.line('  mov (%rax), %rax') // the slot holds the address of the object
-		g.line('  addq $8, (%r11)')
 		return
 	}
 
 	if sz > 8 {
-		// Two eightbytes passed by value in a pair of registers, so two consecutive
-		// slots and a stride of sixteen. The result is the address of the pair, which
-		// is what an aggregate's value is here, so `%rax` already holds it.
-		g.line('  addq $16, (%r11)')
+		// An aggregate passed by value in consecutive slots. %rax already holds
+		// the address of the first slot; stored ap already advanced above.
 		return
 	}
 
 	// The ordinary case: a scalar, or a one-slot aggregate, in one slot.
 	g.load(ty)
-	g.line('  addq $8, (%r11)')
 }
 
 // spill_va_regs writes the four argument registers into the home slots a variadic
@@ -1545,7 +1773,7 @@ fn (mut g AsmGen) gen_va_arg(node &ast.Node) {
 // no register save area and no `gp_offset`/`fp_offset` pair: the home slots at
 // 16/24/32/40(`%rbp`) already are the caller's shadow area, so writing the
 // registers there makes them contiguous with the stack arguments that follow at
-// `incoming_base`, and a `va_list` is a plain pointer into that run.
+// `incoming_base()`, and a `va_list` is a plain pointer into that run.
 //
 // Measured from `gcc -S` for `int vsum(int n, ...)`:
 //
@@ -1560,8 +1788,19 @@ fn (mut g AsmGen) gen_va_arg(node &ast.Node) {
 // parameter spill, and it is why `spill_params` cannot be reused for it — that one
 // walks `fun.params` and stops at the last one.
 fn (mut g AsmGen) spill_va_regs() {
-	for i in 0 .. gp_max {
-		g.line('  movq ${arg_regs[i]}, ${va_start_offset + i * 8}(%rbp)')
+	if fcc.current_target().abi == .sysv_x64 {
+		// Save all 6 GP registers into reg_save_area (offset 0..48).
+		for i in 0 .. 6 {
+			g.line('  movq ${arg_regs()[i]}, ${g.current_fn.va_reg_save_offset + i * 8}(%rbp)')
+		}
+		// Save all 8 XMM registers into reg_save_area (offset 48..176).
+		for i in 0 .. 8 {
+			g.line('  movdqa %xmm${i}, ${g.current_fn.va_reg_save_offset + 48 + i * 16}(%rbp)')
+		}
+	} else {
+		for i in 0 .. gp_max() {
+			g.line('  movq ${arg_regs()[i]}, ${va_start_offset() + i * 8}(%rbp)')
+		}
 	}
 }
 

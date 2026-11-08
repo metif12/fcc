@@ -1,4 +1,5 @@
 module fcc
+
 import strconv
 import ast
 
@@ -164,6 +165,7 @@ pub fn tokenize(src string) []ast.Token {
 pub fn tokenize_file(src string, file &ast.File) []ast.Token {
 	return tokenize_with(src, true, file)
 }
+
 // tokenize_fragment is `tokenize` for text that is not a whole file: a macro body,
 // a directive's argument text, or a `#if` expression.
 //
