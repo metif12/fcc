@@ -111,9 +111,12 @@ mut:
 // the preprocessor already has one of those in this module.
 pub struct ParseResult {
 pub mut:
-	globals  []&ast.Obj
-	errors   []string
-	warnings []string
+	globals   []&ast.Obj
+	errors    []string
+	warnings  []string
+	// typedefs maps a typedef name to its type, so consumers (such as --to-v)
+	// can render named aliases and named anonymous structs.
+	typedefs  map[string]&ast.Type
 }
 
 // Parser holds the state of one parse.
@@ -186,10 +189,19 @@ pub fn parse_tokens(toks []ast.Token, path string, packs []PackEvent) ParseResul
 	}
 	p.translation_unit()
 	p.scan_globals()
+	mut typedefs := map[string]&ast.Type{}
+	for scope in p.scopes {
+		for name, sc in scope.vars {
+			if td := sc.type_def {
+				typedefs[name] = td
+			}
+		}
+	}
 	return ParseResult{
-		globals:  p.globals
-		errors:   p.errors
-		warnings: p.warnings
+		globals:   p.globals
+		errors:    p.errors
+		warnings:  p.warnings
+		typedefs:  typedefs
 	}
 }
 

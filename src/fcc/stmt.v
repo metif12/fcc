@@ -623,7 +623,17 @@ fn (mut p Parser) to_assign(binary &ast.Node) &ast.Node {
 	}
 
 	if target.kind == .member {
-		tmp := p.new_lvar('', pointer_to(target.ty), tok.line.disp_line)
+		mut tmp_name := 'tmp'
+	if target.kind == .var_ref && target.var != unsafe { nil } && target.var.name != '' {
+		tmp_name = 'tmp_' + target.var.name
+	} else if target.kind == .member {
+		if m := target.member {
+			if m.name != '' {
+				tmp_name = 'tmp_' + m.name
+			}
+		}
+	}
+	tmp := p.new_lvar(tmp_name, pointer_to(target.ty), tok.line.disp_line)
 
 		mut take := p.new_binary(.assign, p.new_var_node(tmp, tok), p.new_unary(.addr,
 			target.lhs, tok), tok)
@@ -653,7 +663,17 @@ fn (mut p Parser) to_assign(binary &ast.Node) &ast.Node {
 	// taken of. Using `lhs` here instead is what produces a backend error for every
 	// `x += 1`: the conversion wraps the target in a `.cast`, and an address of a cast
 	// is not an lvalue.
-	tmp := p.new_lvar('', pointer_to(target.ty), tok.line.disp_line)
+	mut tmp_name := 'tmp'
+	if target.kind == .var_ref && target.var != unsafe { nil } && target.var.name != '' {
+		tmp_name = 'tmp_' + target.var.name
+	} else if target.kind == .member {
+		if m := target.member {
+			if m.name != '' {
+				tmp_name = 'tmp_' + m.name
+			}
+		}
+	}
+	tmp := p.new_lvar(tmp_name, pointer_to(target.ty), tok.line.disp_line)
 	mut take := p.new_binary(.assign, p.new_var_node(tmp, tok), p.new_unary(.addr,
 		target, tok), tok)
 	add_type(mut take)
