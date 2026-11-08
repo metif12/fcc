@@ -1303,7 +1303,9 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 		.assign { return v_expr(n) + ';' }
 		.return_ {
 			if in_main && n.lhs != unsafe { nil } {
-				return v_expr(n.lhs) + ';'
+				// V's main returns void, so a value-returning `return` becomes
+				// an explicit exit to preserve the process exit code.
+				return 'exit(' + v_expr(n.lhs) + ')'
 			}
 			if n.lhs != unsafe { nil } {
 				return 'return ' + v_expr(n.lhs)
