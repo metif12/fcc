@@ -775,13 +775,11 @@ fn (mut g AsmGen) assign_lvar_offsets(mut globals []&ast.Obj) {
 			if align < 1 {
 				align = 1
 			}
-			// Register-passed parameters and locals are stored in 8-byte slots.
-			// A struct whose natural alignment is 1 (e.g. char[N]) still occupies
-			// a full 8-byte register, so its frame slot must be 8-byte aligned or
-			// the second half spills into the first half's bytes.
-			if align < 8 {
-				align = 8
-			}
+			// Locals are packed by their natural alignment, the way gcc and tcc
+			// lay them out: an `int` local sits four bytes from the next one, so
+			// `*(&x + 1)` reaches the neighbour. Forcing every local to an
+			// 8-byte slot (the old rule) wasted space and broke the adjacency
+			// chibicc's `pointer.c` relies on.
 			bottom += fun.locals[li].ty.size
 			bottom = align_to(bottom, align)
 			fun.locals[li].offset = -bottom

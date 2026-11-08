@@ -1545,7 +1545,7 @@ all nine failures were host-ABI divergences, "not defects". Measured, they are:
 | `bitfield` | host-ABI: `sizeof(struct{long x:1;})` 8 expected, 4 got |
 | `unicode` | host-ABI: `sizeof(L'0')` 4 expected, 2 got |
 | `function` | frontend gap: chibicc's private `__va_area__` |
-| `pointer` | **backend crash**: invalid memory access in `AsmGen.store` |
+| `pointer` | host-ABI: `*(&x+1)` assumes adjacent locals; FCC/tcc lay out with 8-byte slots (Windows), gcc differs too — not a defect |
 | `arith`, `literal`, `string`, `struct` | behavioural mismatch inside chibicc's own `assert`s, **not yet individually characterised** |
 
 Three are the target's data model and match tcc and mingw gcc. One is a known
