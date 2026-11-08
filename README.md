@@ -231,6 +231,16 @@ not recognise would make V fall back to `cc` instead of surfacing what went wron
 So: `fcc.exe` builds, `fcc -S` compiles, `fcc: ` is what the driver prints — and
 `tcc: ` is what a compiler error looks like from V's side.
 
+## C to V translation (`--to-v`)
+
+fcc ships a best-effort C→V translator on the legacy path: `fcc --to-v file.c`
+prints V source (or `-o out.v` writes it). It reuses the C front end and emits
+structs, enums, typedefs, function signatures, globals, and statement/expression
+bodies where they map cleanly; constructs V has no equivalent for (unions,
+bitfields, flexible arrays, `goto`/labels, VLA, K&R parameters, statement
+expressions) are left as comments rather than dropped. The output is a readable
+port, not a guaranteed compilable one — review before use.
+
 ## Roadmap
 
 - **Phase 0** — contract capture. Done: `docs/CONTRACT.md` pinned by 12 tests.
