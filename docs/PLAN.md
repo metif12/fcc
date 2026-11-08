@@ -1556,10 +1556,11 @@ open item, not the count.
 relocations, initializers, bitfields, the full expression and statement walk,
 variadic calls across the boundary into mingw's C library, struct returns of
 every size, floating point including `long double`, VLAs, all 19 standard
-headers. What does not: ten c-testsuite frontend refusals (incomplete `enum`,
-multi-declarators, abstract declarators, four `expected an expression` shapes,
-`undefined variable` from `##`, `#line` with a macro argument) and one compiler
-crash (00204).
+headers. What does not: one compiler crash (00204) is fixed; the remaining c-testsuite
+frontend refusals are unimplemented language features. Cross-compilation to
+`x86_64-linux` (System V) works; `aarch64-linux` is recognised by the front
+end and refused at codegen pending a backend. `_Atomic` integer compound
+assignment and `__asm__` register constraints are now supported.
 
 The number that matters for replacing tcc is not 209/220. It is that the
 percentage counts programs which *agree*, and says nothing about how often fcc is
