@@ -231,7 +231,26 @@ not recognise would make V fall back to `cc` instead of surfacing what went wron
 So: `fcc.exe` builds, `fcc -S` compiles, `fcc: ` is what the driver prints — and
 `tcc: ` is what a compiler error looks like from V's side.
 
-## C to V translation (`--to-v`)
+## C to V translation (`--to-v` and `--to-v-bindings`)
+
+fcc ships two C→V modes on the legacy path:
+
+- `fcc --to-v file.c` — best-effort translator: prints V source (or `-o out.v`
+  writes it). It reuses the C front end and emits structs, enums, typedefs,
+  function signatures, globals, and statement/expression bodies where they map
+  cleanly; constructs V has no equivalent for (unions, bitfields, flexible
+  arrays, `goto`/labels, VLA, K&R parameters, statement expressions) are left
+  as comments rather than dropped. The output is a readable port, not a
+  guaranteed compilable one — review before use.
+- `fcc --to-v-bindings file.c` — emits c2v-style V bindings to the original C
+  instead of translating its logic: `@[c_extern] __global C.x T` globals and
+  `fn C.foo(...)` extern declarations, plus the struct/union types they need.
+  The output compiles by construction (it calls into the real C). Pair with
+  `fcc -c -o file.o file.c` and link the object: see the workflow in
+  `docs/PLAN.md`.
+
+The two modes make fcc strictly more capable than vlang/c2v, with no clang
+dependency." oldString="## C to V translation (`--to-v`)
 
 fcc ships a best-effort C→V translator on the legacy path: `fcc --to-v file.c`
 prints V source (or `-o out.v` writes it). It reuses the C front end and emits
@@ -239,7 +258,7 @@ structs, enums, typedefs, function signatures, globals, and statement/expression
 bodies where they map cleanly; constructs V has no equivalent for (unions,
 bitfields, flexible arrays, `goto`/labels, VLA, K&R parameters, statement
 expressions) are left as comments rather than dropped. The output is a readable
-port, not a guaranteed compilable one — review before use.
+port, not a guaranteed compilable one — review before use." path="C:\Users\MR\Projects\vcc/README.md
 
 ## Roadmap
 
