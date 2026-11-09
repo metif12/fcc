@@ -403,7 +403,7 @@ fn (mut p Parser) asm_stmt() &ast.Node {
 	// `volatile` is a promise the optimiser has not been written to keep, so it is read
 	// and discarded: an `__asm__` in this generator is never removed and never
 	// reordered relative to the statements around it either way.
-	for p.at('volatile') || p.at('__volatile__') {
+	for p.at('volatile') || p.at('__volatile__') || p.at('inline') || p.at('__inline__') || p.at('__inline') {
 		p.pos++
 	}
 	p.expect('(')
