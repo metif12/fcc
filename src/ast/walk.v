@@ -139,6 +139,32 @@ mut:
 	visit(n &Node) bool
 }
 
+// MutVisitor is not provided on purpose.
+//
+// Reads go through `Visitor`/`walk`. A mutating twin would need the node as
+// a `mut` interface parameter, and interface dispatch with a mutable
+// reference parameter segfaults on this V build (measured, same family as
+// the dropped closure captures above). Rewrites instead collect first and
+// mutate after: `collect_all` gathers every node below a root into a plain
+// slice, and a `for mut` loop — the same pattern `resolve_goto_labels` uses —
+// edits them. No interface, no crash.
+pub fn collect_all(n &Node, mut out []&Node) {
+	if n == unsafe { nil } {
+		return
+	}
+	out << n
+	for c in children(n) {
+		collect_all(c, mut out)
+	}
+}
+
+// collect_roots gathers every node below every root, in order.
+pub fn collect_roots(nodes []&Node, mut out []&Node) {
+	for n in nodes {
+		collect_all(n, mut out)
+	}
+}
+
 // walk visits n and every node below it, preorder.
 //
 // Generic tools should walk: the front end's passes each recurse by hand,

@@ -49,15 +49,28 @@ fn cmd_build(args []string, cfg core.FccConfig) int {
 		eprintln('fcc build: no tasks (add build.blip or [task.*] in fcc.toml, or build.v)')
 		return 1
 	}
+	if '--help' in args || '-h' in args {
+		println('usage: fcc build [task...] [--force|-f]')
+		println('tasks:')
+		mut names := cfg.tasks.keys()
+		names.sort()
+		for name in names {
+			t := cfg.tasks[name]
+			desc := if t.desc != '' { '  ' + t.desc } else { '' }
+			println('  ${name}${desc}')
+		}
+		return 0
+	}
+	force := '--force' in args || '-f' in args
 	targets := args.filter(!it.starts_with('-'))
-	core.run_tasks(cfg.tasks, targets, fn (run string) int {
+	core.run_tasks_forced(cfg.tasks, targets, fn (run string) int {
 		if run == '' {
 			return 0
 		}
 		r := os.execute(run)
 		print(r.output)
 		return r.exit_code
-	}) or {
+	}, force) or {
 		eprintln(err.msg())
 		return 1
 	}

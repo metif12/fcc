@@ -76,9 +76,12 @@ What `src/ast` gives you, and where each idea comes from:
 - **Categories** (`NodeKind.class/is_expr/is_stmt`): Go splits nodes into
   `Expr`/`Stmt` interfaces; here declarations are `Obj`, so two classes cover
   the set. Generic tools dispatch on category instead of listing sixty kinds.
-- **Traversal** (`children`/`walk`/`walk_all`/`count_kind`): Go's
-  `ast.Inspect`. The front end's passes recurse by hand; plugins should walk.
-  Note `walk` takes a `Visitor` interface, not a callback — this toolchain
+- **Traversal** (`children`/`walk`/`walk_all`/`count_kind`,
+  `collect_all`/`collect_roots`): Go's `ast.Inspect`. The front end's passes
+  recurse by hand; plugins should walk. Rewrites collect first and edit after
+  (`for mut` over the slice — the `resolve_goto_labels` pattern), because a
+  mutating visitor interface segfaults on this toolchain, same family as the
+  dropped captures. Note `walk` takes a `Visitor` interface, not a callback — this toolchain
   silently drops closure captures coerced to `fn` parameters, so a callback
   API would compile and visit nothing. `KindCounter`/`count_kind` show the
   pattern for stateful visits.
@@ -123,13 +126,17 @@ Hello World!
 ```
 
 `fcc -S`, `--dump-ast` and mixed inputs (`fcc -c a.c b.bf`) all compose
-through the same pipeline (subject to the multi-file `.L` limit below),
-because the driver diverts any input a non-default plugin claims into
-`core.run_pipeline` (see `pipeline_emit_for` in `src/driver/driver.v`).
-Raw-text modes (`-E`, `--dump-tokens`) and `--to-v` stay on the legacy path:
-they work on file bytes, not loaded inputs. The pipeline always emits
-natively; `--extern-as` is a legacy-path hatch. Disable it without touching
-code:
+through the same pipeline, because the driver diverts any input a non-default
+plugin claims into `core.run_pipeline` (see `pipeline_emit_for` in
+`src/driver/driver.v`). Several inputs — in one language or several — link
+into one output: after loading, `core.dedupe_generated_names` qualifies every
+compiler-generated name past the first unit (`.L..1` → `.L..1.u1`, flow
+labels alike), so concatenation neither collides nor silently merges. Unit 0
+keeps pristine spelling, so the first unit of a multi-input build is
+byte-identical to building it alone. Raw-text modes (`-E`, `--dump-tokens`)
+and `--to-v` stay on the legacy path: they work on file bytes, not loaded
+inputs. The pipeline always emits natively; `--extern-as` is a legacy-path
+hatch. Disable it without touching code:
 
 ```toml
 [plugin."example-bf-input"]
@@ -141,10 +148,6 @@ Known limitations, all shared with (not introduced by) this plugin:
 - Bracket errors name the `.bf` file/line/column; errors from the generated
   C would name generated lines (none occur — the generator only emits shapes
   the endtoend corpus covers).
-- Compiling several string-carrying files in one `-c` invocation fails with
-  `duplicate label ".L..1"`: the backend numbers `.L` labels per translation
-  unit, and concatenation collides. The legacy C path fails identically
-  (GAS reports the same redefinition), so this is parity, not a regression.
 
 ## CLI extensibility (no recompile)
 
@@ -206,11 +209,33 @@ blip is TOML-compatible with sugar: `task "name" { ... }` desugars to
 ## Build files: build.v / build.blip (like build.zig)
 
 - `build.blip` / `build.toml`: declarative tasks (`task "x" { run, depends,
-  inputs }`). `fcc build [task]` runs deps first (cycle-checked).
+  inputs, outputs }`). `fcc build [task]` runs deps first (cycle-checked).
   Tasks from `fcc.toml [task.*]` merge with `build.*` (build wins).
+- A task that names `outputs` is skipped when every output exists and is
+  newer than every input — build.zig's up-to-date check, so unchanged
+  rebuilds print `task x (up to date)` and do nothing. Tasks without outputs
+  always run. `fcc build --force` (or `-f`) bypasses the check.
 - `build.v`: programmatic build importing only `os` + shelling to `fcc`
   (see `examples/build.v`). When `build.v` exists and no `build.blip` does,
   `fcc build` delegates to `v -enable-globals run build.v`.
+- `fcc build --help` lists tasks with their `desc`.
+
+Honest limits vs build.zig: freshness is mtime-based, not content-hash —
+editing a file's bytes back and forth still rebuilds, and changing a task's
+`run` line does not invalidate its outputs (use `--force` after editing
+commands). There is no sandboxing, no parallel task execution, and no
+built-in `run`/`test` step kinds: every step is a shell line. What it does
+cover is the loop that matters daily: declare inputs and outputs once, and
+unchanged rebuilds become no-ops.
+
+```blip
+task "build" {
+  inputs = ["main.c"]
+  outputs = ["main.s"]
+  run = "fcc -S -o main.s main.c"
+  depends = []
+}
+```
 
 `fcc init` writes starters; `fcc init --blip` writes the blip variants.
 

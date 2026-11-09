@@ -12,6 +12,9 @@ pub fn run_pipeline(mut ctx PipelineContext, input_names []string) ! {
 		p.load(path, mut ctx)!
 	}
 	ctx.inputs = input_names
+	// Several inputs share one namespace for generated names; qualify past
+	// the first unit before hooks or codegen see them.
+	dedupe_generated_names(mut ctx)
 	run_hooks(.post_parse, mut ctx)!
 	run_hooks(.pre_codegen, mut ctx)!
 	out := find_output(ctx.emit) or { return error('no output plugin for format "${ctx.emit}"') }

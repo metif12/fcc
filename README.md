@@ -53,7 +53,7 @@ ship with it.
   failures characterised (host-ABI divergences, chibicc's private
   `__va_area__`, and a few uncharacterised mismatches) rather than papered
   over. Open items are tracked per case in `docs/PLAN.md`.
-- `v test .`: 18 of 18, on stock V and on the local build.
+- `v test .`: 19 of 19, on stock V and on the local build.
 - CI builds and runs the suite on stock V. Build is green.
 
 ## What "plugin-able" means here
@@ -180,6 +180,7 @@ hello world
 count 1
 count 2
 count 3
+$ fcc -c -o mixed.o lib.c helper.bf   # mixed languages, one output
 ```
 
 No recompile is needed for the next language: any executable becomes an input

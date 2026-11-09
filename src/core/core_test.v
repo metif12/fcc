@@ -1,5 +1,7 @@
 module core
 
+import os
+
 fn test_blip_desugar_task_block() {
 	blip := 'task "build" {\n  run = "fcc"\n}\n'
 	out := desugar_blip(blip)
@@ -227,4 +229,48 @@ fn test_dispatch_runs_config_command() {
 	assert dispatch_verb(['missing'], cfg) == -1
 	reset_registries()
 	reset_commands()
+}
+
+__global build_test_ran []string
+
+fn build_test_runner(run string) int {
+	build_test_ran << run
+	return 0
+}
+
+fn test_up_to_date_skips_fresh_tasks() {
+	dir := os.join_path(os.temp_dir(), 'fcc_build_test')
+	os.mkdir_all(dir) or { panic(err.msg()) }
+	inp := os.join_path(dir, 'in.c')
+	out := os.join_path(dir, 'out.o')
+	os.write_file(inp, 'int x;') or { panic(err.msg()) }
+	os.write_file(out, 'obj') or { panic(err.msg()) }
+	// Output newer than input: fresh.
+	os.utime(inp, 1000000, 1000000) or { panic(err.msg()) }
+	os.utime(out, 2000000, 2000000) or { panic(err.msg()) }
+	tasks := {
+		'build': TaskDef{
+			inputs:  [inp]
+			outputs: [out]
+			run:     'build-it'
+		}
+	}
+	build_test_ran = []string{}
+	run_tasks(tasks, ['build'], build_test_runner) or { panic(err.msg()) }
+	assert build_test_ran == []
+	// Input newer than output: stale, runs.
+	os.utime(inp, 3000000, 3000000) or { panic(err.msg()) }
+	run_tasks(tasks, ['build'], build_test_runner) or { panic(err.msg()) }
+	assert build_test_ran == ['build-it']
+	// Forced even when fresh.
+	build_test_ran = []string{}
+	os.utime(inp, 1000000, 1000000) or { panic(err.msg()) }
+	run_tasks_forced(tasks, ['build'], build_test_runner, true) or { panic(err.msg()) }
+	assert build_test_ran == ['build-it']
+	// Missing output: runs.
+	build_test_ran = []string{}
+	os.rm(out) or { panic(err.msg()) }
+	run_tasks(tasks, ['build'], build_test_runner) or { panic(err.msg()) }
+	assert build_test_ran == ['build-it']
+	os.rm(inp) or {}
 }

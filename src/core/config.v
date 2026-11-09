@@ -11,6 +11,7 @@ import toml
 pub struct TaskDef {
 pub mut:
 	inputs  []string
+	outputs []string
 	run     string
 	depends []string
 	desc    string
@@ -131,12 +132,13 @@ pub fn parse_config_text(text string, source string) !FccConfig {
 	c.libs = doc_str_array(doc, 'build.libs', doc_str_array(doc, 'libs', []string{}))
 	c.verbose = doc_bool(doc, 'build.verbose', doc_bool(doc, 'verbose', false))
 	c.disabled = doc_str_array(doc, 'plugins.disabled', doc_str_array(doc, 'disabled', []string{}))
-	// tasks: [task."name"] with inputs/run/depends/desc
+	// tasks: [task."name"] with inputs/outputs/run/depends/desc
 	tnames := doc_sub_tables(doc, 'task')
 	for tname in tnames {
 		base := 'task.' + dotted(tname)
 		c.tasks[tname] = TaskDef{
 			inputs:  doc_str_array(doc, base + '.inputs', []string{})
+			outputs: doc_str_array(doc, base + '.outputs', []string{})
 			run:     doc_string(doc, base + '.run', doc_string(doc, base + '.command', ''))
 			depends: doc_str_array(doc, base + '.depends', []string{})
 			desc:    doc_string(doc, base + '.desc', '')

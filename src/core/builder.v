@@ -29,12 +29,22 @@ pub fn find_build_file(dir string) string {
 // run_tasks executes tasks in dependency order (DFS, cycle-checked).
 // runner maps a task's `run` string to an exit code; the default runner
 // re-enters the fcc CLI dispatcher so `run = "compile ..."` just works.
+//
+// A task that names `outputs` is skipped when every output exists and is
+// newer than every input — build.zig's up-to-date check, so unchanged
+// rebuilds do nothing. Tasks without outputs always run. `force` (from
+// `fcc build --force`) disables the check.
 pub fn run_tasks(tasks map[string]TaskDef, targets []string, runner fn (run string) int) ! {
+	run_tasks_forced(tasks, targets, runner, false)!
+}
+
+// run_tasks_forced is run_tasks with an explicit up-to-date bypass.
+pub fn run_tasks_forced(tasks map[string]TaskDef, targets []string, runner fn (run string) int, force bool) ! {
 	mut done := map[string]bool{}
 	mut stack := map[string]bool{}
 	wants := if targets.len == 0 { default_target(tasks) } else { targets }
 	for t in wants {
-		run_task(tasks, t, runner, mut done, mut stack)!
+		run_task(tasks, t, runner, mut done, mut stack, force)!
 	}
 }
 
@@ -50,7 +60,7 @@ fn default_target(tasks map[string]TaskDef) []string {
 	return if keys.len > 0 { [keys[0]] } else { []string{} }
 }
 
-fn run_task(tasks map[string]TaskDef, name string, runner fn (run string) int, mut done map[string]bool, mut stack map[string]bool) ! {
+fn run_task(tasks map[string]TaskDef, name string, runner fn (run string) int, mut done map[string]bool, mut stack map[string]bool, force bool) ! {
 	if done[name] {
 		return
 	}
@@ -60,7 +70,13 @@ fn run_task(tasks map[string]TaskDef, name string, runner fn (run string) int, m
 	t := tasks[name] or { return error('build: unknown task "${name}"') }
 	stack[name] = true
 	for d in t.depends {
-		run_task(tasks, d, runner, mut done, mut stack)!
+		run_task(tasks, d, runner, mut done, mut stack, force)!
+	}
+	if !force && is_up_to_date(t) {
+		println('task ${name} (up to date)')
+		done[name] = true
+		stack.delete(name)
+		return
 	}
 	println('task ${name}')
 	code := runner(t.run)
@@ -69,6 +85,34 @@ fn run_task(tasks map[string]TaskDef, name string, runner fn (run string) int, m
 	}
 	stack.delete(name)
 	done[name] = true
+}
+
+// is_up_to_date reports a task with outputs as skippable: every output
+// exists and is newer than every input. Anything else (no outputs, a missing
+// output, a missing input, a newer input) means run it.
+fn is_up_to_date(t TaskDef) bool {
+	if t.outputs.len == 0 {
+		return false
+	}
+	mut newest_input := i64(0)
+	for inp in t.inputs {
+		stamp := os.file_last_mod_unix(inp)
+		if stamp == 0 {
+			// A missing or unreadable input cannot prove freshness; the
+			// task itself will report the real error.
+			return false
+		}
+		if stamp > newest_input {
+			newest_input = stamp
+		}
+	}
+	for out in t.outputs {
+		stamp := os.file_last_mod_unix(out)
+		if stamp == 0 || stamp < newest_input {
+			return false
+		}
+	}
+	return true
 }
 
 // delegate_build_v hands off to `v run build.v <args>` when the project

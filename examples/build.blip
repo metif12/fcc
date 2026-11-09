@@ -1,8 +1,11 @@
 # build.blip: declarative build (like build.zig steps, but data).
 # Run with: fcc build [task]
+# A task naming `outputs` is skipped when every output is newer than every
+# input (`task x (up to date)`); `fcc build --force` bypasses the check.
 
 task "build" {
   inputs = ["main.c"]
+  outputs = ["main.s"]
   run = "fcc -S -o main.s main.c"
   depends = []
 }

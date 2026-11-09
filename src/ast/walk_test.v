@@ -197,3 +197,20 @@ fn test_plugin_nodes_walk_like_plain_ones() {
 	assert kids.len == 1
 	assert kids[0].plugin == 'bash'
 }
+
+fn test_collect_all_gathers_every_node_for_rewriting() {
+	ty := int_ty()
+	tok := synth_tok('t')
+	tree := binary_node(.add, num_node(1, ty, tok, 'bash'), num_node(2, ty, tok, 'bash'),
+		ty, tok, 'bash')
+	mut flat := []&Node{}
+	collect_all(tree, mut flat)
+	assert flat.len == 3
+	// Collected references are live: editing through them rewrites the tree.
+	for mut n in flat {
+		n.lang = 'rewritten'
+	}
+	assert tree.lang == 'rewritten'
+	assert tree.lhs.lang == 'rewritten'
+	assert tree.rhs.lang == 'rewritten'
+}
