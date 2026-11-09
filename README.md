@@ -51,7 +51,7 @@ ship with it.
 - The [c-testsuite](https://github.com/c-testsuite/c-testsuite) single-exec
   suite (220 cases, run from an external checkout via `tools/cts/cts.v`):
   **220 match, 0 differ, 0 blocked**.
-- The chibicc behavioural suite: **19 of 41** passing, with the remaining
+- The chibicc behavioural suite: **21 of 41** passing, with the remaining
   failures characterised (host-ABI divergences, chibicc's private
   `__va_area__`, and a few uncharacterised mismatches) rather than papered
   over. Open items are tracked per case in `docs/PLAN.md`.
