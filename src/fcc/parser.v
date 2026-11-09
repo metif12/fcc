@@ -1603,7 +1603,9 @@ fn (mut p Parser) struct_union_decl(kind ast.TypeKind) &ast.Type {
 	p.expect('{')
 	body_line := p.tok().line.disp_line
 	p.struct_members(mut ty, body_line)
-	p.attribute_list(ty)
+	mut trail_align := p.attribute_list(ty)
+	if trail_align != 0 { ty.align = trail_align }
+	p.layout_struct(mut ty, body_line)
 
 	if tag != '' {
 		// A redefinition overwrites the type the tag already names, rather than
@@ -1696,7 +1698,6 @@ fn (mut p Parser) struct_members(mut ty &ast.Type, body_line int) {
 	}
 	ty.members = members
 
-	p.layout_struct(mut ty, body_line)
 }
 
 // layout_struct assigns member offsets and the type's own size and alignment.
