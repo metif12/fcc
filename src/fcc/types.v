@@ -492,6 +492,15 @@ pub fn is_exact_type_match(t1 &ast.Type, t2 &ast.Type) bool {
 
 // get_common_type returns the type both operands of a binary operator become.
 fn get_common_type(ty1 &ast.Type, ty2 &ast.Type) &ast.Type {
+	// A function decays to a pointer to itself before any other decay, so a
+	// conditional or arithmetic between a function and a pointer yields a
+	// pointer-to-function, not the pointer's pointee.
+	if ty1.kind == .func {
+		return pointer_to(ty1)
+	}
+	if ty2.kind == .func {
+		return pointer_to(ty2)
+	}
 	// An array or a function decays to a pointer in every arithmetic context, and
 	// C's rule is that it is the *element* type that matters, so an array of
 	// arrays does not become a pointer to an array here.
@@ -505,12 +514,6 @@ fn get_common_type(ty1 &ast.Type, ty2 &ast.Type) &ast.Type {
 	}
 	if ty2.base != unsafe { nil } {
 		return pointer_to(ty2.base)
-	}
-	if ty1.kind == .func {
-		return pointer_to(ty1)
-	}
-	if ty2.kind == .func {
-		return pointer_to(ty2)
 	}
 	if ty1.basic == .ldouble_ || ty2.basic == .ldouble_ {
 		return ty_ldouble()
