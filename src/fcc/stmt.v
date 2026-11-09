@@ -275,6 +275,8 @@ fn (mut p Parser) stmt() &ast.Node {
 		}
 		mut node := p.new_node(.goto_, tok)
 		node.unique_label = p.brk_label
+			node.is_break = true
+		
 		p.pos++
 		p.expect(';')
 		return node
@@ -286,6 +288,7 @@ fn (mut p Parser) stmt() &ast.Node {
 		}
 		mut node := p.new_node(.goto_, tok)
 		node.unique_label = p.cont_label
+		node.is_continue = true
 		p.pos++
 		p.expect(';')
 		return node

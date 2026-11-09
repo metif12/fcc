@@ -1508,7 +1508,11 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 		}
 		.if_ {
 			mut s := 'if ' + v_expr(n.cond) + ' {\n'
-			s += indent_block(v_stmts(n.body, in_main))
+			if n.then != unsafe { nil } && n.then.kind == .block_ {
+				s += indent_block(v_stmts(n.then.body, in_main))
+			} else if n.then != unsafe { nil } {
+				s += indent_block(v_stmt(n.then, in_main))
+			}
 			s += '\n}'
 			if n.els != unsafe { nil } {
 				// Render a trailing `else if` when the else branch is itself an if.
@@ -1580,13 +1584,16 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 				}
 			}
 			mut s := 'for ' + init + '; ' + cond + '; ' + inc + ' {\n'
-			s += indent_block(v_stmts(n.body, in_main))
+			if n.then != unsafe { nil } && n.then.kind == .block_ {
+				s += indent_block(v_stmts(n.then.body, in_main))
+			} else if n.then != unsafe { nil } {
+				s += indent_block(v_stmt(n.then, in_main))
+			}
 			s += '\n}'
 			return s
 		}
 		.block_ {
 			mut s := '{\n'
-			s += indent_block(v_stmts(n.body, in_main))
 			s += '\n}'
 			return s
 		}
@@ -1601,7 +1608,11 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 			}
 			return s
 		}
-		.goto_ { return '// goto ' + v_safe_name(n.label_name) }
+		.goto_ {
+			if n.is_break { return 'break' }
+			if n.is_continue { return 'continue' }
+			return '// goto ' + v_safe_name(n.label_name)
+		}
 		.label { return v_safe_name(n.label_name) + ':' }
 		.switch_ {
 			mut s := 'match ' + v_expr(n.cond) + ' {\n'
@@ -1625,7 +1636,11 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 		}
 		.do_ {
 			mut s := 'for {\n'
-			s += indent_block(v_stmts(n.body, in_main))
+			if n.then != unsafe { nil } && n.then.kind == .block_ {
+				s += indent_block(v_stmts(n.then.body, in_main))
+			} else if n.then != unsafe { nil } {
+				s += indent_block(v_stmt(n.then, in_main))
+			}
 			s += '\n\tif !(' + v_expr(n.cond) + ') { break }'
 			s += '\n}'
 			return s

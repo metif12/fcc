@@ -238,6 +238,9 @@ pub mut:
 	// goto's label name at the point of definition and backpatches.
 	label_name   string
 	unique_label string
+	// break/continue origin markers for the V emitter.
+	is_break bool
+	is_continue bool
 
 	// args is the argument list of a .funcall.
 	args []&Node
