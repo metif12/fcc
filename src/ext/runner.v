@@ -17,12 +17,12 @@ import src.fcc
 //
 // Linking needs a system linker: `gcc` on PATH (the same gcc the tools use).
 // Headers resolve like the rest of fcc: `-I` flags first, then `-B
-// <root>/include`, then `$VCC_V_ROOT/thirdparty/tcc/include`.
+// <root>/include`, then the bundled headers under `$VCC_V_ROOT`.
 
 // ---------- shared: compile + link ----------
 
 // default_include_dirs returns the fallback header roots: `-B` resource root
-// first, then the V tree's bundled tcc headers. CLI `-I` paths stay ahead of
+// first, then the V tree's bundled headers. CLI `-I` paths stay ahead of
 // these (first-hit-wins), so explicit flags always override the fallback.
 fn default_include_dirs(resource_root string) []string {
 	mut out := []string{}
@@ -34,6 +34,7 @@ fn default_include_dirs(resource_root string) []string {
 	}
 	vroot := os.getenv('VCC_V_ROOT')
 	if vroot != '' {
+		// V's own tree ships the headers under thirdparty/tcc/include.
 		p := os.join_path(vroot, 'thirdparty', 'tcc', 'include')
 		if os.is_dir(p) && p !in out {
 			out << p

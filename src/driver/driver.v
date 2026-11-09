@@ -66,7 +66,7 @@ pub mut:
 	fatal_implicit_fn bool
 	// pre_includes are -include files, processed before the main input.
 	pre_includes []string
-	// resource_root is -B, the tcc directory whose include/ and lib/ subtrees
+	// resource_root is -B, the resource directory whose include/ and lib/ subtrees
 	// supply headers and archives.
 	resource_root string
 	// show_version and show_help stop before any compilation.
@@ -199,7 +199,7 @@ pub fn parse_args(args []string) !Options {
 		} else if arg == '-c' {
 			o.compile_only = true
 		} else if arg == '-E' || arg == '--preprocess' {
-			// `-E` is tcc's and gcc's "preprocess and stop". It was aliased to the
+			// `-E` is the reference compiler's and gcc's "preprocess and stop". It was aliased to the
 			// tokenizer dump, so it printed raw `#include` lines and never computed the
 			// expansion it exists to show. Every conclusion drawn from `-E` about the
 			// preprocessor was really a conclusion about the lexer.
@@ -332,8 +332,8 @@ fn (mut o Options) classify_input(path string) {
 // rather than misread as an input file, which is the failure mode that would
 // otherwise turn `-imacros m.h` into a mysterious second translation unit.
 //
-// The list mirrors `tcc_cached_main_flags` in vlang/v (driver.v:1042), which is
-// the set V actually passes through for a TinyCC invocation.
+// The list mirrors the cached main flags in vlang/v (driver.v:1042), which is
+// the set V actually passes through for a C compiler invocation.
 // note_unimplemented_option records an option that was accepted for
 // compatibility but whose effect the compiler does not implement yet. Phase 1
 // empties the `-include`, `-imacros` and `-isystem` entries; the rest belong to
@@ -715,7 +715,7 @@ fn dump_ast(o &Options) {
 // an error.
 //
 // Warnings are printed and do not stop the run, which is the whole reason they are a
-// separate list: tcc prints `implicit declaration of function '_gmtime64_s'` and exits
+// separate list: the reference compiler prints `implicit declaration of function '_gmtime64_s'` and exits
 // 0, and gcc treats it as gnu11's implicit-declaration warning, while folding it into
 // `errors` refused a program both of them accept. A warning's exit code is what makes
 // it a warning.
@@ -737,7 +737,7 @@ fn report(errors []string, warnings []string) bool {
 // emit_asm implements -S: run the front end and write the assembly text.
 //
 // The output goes to `-o` when there is one and to standard output otherwise,
-// which is what tcc does and what lets it be piped straight into `as`.
+// which is what the reference compiler does and what lets it be piped straight into `as`.
 //
 // Every input is attempted even after one fails, so a file the front end rejects
 // does not hide the diagnostics of the file after it.
