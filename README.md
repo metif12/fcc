@@ -17,7 +17,9 @@ in a new input language, a new backend, or a new target without forking the
 front end. Brainfuck (`src/ext/bf.v`, `examples/hello.bf`) ships as the
 worked example of a whole language added in ~100 lines; Bash
 (`src/ext/bash.v`, `examples/hello.sh`) parses a shell subset to C instead of
-embedding it, and any executable can become an input plugin from config alone
+embedding it, Blip (`src/ext/blip.v`, `examples/hello.blip`) is a small
+expression-and-control-flow language that compiles to C, and any executable
+can become an input plugin from config alone
 (`fcc plugin add wlang -- wtrans --ext .w`).
 
 See `docs/PLAN.md` for the phased plan, `docs/PLUGINS.md` for the extension
