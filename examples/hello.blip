@@ -1,0 +1,14 @@
+# Hello world for the Blip input plugin (example-blip-input).
+# fcc parses this tiny language to C and compiles it natively.
+#   fcc -c -o hello.o examples/hello.blip
+#   gcc -o hello.exe hello.o
+x = 1
+y = 2
+print x + y
+for i in 1 2 3 {
+    print i
+}
+fn dbl(n) {
+    return n * 2
+}
+print dbl(21)
