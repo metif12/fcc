@@ -65,6 +65,10 @@ pub mut:
 	// changes on every `#include` — inside a header, `__FILE__` is the header and
 	// `__BASE_FILE__` must still be the file that was compiled.
 	base_file string
+	// current_file is what `__FILE__` expands to. It defaults to the translation
+	// unit's path and is overridden by `#line N "file"` (and by includes, which
+	// set it for the duration of the included file).
+	current_file string
 	// line_offset adjusts disp_line for all subsequent tokens, honouring #line.
 	line_offset int
 	// depth bounds include nesting and expansion recursion, so a pathological file is
@@ -339,6 +343,7 @@ pub fn (mut p Preprocessor) run(path string) Result {
 	// One File per translation unit, so every token carries the name a diagnostic
 	// should print. `__FILE__` keeps using the display spelling while this records it,
 	// and the two are the same string for the file that was named on the command line.
+	p.current_file = path
 	file := &ast.File{
 		name:     path
 		contents: src
@@ -356,6 +361,7 @@ pub fn (mut p Preprocessor) run_text(src string, path string) Result {
 	// available: the alternative is the empty string, which compares equal to nothing
 	// and so fails silently in any program that checks it.
 	p.base_file = path
+	p.current_file = path
 	return Result{
 		tokens: p.finish(strip_sentinels(p.directives(tokenize(src), path)))
 		errors: p.errors.clone()
@@ -447,9 +453,18 @@ fn (mut p Preprocessor) directives(toks []ast.Token, path string) []ast.Token {
 		line := tok.line.disp_line
 		i++
 
+		// GCC extension: `# 200 "file"` is shorthand for `#line 200 "file"`.
+		// The directive name is the line number itself.
+		mut effective_name := name
+		mut effective_rest := rest
+			if effective_name.len > 0 && effective_name[0] >= 48 && effective_name[0] <= 57 {
+				effective_rest = effective_name + ' ' + effective_rest
+				effective_name = 'line'
+			}
 		// Conditionals are tracked even inside a dead branch, so that a nested `#if`
 		// in skipped code cannot unbalance the level of an outer `#else`.
-		match name {
+		directive := effective_name
+		match directive {
 			'if' {
 				// The enclosing state must be sampled before this level is pushed,
 				// because `skipping` looks at the whole stack.
@@ -527,7 +542,7 @@ fn (mut p Preprocessor) directives(toks []ast.Token, path string) []ast.Token {
 				if p.skipping() {
 					continue
 				}
-				p.simple_directive(name, rest, line, path, mut out)
+				p.simple_directive(effective_name, effective_rest, line, path, mut out)
 			}
 		}
 	}
@@ -587,6 +602,7 @@ fn (p &Preprocessor) outer_dead() bool {
 // simple_directive handles the directives that are neither conditionals nor includes.
 fn (mut p Preprocessor) simple_directive(name string, rest string, line int, path string,
 	mut out []ast.Token) {
+	// GCC shorthand handled in dispatch; name is already 'line' here.
 	match name {
 		'define' {
 			p.do_define(rest, line)
@@ -613,19 +629,45 @@ fn (mut p Preprocessor) simple_directive(name string, rest string, line int, pat
 		}
 		'line' {
 			mut num := 0
+			mut new_file := ''
 			if !p.skipping() {
-				// Expand macros in the argument (e.g. `#line line`).
+				// GCC shorthand: # 200 ... puts the number in the directive name.
+				mut shorthand := 0
+				mut is_shorthand := name.len > 0
+				for ci in name {
+					if ci < 48 || ci > 57 { is_shorthand = false; break }
+					shorthand = shorthand * 10 + int(ci - 48)
+				}
+				// Expand macros in the argument (e.g. #line line).
 				mut expanded := p.expand(tokenize_fragment(rest), path)
-				// Find the line number.
+				// Find the line number: prefer a number in the arguments, but fall
+				// back to the shorthand name when the argument has none (GCC form).
+				mut found_num := false
 				for t in expanded {
 					if t.kind == .num_ {
 						num = t.text.int()
+						found_num = true
+						break
+					}
+				}
+				if !found_num && is_shorthand {
+					num = shorthand
+				}
+				// A string literal after the number sets the presumed file name
+				// for __FILE__ (C11 6.10.4).
+				for t in expanded {
+					if t.kind == .str_ {
+						new_file = t.str_data.bytestr()
 						break
 					}
 				}
 				if num > 0 {
-					// The next physical line is line+1; make its disp_line = num.
-					p.line_offset = num - 1
+					// #line N means the directive's own line is N, so the
+					// next physical line reports N+1 (chibicc/tcc convention).
+					p.line_offset = num - line
+					if new_file != '' {
+						p.current_file = new_file
+					}
 				}
 			}
 		}
@@ -638,8 +680,6 @@ fn (mut p Preprocessor) simple_directive(name string, rest string, line int, pat
 	}
 }
 
-// do_define handles `#define`.
-//
 // The distinction between an object-like and a function-like macro is decided by
 // whether a `(` immediately follows the name with no space between, which is why the
 // check is on raw text rather than on tokens.
