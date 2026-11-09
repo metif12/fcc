@@ -87,6 +87,10 @@ pub mut:
 	// emit_v_bindings mirrors `--to-v-bindings`: emit V bindings to the C
 	// (c2v-style) instead of translating.
 	emit_v_bindings bool
+	// emits lists `--emit <fmt>[=<path>]`, in flag order. Empty means the
+	// legacy single-mode flags (-S, -c, ...) own the invocation; non-empty
+	// means every listed output is produced, each to its own path.
+	emits []string
 	// emit_asm is -S: write assembly text instead of an object.
 	emit_asm bool
 	// extern_as mirrors `--extern-as`: assemble `-c` output with the system
@@ -116,6 +120,9 @@ pub const usage = 'usage: fcc [options] file...
 
   -o <path>        write output to <path>
   -c               compile only, produce a relocatable object
+  --emit <fmt>[=<path>]  produce one more output (repeatable);
+                   fmt is asm, obj, tokens, preprocessed, ast, v, v-bindings;
+                   no =path takes -o (single output) or main-stem defaults
   -shared          produce a DLL
   -std=<std>       language dialect (default: gnu11)
   -target=<triple> machine to compile for (default: x86_64-windows)
@@ -205,6 +212,11 @@ pub fn parse_args(args []string) !Options {
 			o.emit_v = true
 		} else if arg == '--to-v-bindings' {
 			o.emit_v_bindings = true
+		} else if arg == '--emit' {
+			i++
+			o.emits << need_value(args, i, '--emit')
+		} else if arg.starts_with('--emit=') {
+			o.emits << arg['--emit='.len..]
 		} else if arg == '--extern-as' {
 			o.extern_as = true
 		} else if arg == '-shared' {
@@ -644,55 +656,19 @@ pub fn main(args []string) {
 		eprintln('fcc: ${err.msg()}')
 		exit(1)
 	}
-	if o.dump_tokens {
-		dump_tokens(o)
-		return
-	}
-	if o.preprocess_only {
-		dump_preprocessed(o)
-		return
-	}
-	// Inputs a non-default input plugin claims (.bf today) go through the
-	// plugin pipeline instead of the legacy C path, so third-party and
-	// example languages compose with every output (-S, -c, link) that has
-	// an output plugin. Raw-text modes above stay legacy: they work on
-	// file bytes, not loaded inputs. --to-v below stays legacy too: it has
-	// no output plugin.
-	emit := pipeline_emit_for(&o)
-	if emit != '' && any_input_claimed_by_plugin(&o, &cfg) {
-		run_pipeline_modes(&o, emit)
-		return
-	}
-	if emit != '' {
-		for path in o.inputs {
-			if core.input_claimed_by_disabled(path) {
-				eprintln('fcc: ${path} needs a disabled plugin (enable it in fcc.toml or remove the [plugins] disabled entry)')
-				exit(1)
-			}
+	if o.emits.len > 0 || cfg.outputs.len > 0 {
+		mut reqs := resolve_outputs(&o, &cfg) or {
+			eprintln('fcc: ${err.msg()}')
+			exit(1)
 		}
-	}
-	if o.dump_ast {
-		dump_ast(o)
+		if reqs.len == 0 {
+			run_single_output(&o, &cfg)
+			return
+		}
+		run_multi_output(&o, &cfg, reqs)
 		return
 	}
-	if o.emit_v {
-		emit_v(o)
-		return
-	}
-	if o.emit_v_bindings {
-		emit_v_bindings(o)
-		return
-	}
-	if o.emit_asm {
-		emit_asm(o)
-		return
-	}
-	if o.compile_only {
-		emit_obj(o)
-		return
-	}
-	eprintln('fcc: phase 1 — the front end runs, but no code is generated yet')
-	exit(1)
+	run_single_output(&o, &cfg)
 }
 
 // dump_ast preprocesses and parses every input, then prints what the parser produced.
@@ -703,6 +679,7 @@ pub fn main(args []string) {
 // reported.
 fn dump_ast(o &Options) {
 	mut failed := false
+	mut text := ''
 	for path in o.inputs {
 		mut p := fcc.preprocessor(o.includes, o.sys_includes)
 		for spec in o.defines {
@@ -719,11 +696,18 @@ fn dump_ast(o &Options) {
 		}
 		parsed := fcc.parse_tokens(pre.tokens, path, p.packs)
 		failed = report(parsed.errors, parsed.warnings) || failed
-		print('--- ${path}\n')
-		print(parsed.dump())
+		text += '--- ${path}\n' + parsed.dump()
 	}
 	if failed {
 		exit(1)
+	}
+	if o.output == '' {
+		print(text)
+	} else {
+		os.write_file(o.output, text) or {
+			eprintln('fcc: cannot write ${o.output}')
+			exit(1)
+		}
 	}
 }
 
@@ -917,22 +901,34 @@ fn dump_preprocessed(o &Options) {
 	}
 	p.define_builtins()
 	mut failed := false
+	mut lines := []string{}
 	for path in o.inputs {
 		r := p.run(path)
 		for e in r.errors {
 			eprintln('${path}: ${e}')
 			failed = true
 		}
-		println('--- ${path}')
+		lines << '--- ${path}'
 		for t in r.tokens {
 			if t.kind == .eof {
 				continue
 			}
-			println('${t.line.disp_line}: ${t.kind} "${t.text}"')
+			lines << '${t.line.disp_line}: ${t.kind} "${t.text}"'
 		}
 	}
 	if failed {
 		exit(1)
+	}
+	if o.output == '' {
+		for l in lines {
+			println(l)
+		}
+	} else {
+		text := if lines.len > 0 { lines.join('\n') + '\n' } else { '' }
+		os.write_file(o.output, text) or {
+			eprintln('fcc: cannot write ${o.output}')
+			exit(1)
+		}
 	}
 }
 
@@ -943,6 +939,7 @@ fn dump_preprocessed(o &Options) {
 // the first one.
 fn dump_tokens(o &Options) {
 	mut failed := false
+	mut lines := []string{}
 	for path in o.inputs {
 		src := os.read_file(path) or {
 			eprintln('fcc: cannot read ${path}: ${err.msg()}')
@@ -950,7 +947,7 @@ fn dump_tokens(o &Options) {
 			continue
 		}
 		toks := fcc.tokenize(src)
-		println('--- ${path}')
+		lines << '--- ${path}'
 		for t in toks {
 			if t.kind == .eof {
 				continue
@@ -976,11 +973,22 @@ fn dump_tokens(o &Options) {
 				else { '' }
 			}
 			flagtext := if flags.len == 0 { '' } else { ' [${flags.join(',')}]' }
-			println('${line}: ${t.kind} "${t.text}"${flagtext}${extra}')
+			lines << '${line}: ${t.kind} "${t.text}"${flagtext}${extra}'
 		}
 	}
 	if failed {
 		exit(1)
+	}
+	if o.output == '' {
+		for l in lines {
+			println(l)
+		}
+	} else {
+		text := if lines.len > 0 { lines.join('\n') + '\n' } else { '' }
+		os.write_file(o.output, text) or {
+			eprintln('fcc: cannot write ${o.output}')
+			exit(1)
+		}
 	}
 }
 

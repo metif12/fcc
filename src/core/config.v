@@ -50,6 +50,13 @@ pub mut:
 	options map[string]string
 }
 
+pub struct OutputDef {
+pub mut:
+	// path writes this format's output here. Empty falls back to the
+	// invocation's -o (single output) or to the main-stem default.
+	path string
+}
+
 pub struct FccConfig {
 pub mut:
 	// [build]
@@ -73,6 +80,8 @@ pub mut:
 	disabled []string
 	// [task."name"]
 	tasks map[string]TaskDef
+	// [output."fmt"]
+	outputs map[string]OutputDef
 	// [watch]
 	watch WatchConfig
 	// which file it came from, for diagnostics.
@@ -184,6 +193,13 @@ pub fn parse_config_text(text string, source string) !FccConfig {
 		ignore:      doc_str_array(doc, 'watch.ignore', []string{})
 		debounce_ms: int(doc_int(doc, 'watch.debounce_ms', 300))
 		clear:       doc_bool(doc, 'watch.clear', false)
+	}
+	// outputs: [output."fmt"] with path
+	for oname in doc_sub_tables(doc, 'output') {
+		base := 'output.' + dotted(oname)
+		c.outputs[oname] = OutputDef{
+			path: doc_string(doc, base + '.path', '')
+		}
 	}
 	return c
 }

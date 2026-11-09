@@ -160,6 +160,27 @@ Known limitations, all shared with (not introduced by) this plugin:
 3. External: any `fcc-<verb>` executable on `PATH` is dispatched
    (`fcc foo --bar` runs `fcc-foo --bar`), like git/cargo subcommands.
 
+## Multiple outputs, one invocation
+
+One flag owned the whole run (`-S` *or* `-c`): asking for assembly *and* an
+object meant compiling twice. `--emit` (repeatable) and `[output."<fmt>"]`
+describe a *list* of outputs instead, each with its own path:
+
+```console
+$ fcc --emit asm=x.s --emit obj=x.o main.c   # == -S -o x.s, then -c -o x.o
+$ fcc --emit asm --emit obj main.c           # main-stem defaults: main.s main.o
+```
+
+Precedence per output: `=<path>`, then `[output."<fmt>"] path`, then `-o`
+(single output only), then the main-stem default (`main.c` → `main.s`).
+With no `--emit` and no `[output.*]`, the legacy single-mode path runs
+bit-for-bit as before; combining `-S`/`-c`/`-E`/`--dump-tokens`/`--dump-ast`/
+`--to-v` with `--emit` is an error (express every output as `--emit`).
+Each output runs the same per-input dispatch (legacy or pipeline), so mixed
+inputs compose with every output list. Text modes (`tokens`, `preprocessed`,
+`ast`, `v`) that used to ignore `-o` now honor it — into a file with `--emit
+tokens=x.txt`, or to stdout exactly as before with no path.
+
 ## Installable extensions (config-declared inputs)
 
 An external *input* plugin is a transpiler command the config names — the

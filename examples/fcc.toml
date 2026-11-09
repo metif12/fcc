@@ -39,6 +39,15 @@ disabled = []
 # (a shell line) when both are set. Disable anything by name:
 #   [plugin."example-bf-input"]
 #   enabled = false
+#
+# Multiple outputs, one invocation (`fcc --emit asm --emit obj main.c`
+# is `-S` then `-c` without parsing twice by hand). Each format below
+# writes to its path unless an =path overrides it; formats with no path
+# fall back to -o (single output) or the main-stem default:
+#   [output."asm"]
+#   path = "main.s"
+#   [output."obj"]
+#   path = "main.o"
 
 [task.build]
 run = "fcc -S -o main.s main.c"
