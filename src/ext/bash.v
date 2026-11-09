@@ -339,12 +339,13 @@ fn (mut t BashTranspiler) transpile_block(lines []string, start int, end int) {
 				if w == '' { continue }
 				if !firstword { fmt += ' ' }
 				firstword = false
-				if w.starts_with('$') {
-					name := w.trim_left('$').trim_left('{').trim_right('}')
+				bare := strip_quotes(w)
+				if bare.starts_with('$') {
+					name := bare.trim_left('$').trim_left('{').trim_right('}')
 					fmt += '%s'
 					pargs << name
 				} else {
-					fmt += escape_c(strip_quotes(w))
+					fmt += escape_c(bare)
 				}
 			}
 			fmt += '\\n'

@@ -26,7 +26,7 @@
 <body>
 <main>
 <h1>fcc</h1>
-<p class="tagline">A fast, plugin-able and extendable C compiler written in pure V. Every stage — inputs, outputs, hooks, CLI commands — is an extension behind a registry; the stock compiler ships as default extensions, and Brainfuck ships as a worked example.</p>
+<p class="tagline">A fast, plugin-able and extendable C compiler written in pure V. Every stage — inputs, outputs, hooks, CLI commands — is an extension behind a registry; the stock compiler ships as default extensions, and Brainfuck and Bash ship as worked examples.</p>
 
 <p class="badges">
 <a href="https://github.com/metif12/fcc/actions"><img alt="build" src="https://github.com/metif12/fcc/actions/workflows/build.yml/badge.svg"></a>
@@ -34,19 +34,19 @@
 </p>
 
 <h2>Status</h2>
-<p>fcc is a working, plugin-able C compiler: it translates whole C programs to x86-64 assembly, assembles that text in-process to machine code, and writes COFF (Windows) and ELF (Linux) objects, with no external assembler involved. It supports both x86-64 ABIs (Microsoft and System V), `_Atomic` integer compound assignment via compare-and-swap, `__asm__` with memory and general-register constraints, and a best-effort C→V translator (`--to-v`). The C front end is validated against three independent oracles; the plugin system is exercised by the Brainfuck language plugin and by the CLI/config/build commands that ship with it.</p>
+<p>fcc is a working, plugin-able C compiler: it translates whole C programs to x86-64 assembly, assembles that text in-process to machine code, and writes COFF (Windows) and ELF (Linux) objects, with no external assembler involved. It supports both x86-64 ABIs (Microsoft and System V), `_Atomic` integer compound assignment via compare-and-swap, `__asm__` with memory and general-register constraints, a best-effort C→V translator (`--to-v`) and c2v-style V bindings (`--to-v-bindings`). The C front end is validated against three independent oracles; the plugin system is exercised by the Brainfuck and Bash language plugins, config-declared external inputs, and by the CLI/config/build commands that ship with it.</p>
 <table>
 <tr><th>Suite</th><th>Result</th></tr>
 <tr><td>Differential end-to-end (<code>tests/endtoend/</code>)</td><td><strong>20 of 20 match</strong> tcc/gcc</td></tr>
 <tr><td>Native <code>-c</code> vs GAS (<code>tools/objtest/</code>)</td><td><strong>20 match, 0 differ</strong>, 0 flaky (bytes and linked behavior)</td></tr>
 <tr><td><a href="https://github.com/c-testsuite/c-testsuite">c-testsuite</a> single-exec (220 cases)</td><td><strong>220 match</strong>, 0 differ, 0 blocked</td></tr>
-<tr><td>chibicc suite</td><td>17 of 41 pass; remaining failures characterised per case</td></tr>
-<tr><td>Unit tests (<code>v test .</code>)</td><td><strong>15 of 15</strong>, stock V and local build</td></tr>
+<tr><td>chibicc suite</td><td>19 of 41 pass; remaining failures characterised per case</td></tr>
+<tr><td>Unit tests (<code>v test .</code>)</td><td><strong>17 of 17</strong>, stock V and local build</td></tr>
 </table>
 <p>Every differ carries its tcc oracle control, so a defect in fcc is distinguished from a gap tcc shares. Open items and their reproducers live in <a href="https://github.com/metif12/fcc/blob/master/docs/PLAN.md"><code>docs/PLAN.md</code></a>.</p>
 
 <h2>How ready, and what is not cross-compiled</h2>
-<p>Whole translation units work today: data section with relocations, initializers and bitfields, the full expression and statement walk, variadic calls into mingw&rsquo;s C library, struct returns of every size, floating point including <code>long double</code>, VLAs, and all 19 standard headers. The 20 differential programs, all 220 c-testsuite cases, and all 20 objtest programs agree with tcc/gcc/GAS. Cross-compilation is not supported (target is Windows x86-64), by decision rather than omission.</p>
+<p>Whole translation units work today: data section with relocations, initializers and bitfields, the full expression and statement walk, variadic calls into mingw&rsquo;s C library, struct returns of every size, floating point including <code>long double</code>, VLAs, and all 19 standard headers. The 20 differential programs, all 220 c-testsuite cases, and all 20 objtest programs agree with tcc/gcc/GAS. Both x86-64 ABIs emit working objects (Microsoft x64 by default, System V via <code>-target=x86_64-linux</code>); anything else is refused at codegen rather than guessed.</p>
 
 <h2>Diagnostics</h2>
 <p>Errors keep the terse <code>tcc:</code> first line the V driver keys on, followed by a source block with file, line, column, a caret span, and <code>= help:</code> hints where the fix is known:</p>
@@ -69,12 +69,20 @@ $env:VCC_PROBE_DIR = "$env:LOCALAPPDATA\Temp\opencode\va-probe"
 v -enable-globals run tools/probe/probe.v     # differential programs vs tcc/gcc
 v -enable-globals run tools/objtest/objtest.v # native -c vs as: bytes and linked behavior</pre>
 
-<h2>Plugins, with Brainfuck as the worked example</h2>
-<p>Every stage of fcc is an extension behind a registry: inputs, outputs, hooks, and CLI commands. The stock compiler ships as default extensions; config disables or replaces them without touching code. <code>src/ext/bf.v</code> proves the seam composes — a whole language in ~100 lines that claims <code>.bf</code> files, transpiles to C, and reuses the frontend, both emitters and the object writer untouched:</p>
+<h2>Plugins, with Brainfuck and Bash as worked examples</h2>
+<p>Every stage of fcc is an extension behind a registry: inputs, outputs, hooks, and CLI commands. The stock compiler ships as default extensions; config disables, replaces, or installs them without touching code. <code>src/ext/bf.v</code> proves the seam composes — a whole language in ~100 lines that claims <code>.bf</code> files, transpiles to C, and reuses the frontend, both emitters and the object writer untouched. <code>src/ext/bash.v</code> goes one step further and parses a shell subset to C, so the binary runs with no shell involved:</p>
 <pre>$ fcc -c -o hello.o examples/hello.bf
 $ gcc -o hello.exe hello.o
 $ ./hello.exe
-Hello World!</pre>
+Hello World!
+$ fcc -c -o hello.o examples/hello.sh
+$ gcc -o hello.exe hello.o
+$ ./hello.exe
+hello world
+count 1
+count 2
+count 3</pre>
+<p>No recompile is needed for the next language or command: any executable becomes an input plugin or a verb from config alone (<code>fcc plugin add wlang -- wtrans --ext .w</code>), and <code>fcc plugin list</code> shows everything registered, declared, or on <code>PATH</code>.</p>
 <p>Details, the extension API, and the config/build files (<code>fcc.toml</code>, <code>build.blip</code>) live in <a href="https://github.com/metif12/fcc/blob/master/docs/PLUGINS.md"><code>docs/PLUGINS.md</code></a>.</p>
 
 <h2>Design in one paragraph</h2>
@@ -84,7 +92,7 @@ Hello World!</pre>
 <ul>
 <li><a href="https://github.com/metif12/fcc">Repository</a> (MIT)</li>
 <li><a href="https://github.com/metif12/fcc/blob/master/docs/PLAN.md">Phased plan and session log</a></li>
-<li><a href="https://github.com/metif12/fcc/blob/master/docs/PLUGINS.md">Plugin architecture and the Brainfuck example</a></li>
+<li><a href="https://github.com/metif12/fcc/blob/master/docs/PLUGINS.md">Plugin architecture and language examples</a></li>
 <li><a href="https://github.com/metif12/fcc/blob/master/docs/RESEARCH.md">Survey of existing projects</a></li>
 </ul>
 

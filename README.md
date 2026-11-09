@@ -14,8 +14,11 @@ It began as a pure-V replacement for the TinyCC that `vlang/v` uses as its
 default C backend on Windows, and that remains a supported use, but the goal
 now is a compiler that is fast to build, fast to run, and fast to extend: drop
 in a new input language, a new backend, or a new target without forking the
-front end. Brainfuck (`src/ext/bf.v`, `examples/hello.bf`) ships as a worked
-example of a whole language added in ~100 lines.
+front end. Brainfuck (`src/ext/bf.v`, `examples/hello.bf`) ships as the
+worked example of a whole language added in ~100 lines; Bash
+(`src/ext/bash.v`, `examples/hello.sh`) parses a shell subset to C instead of
+embedding it, and any executable can become an input plugin from config alone
+(`fcc plugin add wlang -- wtrans --ext .w`).
 
 See `docs/PLAN.md` for the phased plan, `docs/PLUGINS.md` for the extension
 architecture, and `docs/RESEARCH.md` for the survey of existing projects this
@@ -27,8 +30,9 @@ fcc is a working, plugin-able C compiler: it translates whole C programs to
 x86-64 assembly, assembles that text in-process to machine code, and writes
 COFF (Windows) and ELF (Linux) objects, with no external assembler involved.
 The C front end is validated against three independent oracles; the plugin
-system is exercised by the Brainfuck language plugin and by the CLI/config/build
-commands that ship with it.
+system is exercised by the Brainfuck and Bash language plugins, by
+config-declared external inputs, and by the CLI/config/build commands that
+ship with it.
 
 - All 19 standard headers compile (`tests/endtoend/stdheaders.c`).
 - `fcc -S` writes AT&T assembly for whole translation units: the data section,
@@ -45,27 +49,34 @@ commands that ship with it.
 - The [c-testsuite](https://github.com/c-testsuite/c-testsuite) single-exec
   suite (220 cases, run from an external checkout via `tools/cts/cts.v`):
   **220 match, 0 differ, 0 blocked**.
-- The chibicc behavioural suite: **17 of 41** passing, with the remaining
+- The chibicc behavioural suite: **19 of 41** passing, with the remaining
   failures characterised (host-ABI divergences, chibicc's private
   `__va_area__`, and a few uncharacterised mismatches) rather than papered
   over. Open items are tracked per case in `docs/PLAN.md`.
-- `v test .`: 15 of 15, on stock V and on the local build.
+- `v test .`: 17 of 17, on stock V and on the local build.
 - CI builds and runs the suite on stock V. Build is green.
 
 ## What "plugin-able" means here
 
 Nothing in fcc is special-cased. Inputs (`default-c-input`, `default-raw-input`,
-`example-bf-input`), outputs (`default-asm`, `default-obj`, `default-exe`, ...),
-hooks (`default-target-hook`, `default-verbose-hook`), and CLI commands
-(`build`, `plugin`, `config`, `init`, plus any `fcc-<verb>` on `PATH`) are all
-registered with the same interface in `src/core`. Config (`fcc.toml`/`fcc.blip`)
-enables, disables and tunes them; `fcc plugin list` shows what is registered.
-A new language, target, or output format is an extension, not a fork.
+`example-bf-input`, `example-bash-input`, plus config-declared `external-*`),
+outputs (`default-asm`, `default-obj`, `default-exe`, ...), hooks
+(`default-target-hook`, `default-verbose-hook`), and CLI commands
+(`build`, `plugin`, `config`, `init`, plus config-declared verbs and any
+`fcc-<verb>` on `PATH`) are all registered with the same interface in
+`src/core`. Config (`fcc.toml`/`fcc.blip`) enables, disables, tunes, and
+installs them — `fcc plugin add wlang -- wtrans --ext .w` needs no recompile;
+`fcc plugin list` shows everything that is registered, declared, or on `PATH`.
+A new language, target, or output format is an extension, not a fork. Plugins
+needing real AST nodes rather than C text build them directly with
+`src/ast/build.v`, walk them with `src/ast/walk.v`, and tag provenance with
+`Node.lang` (see `docs/PLUGINS.md`).
 
 ## Cross-compilation
 
-**The front end is target-aware; the back end is not, and it refuses rather than
-guessing.** `-target=<triple>` selects the machine fcc compiles *for*:
+**The front end is target-aware; x86-64 codegen covers both major ABIs, and
+anything else is refused rather than guessed.** `-target=<triple>` selects the
+machine fcc compiles *for*:
 
 | triple | data model | codegen |
 |---|---|---|
@@ -140,7 +151,7 @@ tools/        harnesses: `probe` (endto-end vs tcc), `suite` (chibicc),
               `objtest` (native -c vs `as`: bytes and linked behavior)
 docs/         research, plan, plugin guide, and session log
 notes/        decision log
-examples/     `fcc.toml`/`fcc.blip`, `build.v`/`build.blip`, `hello.bf`
+examples/     `fcc.toml`/`fcc.blip`, `build.v`/`build.blip`, `hello.bf`, `hello.sh`
 ```
 
 ## Plugins
@@ -151,15 +162,35 @@ input a non-default input plugin claims into the plugin pipeline. Config
 (`fcc.toml`/`fcc.blip`) enables, disables and tunes them; `fcc plugin list`
 shows what is registered. See `docs/PLUGINS.md`.
 
-The worked example is Brainfuck (`example-bf-input`, `src/ext/bf.v`): it
-claims `.bf` files, transpiles to C, and reuses the whole pipeline. It works
-out of the box:
+The worked examples are Brainfuck (`example-bf-input`, `src/ext/bf.v`) and Bash
+(`example-bash-input`, `src/ext/bash.v`): the first claims `.bf` files and
+transpiles to C; the second parses a shell subset (echo, variables, `if`,
+`for`, `while`, functions) to C rather than embedding it, so the binary runs
+with no shell involved. Both reuse the whole pipeline untouched:
 
 ```console
 $ fcc -c -o hello.o examples/hello.bf
 $ gcc -o hello.exe hello.o
 $ ./hello.exe
 Hello World!
+$ fcc -c -o hello.o examples/hello.sh
+$ gcc -o hello.exe hello.o
+$ ./hello.exe
+hello world
+count 1
+count 2
+count 3
+```
+
+No recompile is needed for the next language: any executable becomes an input
+plugin from config alone, and any verb becomes a command the same way:
+
+```console
+$ fcc plugin add wlang -- wtrans --ext .w   # needs no recompile
+$ fcc plugin add greet -- echo hi --kind cli
+$ fcc -c -o hello.o hello.w                  # external transpiler, same pipeline
+$ fcc greet                                   # config-declared command
+$ fcc plugin list                             # in-process, declared, and on-PATH
 ```
 
 ## Build
@@ -250,15 +281,7 @@ fcc ships two C→V modes on the legacy path:
   `docs/PLAN.md`.
 
 The two modes make fcc strictly more capable than vlang/c2v, with no clang
-dependency." oldString="## C to V translation (`--to-v`)
-
-fcc ships a best-effort C→V translator on the legacy path: `fcc --to-v file.c`
-prints V source (or `-o out.v` writes it). It reuses the C front end and emits
-structs, enums, typedefs, function signatures, globals, and statement/expression
-bodies where they map cleanly; constructs V has no equivalent for (unions,
-bitfields, flexible arrays, `goto`/labels, VLA, K&R parameters, statement
-expressions) are left as comments rather than dropped. The output is a readable
-port, not a guaranteed compilable one — review before use." path="C:\Users\MR\Projects\vcc/README.md
+dependency.
 
 ## Roadmap
 
@@ -273,7 +296,11 @@ port, not a guaranteed compilable one — review before use." path="C:\Users\MR\
 - **Phase 4** — plugin architecture. Done: inputs, outputs, hooks, CLI commands
   and config (`fcc.toml`/`fcc.blip`) behind registries in `src/core`; stock
   compiler ships as default extensions in `src/ext`; Brainfuck as the worked
-  example. See `docs/PLUGINS.md`.
+  example. Extended since: Bash input plugin (parses to C, not string
+  embedding), config-declared installable externals (`fcc plugin add/remove`,
+  PATH discovery, disablement enforced in the pipeline), direct AST building
+  for plugins (`src/ast/build.v`, `walk.v`, `Node.lang`, `.plugin` kinds), and
+  `--to-v-bindings` (c2v-style V bindings to C). See `docs/PLUGINS.md`.
 - **Open work** (see `docs/PLAN.md`): System V / x86-64-linux backend (the
   front end is already target-aware and refuses codegen there), a second
   architecture backend, characterising the remaining chibicc failures, and

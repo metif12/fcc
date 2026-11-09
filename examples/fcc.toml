@@ -19,11 +19,26 @@ libs = []
 # disable any default extension by name; see `fcc plugin list`.
 disabled = []
 
-# external / third-party plugins (in-process V plugins register
-# themselves; external CLI tools are found as fcc-<verb> on PATH).
-# [plugin."my-lexer"]
-# enabled = true
-# command = "my-lexer --stdin"
+# external / third-party plugins, installed without recompiling.
+# In-process V plugins register themselves; anything else is declared here
+# or found as fcc-<verb> on PATH. See `fcc plugin list`, and
+# `fcc plugin add <name> -- <command> [--ext .foo] [--kind input|cli]`.
+#
+# An input plugin: <command> <path> must print a C translation unit.
+#   [plugin."wlang"]
+#   command = "wlang-transpile"
+#   kind = "input"          # inferred from extensions when omitted
+#   extensions = [".w"]
+#
+# A CLI verb: `fcc greet ...` runs the command with the args appended.
+#   [plugin."greet"]
+#   command = "echo hi"
+#   kind = "cli"
+#
+# `path` names an executable file directly and wins over `command`
+# (a shell line) when both are set. Disable anything by name:
+#   [plugin."example-bf-input"]
+#   enabled = false
 
 [task.build]
 run = "fcc -S -o main.s main.c"
