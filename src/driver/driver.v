@@ -1673,7 +1673,7 @@ fn v_expr(n &ast.Node) string {
 		}
 		.cast { return v_expr(n.lhs) }
 		.compound_literal { return '/*compound_literal*/' }
-		.stmt_expr { return '/*stmt_expr*/' }
+		.stmt_expr { return '0 /* stmt_expr */' }
 		.vla_ptr { return v_safe_name(n.var.name) }
 		.va_arg_ { return '/*va_arg*/' }
 		.va_start_ { return '/*va_start*/' }
