@@ -84,6 +84,9 @@ pub mut:
 	dump_ast bool
 	// emit_v mirrors `--to-v`: translate C to V source instead of compiling.
 	emit_v bool
+	// emit_v_bindings mirrors `--to-v-bindings`: emit V bindings to the C
+	// (c2v-style) instead of translating.
+	emit_v_bindings bool
 	// emit_asm is -S: write assembly text instead of an object.
 	emit_asm bool
 	// extern_as mirrors `--extern-as`: assemble `-c` output with the system
@@ -132,7 +135,9 @@ pub const usage = 'usage: fcc [options] file...
   -w               suppress warnings
   -Werror=implicit-function-declaration
                    make an implicit function declaration an error
--E            tokenize only, print the token stream
+  --dump-ast    parse and print the declarations that were read
+  --to-v        translate C to V source
+  --to-v-bindings  emit V bindings to the C (c2v-style)
   --preprocess  preprocess only, print the resulting tokens
   --dump-ast    parse and print the declarations that were read
   --extern-as   assemble with the system `as` instead of the native emitter
@@ -198,6 +203,8 @@ pub fn parse_args(args []string) !Options {
 			o.dump_ast = true
 		} else if arg == '--to-v' {
 			o.emit_v = true
+		} else if arg == '--to-v-bindings' {
+			o.emit_v_bindings = true
 		} else if arg == '--extern-as' {
 			o.extern_as = true
 		} else if arg == '-shared' {
@@ -649,6 +656,10 @@ pub fn main(args []string) {
 		emit_v(o)
 		return
 	}
+	if o.emit_v_bindings {
+		emit_v_bindings(o)
+		return
+	}
 	if o.emit_asm {
 		emit_asm(o)
 		return
@@ -1026,6 +1037,130 @@ fn emit_v(o &Options) {
 			exit(1)
 		}
 	}
+}
+
+fn emit_v_bindings(o &Options) {
+	mut all := []string{}
+	mut failed := false
+
+	for path in o.inputs {
+		mut p := fcc.preprocessor(o.includes, o.sys_includes)
+		for spec in o.defines {
+			p.define_from_option(spec)
+		}
+		for name in o.undefines {
+			p.undefine(name)
+		}
+		p.define_builtins()
+		pre := p.run(path)
+		for e in pre.errors {
+			eprintln('${path}: ${e}')
+			failed = true
+		}
+		mut parsed := fcc.parse_tokens(pre.tokens, path, p.packs)
+		failed = report(parsed.errors, parsed.warnings) || failed
+		if parsed.errors.len > 0 {
+			continue
+		}
+
+		all << '// bindings for ${path}'
+		all << vemit_bindings_unit(parsed.globals, parsed.typedefs)
+	}
+
+	if failed {
+		exit(1)
+	}
+
+	text := all.join('\n')
+	if o.output == '' {
+		print(text)
+	} else {
+		os.write_file(o.output, text) or {
+			eprintln('fcc: cannot write ${o.output}')
+			exit(1)
+		}
+	}
+}
+
+fn vemit_bindings_unit(globals []&ast.Obj, typedefs map[string]&ast.Type) string {
+	mut seen := map[string]bool{}
+	mut structs := []string{}
+	for name, t in typedefs {
+		if t.kind == .struct_ || t.kind == .union_ {
+			if name in seen {
+				continue
+			}
+			seen[name] = true
+			mut fields := []string{}
+			for m in t.members {
+				vemit_collect_type(m.ty, mut seen, mut structs)
+				fields << '\t' + 'mut ' + v_safe_name(m.name) + ' ' + v_type(m.ty)
+			}
+			keyword := if t.kind == .union_ { 'struct /* union */' } else { 'struct' }
+			cap := v_safe_name(name)
+			cap_name := cap[0..1].to_upper() + cap[1..]
+			structs << '${keyword} ${cap_name} {\n' + fields.join('\n') + '\n}'
+		}
+	}
+	for obj in globals {
+		vemit_collect_obj(obj, mut seen, mut structs)
+	}
+
+	mut lines := []string{}
+	lines << 'module main'
+	lines << ''
+	for s in structs {
+		lines << s
+		lines << ''
+	}
+
+	// Globals as c_extern bindings.
+	for obj in globals {
+		if obj.is_function {
+			continue
+		}
+		if !obj.is_definition && !obj.is_tentative {
+			continue
+		}
+		lines << '@[c_extern]'
+		lines << '__global C.${v_safe_name(obj.name)} ${v_type(obj.ty)}'
+		lines << '@[weak]'
+		lines << '__global ${v_safe_name(obj.name)} ${v_type(obj.ty)}'
+		lines << ''
+	}
+
+	// Functions as extern declarations.
+	for obj in globals {
+		if !obj.is_function {
+			continue
+		}
+		if obj.body.len == 0 && obj.params.len == 0 {
+			continue
+		}
+		mut params := []string{}
+		for param in obj.params {
+			params << '${v_safe_name(param.name)} ${v_type(param.ty)}'
+		}
+		mut ret := 'void'
+		if obj.ty != unsafe { nil } && obj.ty.kind == .func && obj.ty.ret_type != unsafe { nil } {
+			ret = v_type(obj.ty.ret_type)
+		}
+		if obj.name == 'main' {
+			ret = 'void'
+		}
+		mut decl := 'fn C.${v_safe_name(obj.name)}(${params.join(', ')}) ${ret}'
+		if obj.ty != unsafe { nil } && obj.ty.kind == .func && obj.ty.is_variadic {
+			if params.len > 0 {
+				decl = 'fn C.${v_safe_name(obj.name)}(${params.join(', ')}, ...) ${ret}'
+			} else {
+				decl = 'fn C.${v_safe_name(obj.name)}(...) ${ret}'
+			}
+		}
+		lines << decl
+	}
+	lines << ''
+
+	return lines.join('\n')
 }
 
 fn vemit_unit(globals []&ast.Obj, typedefs map[string]&ast.Type) string {
