@@ -5,10 +5,9 @@ import ast
 // Diagnostics tests.
 //
 // The contract under test is twofold and both halves matter: the terse first
-// line never changes shape (the V driver keys on its `tcc:` prefix, and a dozen
-// tests assert on it with `.contains`), and the block under it points at the
-// right bytes. A caret under the wrong token is worse than no caret, because it
-// sends the reader to innocent code with confidence.
+// line never changes shape (a dozen tests assert on it with `.contains`), and
+// the block under it points at the right bytes. A caret under the wrong token
+// is worse than no caret, because it sends the reader to innocent code with confidence.
 
 // diag_file builds the file a snippet test needs: contents the block reads back.
 fn diag_file(name string, contents string) &ast.File {

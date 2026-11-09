@@ -334,8 +334,8 @@ fn (mut p Parser) error_at_help(tok ast.Token, msg string, help string) {
 }
 
 // render builds the full diagnostic text: the terse first line, byte-identical
-// to what this compiler always emitted (`tcc: file:line: message`, which is
-// what V's driver keys on), followed by the V-style source block and the
+// to what this compiler always emitted (`fcc: file:line: message`), followed
+// by the V-style source block and the
 // macro-expansion notes, when there is source to show. The column rides along
 // only when the token has one — a synthesized location reports none, and
 // printing `:0:` for it would be a lie about precision.
@@ -359,7 +359,7 @@ fn (mut p Parser) render(tok ast.Token, msg string, help string) string {
 // A token stamped with a file is one that was read out of a header, and naming the header
 // is the whole point: `time.h:241` and `time.h:234` are where the two errors are, while
 // `dg.c:241` points at a file that does not have 241 lines. gcc names the header, and so
-// does tcc.
+// does the reference compiler.
 //
 // The fallback rather than an empty name, because a synthesized token — the parser builds
 // some while speculating — has no file of its own and still has to be reported somewhere.
@@ -378,13 +378,13 @@ fn (mut p Parser) error_here(msg string) {
 // warn_at records a diagnostic that does not prevent compilation.
 //
 // It has its own list, and that is the whole point: `errors` is what the driver counts
-// to decide the exit code, so a warning folded into it would refuse a program both tcc
-// and gcc accept. `time.h` calls `_gmtime64_s` having declared only `_gmtime64`, tcc
-// prints a warning and exits 0, and gcc treats it as gnu11's implicit-declaration
-// warning — while this used to fail the translation unit.
+// to decide the exit code, so a warning folded into it would refuse a program both the
+// reference compiler and gcc accept. `time.h` calls `_gmtime64_s` having declared only
+// `_gmtime64`, the reference compiler prints a warning and exits 0, and gcc treats it
+// as gnu11's implicit-declaration warning — while this used to fail the translation unit.
 //
-// The `warning:` spelling is what tcc and gcc both use, and it is also what V's driver
-// looks for when deciding a warning is not a failure.
+// The `warning:` spelling is what the reference compiler and gcc both use, and it is
+// also what V's driver looks for when deciding a warning is not a failure.
 fn (mut p Parser) warn_at(tok ast.Token, msg string) {
 	if p.quiet > 0 {
 		return
@@ -393,7 +393,7 @@ fn (mut p Parser) warn_at(tok ast.Token, msg string) {
 }
 
 // render_warn builds a warning the same way `render` builds an error, with the
-// `warning:` spelling tcc and gcc both use — and V's driver looks for when
+// `warning:` spelling the reference compiler and gcc both use — and V's driver looks for when
 // deciding a warning is not a failure.
 fn (mut p Parser) render_warn(tok ast.Token, msg string) string {
 	mut s := 'tcc: ${p.token_file(tok)}:${tok.line.disp_line}'

@@ -153,7 +153,7 @@ aggregate access-violates where tcc returns the right answer:
 ```c
 struct Q32 { long long a, b, c, d; };
 struct Q32 q = {1,2,3,4};
-take(1, q, 30);   // fcc: 0xC0000005   gcc, tcc: fine
+take(1, q, 30);   // fcc: 0xC0000005   gcc, oracle: fine
 ```
 
 It is pre-existing and has nothing to do with varargs — the same call through a

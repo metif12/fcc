@@ -49,7 +49,7 @@
 <p>Whole translation units work today: data section with relocations, initializers and bitfields, the full expression and statement walk, variadic calls into mingw&rsquo;s C library, struct returns of every size, floating point including <code>long double</code>, VLAs, and all 19 standard headers. The 20 differential programs, all 220 c-testsuite cases, and all 20 objtest programs agree with tcc/gcc/GAS. Both x86-64 ABIs emit working objects (Microsoft x64 by default, System V via <code>-target=x86_64-linux</code>); anything else is refused at codegen rather than guessed.</p>
 
 <h2>Diagnostics</h2>
-<p>Errors keep the terse <code>tcc:</code> first line the V driver keys on, followed by a source block with file, line, column, a caret span, and <code>= help:</code> hints where the fix is known:</p>
+<p>Errors print the terse <code>fcc:</code> first line, followed by a, followed by a source block with file, line, column, a caret span, and <code>= help:</code> hints where the fix is known:</p>
 <pre>tcc: foo.c:12:9: expected ";", found "bar"
  --&gt; foo.c:12:9
   |
