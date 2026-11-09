@@ -192,6 +192,9 @@ $ fcc plugin add greet -- echo hi --kind cli
 $ fcc -c -o hello.o hello.w                  # external transpiler, same pipeline
 $ fcc greet                                   # config-declared command
 $ fcc plugin list                             # in-process, declared, and on-PATH
+$ fcc run main.c -- arg1                      # compile, link, run (go run style)
+$ fcc test                                    # test task, or *_test.c discovery
+$ fcc watch                                   # re-run [watch] on file changes
 ```
 
 ## Build

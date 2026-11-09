@@ -17,6 +17,23 @@ pub mut:
 	desc    string
 }
 
+pub struct WatchConfig {
+pub mut:
+	// run is the command re-executed on change (`fcc watch` with no args).
+	run string
+	// dirs are watched recursively. Default: the project root.
+	dirs []string
+	// extensions limits watched files (including the leading dot).
+	// Default: every registered input extension plus build files.
+	extensions []string
+	// ignore skips paths containing any of these substrings.
+	ignore []string
+	// debounce_ms coalesces rapid saves before running.
+	debounce_ms int = 300
+	// clear clears the screen before each run.
+	clear bool
+}
+
 pub struct PluginDef {
 pub mut:
 	enabled bool = true
@@ -56,6 +73,8 @@ pub mut:
 	disabled []string
 	// [task."name"]
 	tasks map[string]TaskDef
+	// [watch]
+	watch WatchConfig
 	// which file it came from, for diagnostics.
 	source string
 }
@@ -157,6 +176,15 @@ pub fn parse_config_text(text string, source string) !FccConfig {
 			formats:    doc_str_array(doc, base + '.formats', []string{})
 		}
 	}
+	// watch: [watch] with run/dirs/extensions/ignore/debounce_ms/clear
+	c.watch = WatchConfig{
+		run:         doc_string(doc, 'watch.run', '')
+		dirs:        doc_str_array(doc, 'watch.dirs', []string{})
+		extensions:  doc_str_array(doc, 'watch.extensions', []string{})
+		ignore:      doc_str_array(doc, 'watch.ignore', []string{})
+		debounce_ms: int(doc_int(doc, 'watch.debounce_ms', 300))
+		clear:       doc_bool(doc, 'watch.clear', false)
+	}
 	return c
 }
 
@@ -189,6 +217,11 @@ fn doc_bool(doc toml.Doc, key string, def bool) bool {
 		string { return v.to_lower() == 'true' || v == '1' }
 		else { return def }
 	}
+}
+
+fn doc_int(doc toml.Doc, key string, def i64) i64 {
+	v := doc.value_opt(key) or { return def }
+	return any_to_int(v, def)
 }
 
 fn doc_str_array(doc toml.Doc, key string, def []string) []string {
@@ -231,6 +264,16 @@ fn any_to_string(v toml.Any, def string) string {
 		bool { return if v { 'true' } else { 'false' } }
 		i64 { return v.str() }
 		f64 { return v.str() }
+		else { return def }
+	}
+}
+
+fn any_to_int(v toml.Any, def i64) i64 {
+	match v {
+		i64 { return v }
+		f64 { return i64(v) }
+		string { return v.i64() }
+		bool { return if v { i64(1) } else { i64(0) } }
 		else { return def }
 	}
 }

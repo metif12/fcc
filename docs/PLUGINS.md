@@ -228,6 +228,33 @@ built-in `run`/`test` step kinds: every step is a shell line. What it does
 cover is the loop that matters daily: declare inputs and outputs once, and
 unchanged rebuilds become no-ops.
 
+## Run, test, watch (like `go run` / `go test` / `air`)
+
+- `fcc run [-I dir] [-D def] [-B root] file... [-- prog args...]` compiles
+  every input (any language — mixed C and Brainfuck link into one binary,
+  like `fcc -c`) to a temp object, links with `gcc`, runs it, and forwards
+  the exit code. Temp files are removed afterwards. Linking needs `gcc` (or
+  `cc`) on PATH; headers resolve `-I` first, then `-B <root>/include`, then
+  `$VCC_V_ROOT/thirdparty/tcc/include`.
+- `fcc test [dir|file...] [-v]` runs the `test` task when the project defines
+  one, else compiles and runs every `*_test.c` / `test_*.c` in the directory
+  (each a standalone program; exit 0 passes). Reports `ok`/`FAIL` per file
+  with timings and a `passed/failed` summary; exits 1 on any failure.
+  Program output prints on failure, or always with `-v`.
+- `fcc watch [--clear] [--debounce ms] [command...]` re-runs a command
+  whenever watched files change. With no command it uses `[watch] run`,
+  defaulting to `fcc build`. The `[watch]` section configures it:
+
+```toml
+[watch]
+run = "fcc build"
+dirs = ["."]
+extensions = []     # default: every registered input extension + .blip/.toml
+ignore = ["build"]  # substrings, plus .git/.o/.s/.exe by default
+debounce_ms = 300
+clear = false
+```
+
 ```blip
 task "build" {
   inputs = ["main.c"]

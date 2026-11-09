@@ -163,6 +163,21 @@ fn test_parse_plugin_declaration_keys() {
 	assert cfg.plugins['greet'].kind == ''
 }
 
+fn test_parse_watch_section() {
+	cfg := parse_config_text('[watch]\nrun = "fcc build"\ndirs = ["src"]\nextensions = [".c"]\nignore = ["gen"]\ndebounce_ms = 500\nclear = true\n',
+		'fcc.toml')!
+	assert cfg.watch.run == 'fcc build'
+	assert cfg.watch.dirs == ['src']
+	assert cfg.watch.extensions == ['.c']
+	assert cfg.watch.ignore == ['gen']
+	assert cfg.watch.debounce_ms == 500
+	assert cfg.watch.clear == true
+	cfg2 := parse_config_text('[build]\ntarget = "x86_64-linux"\n', 'fcc.toml')!
+	assert cfg2.watch.run == ''
+	assert cfg2.watch.debounce_ms == 300
+	assert cfg2.watch.clear == false
+}
+
 fn test_parse_plugin_enabled_flag() {
 	cfg := parse_config_text('[plugin."bf"]\nenabled = false\n', 'fcc.toml')!
 	assert cfg.plugins['bf'].enabled == false

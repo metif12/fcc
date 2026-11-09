@@ -15,6 +15,24 @@ pub fn register_cli() {
 		handler:     cmd_build
 	})
 	core.register_command(core.CliCommand{
+		name:        'run'
+		usage:       'fcc run [-I dir] [-D def] [-B root] file... [-- prog args...]'
+		description: 'compile inputs to a temp binary and run it (go run style)'
+		handler:     cmd_run
+	})
+	core.register_command(core.CliCommand{
+		name:        'test'
+		usage:       'fcc test [dir|file...] [-v]'
+		description: 'run the test task, or compile and run *_test.c files'
+		handler:     cmd_test
+	})
+	core.register_command(core.CliCommand{
+		name:        'watch'
+		usage:       'fcc watch [--clear] [--debounce ms] [command...]'
+		description: 're-run a command when watched files change (air style)'
+		handler:     cmd_watch
+	})
+	core.register_command(core.CliCommand{
 		name:        'plugin'
 		usage:       'fcc plugin list'
 		description: 'list registered input/output/hook/CLI plugins'
