@@ -464,6 +464,7 @@ fn ensure_extensions() {
 	// pattern stays visible; they still work out of the box.
 	ext.register_bf()
 	ext.register_bash()
+	ext.register_blip()
 }
 
 // load_effective_config finds and parses fcc.toml / fcc.blip.
