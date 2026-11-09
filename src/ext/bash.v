@@ -85,9 +85,9 @@ pub fn register_bash() {
 
 struct BashTranspiler {
 mut:
-	lines []string
+	lines  []string
 	indent int
-	vars  map[string]bool
+	vars   map[string]bool
 }
 
 fn new_bash_transpiler() BashTranspiler {
@@ -172,7 +172,7 @@ fn (mut t BashTranspiler) transpile(src string, origin string) {
 fn is_func_def(line string) bool {
 	if !line.contains('(') || !line.contains(')') { return false }
 	idx_paren := line.index(')') or { return false }
-	after := line[idx_paren+1..].trim_space()
+	after := line[idx_paren + 1..].trim_space()
 	if after == '' || after == '{' || after.starts_with('{') {
 		name := line.all_before('(').trim_space()
 		if name != '' && !name.contains(' ') && !name.contains(';') {
@@ -277,7 +277,9 @@ fn (mut t BashTranspiler) transpile_block(lines []string, start int, end int) {
 					depth--
 					if depth == 0 { break }
 				}
-				if l.starts_with('for ') || l.starts_with('while ') || l.starts_with('if ') { depth++ }
+				if l.starts_with('for ') || l.starts_with('while ') || l.starts_with('if ') {
+					depth++
+				}
 				sub << lines[j]
 				j++
 			}
@@ -300,7 +302,9 @@ fn (mut t BashTranspiler) transpile_block(lines []string, start int, end int) {
 					depth--
 					if depth == 0 { break }
 				}
-				if l.starts_with('for ') || l.starts_with('while ') || l.starts_with('if ') { depth++ }
+				if l.starts_with('for ') || l.starts_with('while ') || l.starts_with('if ') {
+					depth++
+				}
 				sub << lines[j]
 				j++
 			}
@@ -375,7 +379,13 @@ fn extract_if_cond(line string) string {
 		mut end := -1
 		for idx, c in s {
 			if c == 91 { depth++ }
-			if c == 93 { depth--; if depth == 0 { end = idx; break } }
+			if c == 93 {
+				depth--
+				if depth == 0 {
+					end = idx
+					break
+				}
+			}
 		}
 		if end >= 0 {
 			inner := s[1..end].trim_space()
@@ -441,8 +451,8 @@ fn is_assignment(line string) bool {
 
 fn strip_quotes(s string) string {
 	mut r := s
-	if r.len >= 2 && (r[0] == 34 || r[0] == 39) && r[r.len-1] == r[0] {
-		r = r[1..r.len-1]
+	if r.len >= 2 && (r[0] == 34 || r[0] == 39) && r[r.len - 1] == r[0] {
+		r = r[1..r.len - 1]
 	}
 	return r
 }

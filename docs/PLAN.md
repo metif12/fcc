@@ -1591,3 +1591,42 @@ not 4 and 4), no shadow space, a different callee-saved set, `%al` counting
 variadic arguments, and a 24-byte `va_list` struct where `abi.v` has a pointer —
 all five at once, because a caller and callee that disagree on any one of them fail
 at the first cross-library call rather than loudly. AArch64 is not this.
+
+## Integrity sweep, 2026-11-09
+
+Full pass after the run/test/watch work, before any new feature:
+unit `v test .` 20/20, chibicc suite 19 pass / 22 fail / 0 blocked —
+identical counts to the post-attribute-fix baseline, and every feature
+(`run`, `test`, `watch`, `plugin add/remove`, disabled enforcement,
+mixed-language link) exercised end to end against real binaries.
+
+Break-fix control for the one scary entry: `cast.c` segfaults at run time.
+Built from pristine HEAD (changes stashed) it segfaults identically,
+so no recent AST change caused it. Bisected to assertion 7,
+`long y = (long)&x; *(int *)y`: a 4-byte `long` truncates the 64-bit
+stack address and the truncated pointer faults. A gcc-built binary of the
+same three lines segfaults identically on this host, so this is the
+host data model (same class as the `long`-size rows), not a defect.
+
+Newly characterised this session, all measured not recalled:
+
+| file | verdict |
+|---|---|
+| `cast.c:7` | host ABI: address truncated through 4-byte `long`; gcc agrees |
+| `sizeof.c` | host ABI: `sizeof(long)` 8 expected, 4 got |
+| `variable.c` | layout divergence: `b-a` across locals; same class as `pointer.c` |
+| `decl.c` | host ABI: `sizeof(long int)` |
+
+Categorised but still open: `asm` (`inline` placement gap), `atomic`/`tls`
+(`pthread.h` absent from this env), `commonsym` (gcc 15 `-fno-common` default;
+harness), `initializer:25` (`g30.a.a` member-of-global address gap), `line:15`
+(`#200` directive gap), `pragma-once` (include cwd), `usualconv:28` (gap),
+`varargs` (`__va_area__`, same as `function:96`), `arith`/`literal`/`string`/
+`struct` (behavioural mismatches, still not individually characterised).
+
+Hygiene: no BOM anywhere under `src/`; every new file is `v fmt`-clean
+(whitespace-only `fmt -w` applied to `bash.v`, behaviour re-verified via
+`examples/hello.sh`: identical output). The eight remaining `v fmt -l` flags
+are pre-existing CRLF files, left untouched — reformatting them would bury
+real diffs. `os.execute` deprecation warnings are accepted: the API ships in
+this V build and replacing it would change shell quoting semantics.
