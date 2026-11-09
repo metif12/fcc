@@ -1085,6 +1085,15 @@ fn vemit_unit(globals []&ast.Obj, typedefs map[string]&ast.Type) string {
 		if !obj.is_function {
 			continue
 		}
+		// An empty function with no parameters is almost always an implicit
+		// declaration the C front end could not resolve (malloc, calloc, ...).
+		// Emitting it as a real V function with the wrong signature is worse
+		// than a comment, so leave it as a TODO extern declaration.
+		if obj.body.len == 0 && obj.params.len == 0 {
+			lines << '// TODO: extern declaration needed for ${obj.name} (e.g. fn C.${obj.name}(...))'
+			lines << ''
+			continue
+		}
 		mut in_main := obj.name == 'main'
 		mut params := []string{}
 		for param in obj.params {
@@ -1308,7 +1317,6 @@ fn v_stmts(nodes []&ast.Node, in_main bool) string {
 	mut out := []string{}
 	for n in nodes {
 		r := v_stmt(n, in_main)
-		eprintln('VSTMT kind=' + int(n.kind).str() + ' -> [' + r + ']')
 		if r != '' && r != '0;' {
 			out << r
 		}
@@ -1324,7 +1332,6 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 		.null_stmt { return '' }
 		.decl_stmt { return '' }
 		.expr_stmt {
-			eprintln('EXPRSTMT lhs.kind=' + (if n.lhs != unsafe { nil } { int(n.lhs.kind).str() } else { 'nil' }))
 			if n.lhs != unsafe { nil } {
 				if n.lhs.kind == .comma {
 					mut parts := []string{}
@@ -1339,7 +1346,6 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 							stack << cur.rhs
 						} else {
 							r := v_expr(cur)
-							eprintln('FLATLEAF kind=' + int(cur.kind).str() + ' -> [' + r + ']')
 							if r != '' && r != '0' && !r.starts_with('/*expr') {
 								parts << r + ';'
 							}
@@ -1367,7 +1373,7 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 		}
 		.if_ {
 			mut s := 'if ' + v_expr(n.cond) + ' {\n'
-			s += indent_block(v_stmt(n.then, in_main))
+			s += indent_block(v_stmts(n.body, in_main))
 			s += '\n}'
 			if n.els != unsafe { nil } {
 				// Render a trailing `else if` when the else branch is itself an if.
@@ -1439,7 +1445,7 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 				}
 			}
 			mut s := 'for ' + init + '; ' + cond + '; ' + inc + ' {\n'
-			s += indent_block(v_stmt(n.then, in_main))
+			s += indent_block(v_stmts(n.body, in_main))
 			s += '\n}'
 			return s
 		}
@@ -1557,15 +1563,15 @@ fn v_expr(n &ast.Node) string {
 			for add_node != unsafe { nil } && add_node.kind == .cast {
 				add_node = add_node.lhs
 			}
-			mut base_var := &ast.Obj(unsafe { nil })
+			mut base_expr := ''
 			if add_node != unsafe { nil } && add_node.kind == .add
 				&& add_node.lhs != unsafe { nil } {
 				mut b := add_node.lhs
 				for b != unsafe { nil } && b.kind == .cast {
 					b = b.lhs
 				}
-				if b != unsafe { nil } && b.kind == .var_ref {
-					base_var = b.var
+				if b != unsafe { nil } && (b.kind == .var_ref || b.kind == .member) {
+					base_expr = v_expr(b)
 				}
 			}
 			mut mul_node := &ast.Node(unsafe { nil })
@@ -1579,10 +1585,9 @@ fn v_expr(n &ast.Node) string {
 					mul_node = r
 				}
 			}
-			if n.lhs != unsafe { nil } && n.lhs.kind == .deref && base_var != unsafe { nil } && mul_node != unsafe { nil } {
+			if base_expr != '' && mul_node != unsafe { nil } && n.lhs != unsafe { nil } && n.lhs.kind == .deref {
 				mut idx := v_expr(mul_node.lhs)
-				name := v_safe_name(base_var.name)
-				return 'unsafe { ' + '${name}[${idx}] = ' + v_expr(n.rhs) + ' }'
+				return 'unsafe { ' + base_expr + '[' + idx + '] = ' + v_expr(n.rhs) + ' }'
 			}
 			if n.lhs != unsafe { nil } && n.lhs.kind == .deref {
 				return 'unsafe { ' + v_expr(n.lhs) + ' = ' + v_expr(n.rhs) + ' }'
@@ -1598,7 +1603,13 @@ fn v_expr(n &ast.Node) string {
 			if m := n.member {
 				name = m.name
 			}
-			return v_expr(n.lhs) + '.' + v_safe_name(name)
+			// V auto-dereferences pointers for field access, so `p->x` (which is
+			// `(*p).x` here) renders as `p.x` rather than `*p.x`.
+			mut base := n.lhs
+			if base != unsafe { nil } && base.kind == .deref {
+				base = base.lhs
+			}
+			return v_expr(base) + '.' + v_safe_name(name)
 		}
 		.addr { return '&' + v_expr(n.lhs) }
 		.deref {
@@ -1633,7 +1644,12 @@ fn v_expr(n &ast.Node) string {
 		.funcall {
 			mut name := '/*call*/'
 			if n.lhs != unsafe { nil } && n.lhs.kind == .var_ref && n.lhs.var != unsafe { nil } {
-				name = v_safe_name(n.lhs.var.name)
+				obj := n.lhs.var
+				if obj.body.len == 0 && obj.params.len == 0 {
+					name = 'C.' + v_safe_name(obj.name)
+				} else {
+					name = v_safe_name(obj.name)
+				}
 			} else if n.lhs != unsafe { nil } {
 				name = v_expr(n.lhs)
 			}
