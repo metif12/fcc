@@ -155,3 +155,45 @@ fn test_objs_for_plugin_symbols() {
 	assert f.is_function
 	assert f.params.len == 1
 }
+
+fn test_plugin_type_is_opaque_and_attributed() {
+	ty := plugin_type('bash-string', 'bash')
+	assert ty.kind == .plugin
+	assert ty.plugin == 'bash-string'
+	assert ty.lang == 'bash'
+	// Incomplete until the plugin measures it, so the C size logic refuses it.
+	assert !ty.is_complete()
+	assert ty.size_or_known() == none
+}
+
+fn test_objs_inherit_type_lang() {
+	ty := plugin_type('bash-string', 'bash')
+	v := var_obj('s', ty)
+	assert v.lang == 'bash'
+	f := func_obj('greet', ty, [])
+	assert f.lang == 'bash'
+	n := var_ref_node(v, synth_tok('bash'), 'bash')
+	assert n.ty == ty
+	assert n.lang == 'bash'
+}
+
+fn test_tokens_carry_lang() {
+	mut t := synth_tok('echo')
+	assert t.text == 'echo'
+	t.lang = 'bash'
+	assert t.lang == 'bash'
+}
+
+fn test_plugin_nodes_walk_like_plain_ones() {
+	ty := plugin_type('bash-string', 'bash')
+	tok := synth_tok('bash')
+	mut data := map[string]string{}
+	data['op'] = 'print'
+	p := plugin_node('bash', data, tok, 'bash')
+	st := expr_stmt_node(p, tok, 'bash')
+	assert count_kind(st, .plugin) == 1
+	assert count_kind(st, .expr_stmt) == 1
+	kids := children(st)
+	assert kids.len == 1
+	assert kids[0].plugin == 'bash'
+}

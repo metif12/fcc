@@ -47,6 +47,10 @@ pub mut:
 	kind TokenKind
 	// text is the raw spelling, needed for identifiers, numbers and literals.
 	text string
+	// lang is the provenance language id for plugin-produced tokens.
+	// The C tokenizer leaves it empty ('c' is implied); a plugin lexer sets
+	// its own id so mixed-language diagnostics stay attributable.
+	lang string
 	// val is the decoded value of a numeric or character literal.
 	val i64
 	// fval is the decoded value of a floating literal.

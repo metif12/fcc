@@ -50,6 +50,11 @@ fn spell(ty &ast.Type, name string) string {
 			}
 			return if name != '' { name } else { kind_name(ty) }
 		}
+		.plugin {
+			// A plugin type has no C spelling; print its own name so
+			// `--dump-ast` stays attributable.
+			return 'plugin(' + ty.lang + ':' + ty.plugin + ')'
+		}
 	}
 }
 

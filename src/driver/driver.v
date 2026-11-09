@@ -1409,6 +1409,11 @@ fn v_type(t &ast.Type) string {
 			return 'struct { }'
 		}
 		.enum_ { return 'int' }
+		.plugin {
+			// No V spelling exists; keep the output compilable but attributable
+			// rather than silently mistyping it as `int`.
+			return 'int /* plugin(' + t.lang + ':' + t.plugin + ') */'
+		}
 		else { return 'int' }
 	}
 }

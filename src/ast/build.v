@@ -155,6 +155,7 @@ pub fn var_obj(name string, ty &Type) &Obj {
 	return &Obj{
 		name: name
 		ty:   ty
+		lang: ty.lang
 	}
 }
 
@@ -165,5 +166,20 @@ pub fn func_obj(name string, ty &Type, params []&Obj) &Obj {
 		ty:          ty
 		is_function: true
 		params:      params.clone()
+		lang:        ty.lang
+	}
+}
+
+// plugin_type makes an opaque type from another language: carried verbatim,
+// incomplete (`size` -1) unless the plugin measured it. Consumers treat it as
+// opaque — the backend reports it, `--dump-ast` prints its name.
+pub fn plugin_type(name string, lang string) &Type {
+	return &Type{
+		kind:   .plugin
+		size:   -1
+		align:  -1
+		name:   name
+		lang:   lang
+		plugin: name
 	}
 }

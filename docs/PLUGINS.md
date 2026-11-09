@@ -82,16 +82,26 @@ What `src/ast` gives you, and where each idea comes from:
   silently drops closure captures coerced to `fn` parameters, so a callback
   API would compile and visit nothing. `KindCounter`/`count_kind` show the
   pattern for stateful visits.
-- **Provenance** (`Node.lang`): Zig/Odin carry the producing language with
-  the node. The C front end sets `'c'`; plugins set their own id, so
-  mixed-language units stay diagnosable.
-- **Escape hatch** (`NodeKind.plugin` + `plugin`/`plugin_data`): a node a
-  plugin carries verbatim until a `post_parse` hook lowers it into plain
-  kinds. The backend reports an unlowered one as an error rather than
-  guessing — the same policy as `generic`.
+- **Provenance** (`Node.lang`, `Obj.lang`, `Type.lang`, `Token.lang`):
+  Zig/Odin carry the producing language with the node. The C front end sets
+  `'c'`; plugins set their own id, so mixed-language units stay diagnosable.
+- **Escape hatches** (`NodeKind.plugin` + `plugin`/`plugin_data`,
+  `TypeKind.plugin` + `plugin`, `Obj.plugin`/`plugin_data`): a node, type or
+  symbol a plugin carries verbatim until a `post_parse` hook lowers it into
+  plain kinds. Unlowered survivors are reported, never guessed at: the backend
+  errors, the constant folder refuses (`is_integer` is false for opaque
+  types), `--dump-ast` prints `plugin(lang:name)`, and `--to-v` emits
+  `int /* plugin(lang:name) */`. This keeps the enums open without making
+  every consumer list every language.
 
 `ctx.globals` is `[][]&ast.Obj`, already language-neutral: plugin-built
-`func_obj`/`var_obj` values append next to parsed C functions.
+`func_obj`/`var_obj` values append next to parsed C functions. Objects inherit
+their type's `lang`; plugin types from `plugin_type()` are incomplete
+(`size` -1) until the plugin measures them, so C's layout and conversion
+logic refuses them instead of miscompiling them. Direct constructors live in
+`src/ast/build.v`: `num_node`, `var_ref_node`, `binary_node`, `call_node`,
+`assign_node`, `expr_stmt_node`, `block_node`, `if_node`, `return_node`,
+`plugin_node`, `synth_tok`.
 
 ## Example: Brainfuck (`example-bf-input`)
 

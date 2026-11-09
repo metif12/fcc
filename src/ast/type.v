@@ -42,6 +42,12 @@ pub enum TypeKind {
 	struct_
 	union_
 	enum_
+	// plugin is a type from another language, carried verbatim. `Type.plugin`
+	// names it in that language's terms; `size` stays -1 (incomplete) unless
+	// the plugin measured it. Every consumer treats it as opaque: the backend
+	// reports it, the constant folder refuses it, `--dump-ast` prints the
+	// name. This is the type-level twin of `NodeKind.plugin`.
+	plugin
 }
 
 // Member is one field of a struct or union.
@@ -157,6 +163,12 @@ pub mut:
 	is_variadic bool
 	// name is the name the declarator that produced this type introduced.
 	name string
+	// lang is the provenance language id, mirroring `Node.lang`: 'c' for C
+	// types, the plugin name for plugin-defined ones.
+	lang string
+	// plugin names a `.plugin` type in its own language's terms
+	// (e.g. 'bash-string'). Meaningless for every other kind.
+	plugin string
 	// tag is the struct, union or enum tag, which is a different thing from the
 	// declarator's name: `struct S s;` gives one type both, and the variable's own
 	// type carries `s` where the tag `S` belongs. chibicc keeps both in `name` and

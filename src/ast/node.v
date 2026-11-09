@@ -121,6 +121,16 @@ pub mut:
 	name     string
 	ty       &Type = unsafe { nil }
 	is_local bool
+	// lang is the provenance language id, mirroring `Node.lang`: 'c' for C
+	// objects, the plugin name for plugin-defined ones (see `func_obj` /
+	// `var_obj` in build.v). Mixed-language units stay diagnosable because
+	// every symbol says which language produced it.
+	lang string
+	// plugin and plugin_data carry a plugin-defined object's payload, mirroring
+	// `Node.plugin` / `Node.plugin_data`. A `post_parse` hook lowers them;
+	// anything that survives to codegen is reported, not guessed at.
+	plugin      string
+	plugin_data map[string]string
 	// offset is the frame offset of a local, or -1 for something not yet placed.
 	offset int = -1
 	// stack_size is the frame size the backend reserved for a function, in bytes.
