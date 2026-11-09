@@ -54,6 +54,45 @@ every pipeline run. Disable any default without touching code:
 disabled = ["default-asm-output"]
 ```
 
+## Building AST directly (`src/ast`)
+
+Transpiling to C text (what the Brainfuck and Bash plugins do) is the quick
+path, but a plugin can also build AST nodes directly and skip the C layer:
+
+```v
+import src.ast
+
+tok := ast.synth_tok('my-lang')          // generated code has no position
+ty  := &ast.Type{kind: .basic, basic: .int_, size: 4, align: 4}
+one := ast.num_node(1, ty, tok, 'my-lang')
+x   := ast.var_obj('x', ty)
+body := ast.block_node([ast.expr_stmt_node(
+  ast.assign_node(ast.var_ref_node(x, tok, 'my-lang'), one, tok, 'my-lang'),
+  tok, 'my-lang')], tok, 'my-lang')
+```
+
+What `src/ast` gives you, and where each idea comes from:
+
+- **Categories** (`NodeKind.class/is_expr/is_stmt`): Go splits nodes into
+  `Expr`/`Stmt` interfaces; here declarations are `Obj`, so two classes cover
+  the set. Generic tools dispatch on category instead of listing sixty kinds.
+- **Traversal** (`children`/`walk`/`walk_all`/`count_kind`): Go's
+  `ast.Inspect`. The front end's passes recurse by hand; plugins should walk.
+  Note `walk` takes a `Visitor` interface, not a callback — this toolchain
+  silently drops closure captures coerced to `fn` parameters, so a callback
+  API would compile and visit nothing. `KindCounter`/`count_kind` show the
+  pattern for stateful visits.
+- **Provenance** (`Node.lang`): Zig/Odin carry the producing language with
+  the node. The C front end sets `'c'`; plugins set their own id, so
+  mixed-language units stay diagnosable.
+- **Escape hatch** (`NodeKind.plugin` + `plugin`/`plugin_data`): a node a
+  plugin carries verbatim until a `post_parse` hook lowers it into plain
+  kinds. The backend reports an unlowered one as an error rather than
+  guessing — the same policy as `generic`.
+
+`ctx.globals` is `[][]&ast.Obj`, already language-neutral: plugin-built
+`func_obj`/`var_obj` values append next to parsed C functions.
+
 ## Example: Brainfuck (`example-bf-input`)
 
 `src/ext/bf.v` is the worked example: a whole language in ~100 lines. It

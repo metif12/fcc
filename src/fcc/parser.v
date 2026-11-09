@@ -529,6 +529,7 @@ fn (mut p Parser) new_anon_gvar(ty &ast.Type, line int) &ast.Obj {
 
 fn (p &Parser) new_node(kind ast.NodeKind, tok ast.Token) &ast.Node {
 	return &ast.Node{
+		lang: 'c'
 		kind: kind
 		tok:  tok
 	}
@@ -537,6 +538,7 @@ fn (p &Parser) new_node(kind ast.NodeKind, tok ast.Token) &ast.Node {
 fn (p &Parser) new_binary(kind ast.NodeKind, lhs &ast.Node, rhs &ast.Node,
 	tok ast.Token) &ast.Node {
 	return &ast.Node{
+		lang: 'c'
 		kind: kind
 		tok:  tok
 		lhs:  lhs
@@ -546,6 +548,7 @@ fn (p &Parser) new_binary(kind ast.NodeKind, lhs &ast.Node, rhs &ast.Node,
 
 fn (p &Parser) new_unary(kind ast.NodeKind, expr &ast.Node, tok ast.Token) &ast.Node {
 	return &ast.Node{
+		lang: 'c'
 		kind: kind
 		tok:  tok
 		lhs:  expr
@@ -556,6 +559,7 @@ fn (p &Parser) new_unary(kind ast.NodeKind, expr &ast.Node, tok ast.Token) &ast.
 // gives it the type its spelling implies, which is not always int.
 fn (p &Parser) new_num(val i64, tok ast.Token) &ast.Node {
 	return &ast.Node{
+		lang: 'c'
 		kind: .num
 		tok:  tok
 		num:  val
@@ -569,6 +573,7 @@ fn (p &Parser) new_num(val i64, tok ast.Token) &ast.Node {
 // an unsigned long, which is right for System V and wrong here.
 fn (p &Parser) new_size_t(val i64, tok ast.Token) &ast.Node {
 	return &ast.Node{
+		lang: 'c'
 		kind: .num
 		tok:  tok
 		num:  val
@@ -578,6 +583,7 @@ fn (p &Parser) new_size_t(val i64, tok ast.Token) &ast.Node {
 
 fn (p &Parser) new_var_node(obj &ast.Obj, tok ast.Token) &ast.Node {
 	return &ast.Node{
+		lang: 'c'
 		kind: .var_ref
 		tok:  tok
 		var:  obj
@@ -596,6 +602,7 @@ fn (p &Parser) new_var_node(obj &ast.Obj, tok ast.Token) &ast.Node {
 fn (mut p Parser) new_alloca(sz &ast.Node, tok ast.Token) &ast.Node {
 	ty := func_type(pointer_to(ty_void))
 	return &ast.Node{
+		lang: 'c'
 		kind:    .funcall
 		tok:     tok
 		lhs:     p.new_var_node(p.builtin_alloca, tok)
@@ -2295,6 +2302,7 @@ fn (mut p Parser) declaration(basety &ast.Type, attr VarAttr) &ast.Node {
 // which is what addressing such an array goes through.
 fn (p &Parser) new_vla_ptr_node(obj &ast.Obj, tok ast.Token) &ast.Node {
 	return &ast.Node{
+		lang: 'c'
 		kind: .vla_ptr
 		tok:  tok
 		var:  obj
@@ -2304,6 +2312,7 @@ fn (p &Parser) new_vla_ptr_node(obj &ast.Obj, tok ast.Token) &ast.Node {
 // expr_stmt_of wraps an expression as a statement.
 fn (p &Parser) expr_stmt_of(expr &ast.Node) &ast.Node {
 	return &ast.Node{
+		lang: 'c'
 		kind: .expr_stmt
 		tok:  expr.tok
 		lhs:  expr
@@ -3649,6 +3658,7 @@ fn (mut p Parser) primary() &ast.Node {
 				// identifier, and deriving a numeric type from an identifier's letters is
 				// how `NEG` came out as a double and evaluated to zero.
 				return &ast.Node{
+					lang: 'c'
 					kind: .num
 					tok:  tok
 					num:  entry.enum_val
@@ -3707,6 +3717,7 @@ fn (mut p Parser) primary() &ast.Node {
 		}
 		if is_flonum(ty) {
 			return &ast.Node{
+				lang: 'c'
 				kind: .num
 				tok:  tok
 				fval: tok.fval
@@ -3714,6 +3725,7 @@ fn (mut p Parser) primary() &ast.Node {
 			}
 		}
 		return &ast.Node{
+			lang: 'c'
 			kind: .num
 			tok:  tok
 			num:  tok.val
@@ -3868,6 +3880,7 @@ fn (mut p Parser) unsupported_expression() &ast.Node {
 		p.pos++
 	}
 	return &ast.Node{
+		lang: 'c'
 		kind: .num
 		tok:  tok
 		num:  0
@@ -3983,6 +3996,7 @@ fn (mut p Parser) new_add(mut lhs &ast.Node, mut rhs &ast.Node, tok ast.Token) &
 	add_type(mut lhs)
 	add_type(mut rhs)
 	mut node := &ast.Node{
+		lang: 'c'
 		kind: .add
 		tok:  tok
 		lhs:  lhs

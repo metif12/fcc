@@ -587,6 +587,7 @@ pub fn new_cast(expr &ast.Node, ty &ast.Type) &ast.Node {
 		add_type(mut e)
 	}
 	return &ast.Node{
+		lang: 'c'
 		kind: .cast
 		tok:  expr.tok
 		lhs:  expr

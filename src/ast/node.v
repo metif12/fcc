@@ -93,6 +93,13 @@ pub enum NodeKind {
 	goto_
 	goto_expr
 	label
+	// plugin is a node a language plugin built directly instead of
+	// round-tripping through C text. `plugin` names the owning plugin and
+	// `plugin_data` carries its payload; a `post_parse` hook lowers these into
+	// plain kinds before codegen, and the backend reports an unlowered one
+	// rather than guessing at it. This is the escape hatch that keeps
+	// `NodeKind` open without making every consumer list every language.
+	plugin
 	// generic covers a construct not yet modelled individually. It exists so the
 	// parser can record what it saw and keep going instead of aborting, which is
 	// what makes the corpus sweep in phase 1 possible at all.
@@ -193,6 +200,10 @@ pub mut:
 	kind NodeKind
 	ty   &Type = unsafe { nil }
 	tok  Token
+	// lang is the provenance language id: 'c' for the C front end, the plugin
+	// name for plugin-built nodes. Mixed-language units stay diagnosable
+	// because every node says which language produced it.
+	lang string
 
 	// num is the value of a .num node, interpreted according to ty.
 	num i64
@@ -274,4 +285,9 @@ pub mut:
 	// `=` or `+` modifier, so the backend knows it must write the scratch
 	// register back to the operand's address after the template runs.
 	asm_is_output []bool
+	// plugin names the owning plugin of a `.plugin` node, and plugin_data
+	// carries its payload as strings. String-only by design: anything richer
+	// crosses the plugin boundary through a hook, not through the tree.
+	plugin      string
+	plugin_data map[string]string
 }
