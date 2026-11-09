@@ -451,6 +451,7 @@ fn ensure_extensions() {
 	// Example language plugins live behind their own register call so the
 	// pattern stays visible; they still work out of the box.
 	ext.register_bf()
+	ext.register_bash()
 }
 
 // load_effective_config finds and parses fcc.toml / fcc.blip.
