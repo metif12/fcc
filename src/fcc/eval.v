@@ -47,6 +47,16 @@ fn is_address_form(mut n &ast.Node) bool {
 	if n.kind == .var_ref && (n.var.ty.kind == .array || n.var.ty.kind == .func) {
 		return true
 	}
+	if n.kind == .member {
+		if n.lhs != unsafe { nil } {
+			if n.lhs.kind == .var_ref && n.lhs.var != unsafe { nil } && !n.lhs.var.is_local {
+				return true
+			}
+			mut child := n.lhs
+			return is_address_form(mut child)
+		}
+		return false
+	}
 	for raw in [n.lhs, n.rhs, n.cond, n.then, n.els] {
 		if raw == unsafe { nil } {
 			continue
@@ -244,13 +254,6 @@ fn eval2(mut node &ast.Node) ConstValue {
 		.member {
 			mem := node.member
 			m := mem or { return ConstValue{} }
-			// The address of a field is only meaningful for an array, where the element's
-			// address is the field's address. For anything else there is no constant
-			// value, and returning the offset alone would be a plausible wrong answer
-			// rather than an obvious one.
-			if m.ty.kind != .array {
-				return ConstValue{}
-			}
 			mut out := eval_rval(mut node.lhs)
 			out.value += i64(m.offset)
 			return out
