@@ -1686,12 +1686,6 @@ fn v_expr(n &ast.Node) string {
 		.lt { return '(' + v_expr(n.lhs) + ' < ' + v_expr(n.rhs) + ')' }
 		.le { return '(' + v_expr(n.lhs) + ' <= ' + v_expr(n.rhs) + ')' }
 		.assign {
-			if n.lhs != unsafe { nil } && n.lhs.kind == .deref {
-				if n.lhs.lhs != unsafe { nil } && n.lhs.lhs.kind == .add {
-					eprintln('    add.lhs.kind=' + (if n.lhs.lhs.lhs != unsafe { nil } { int(n.lhs.lhs.lhs.kind).str() } else { 'nil' }))
-					eprintln('    add.rhs.kind=' + (if n.lhs.lhs.rhs != unsafe { nil } { int(n.lhs.lhs.rhs.kind).str() } else { 'nil' }))
-				}
-			}
 			// Array element assignment `*(arr + (i * 4)) = v` is not legal V;
 			// render it as `arr[i] = v`.
 			mut add_node := n.lhs.lhs
