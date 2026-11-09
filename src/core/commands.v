@@ -57,6 +57,11 @@ pub fn is_legacy_flag(arg string) bool {
 
 // dispatch_verb runs `fcc <verb> ...`. Returns -1 when no handler matched
 // (caller falls back to legacy compile), else the exit code.
+//
+// Precedence: an enabled in-process command first, then a config-declared
+// `[plugin."verb"] command`, then `fcc-<verb>` on PATH (like git/cargo
+// subcommands). A disabled in-process command is skipped, so config can
+// replace a builtin verb with an external one of the same name.
 pub fn dispatch_verb(args []string, cfg FccConfig) int {
 	if args.len == 0 {
 		return -1
@@ -66,7 +71,26 @@ pub fn dispatch_verb(args []string, cfg FccConfig) int {
 		return -1
 	}
 	if cmd := find_command(first) {
-		return cmd.handler(args[1..], cfg)
+		if !is_disabled(cmd.name) && !is_plugin_disabled(cmd.name, cfg) {
+			return cmd.handler(args[1..], cfg)
+		}
+	}
+	// Config-declared external command: `[plugin."verb"] command = "..."`.
+	// `path` (an executable file) wins over `command` (a shell line) when
+	// both are set; neither set means "not an external command".
+	if def := cfg.plugins[first] {
+		if def.enabled && !is_disabled(first) {
+			if def.path != '' {
+				r := os.execute('${def.path} ${args[1..].join(' ')}')
+				print(r.output)
+				return r.exit_code
+			}
+			if def.command != '' {
+				r := os.execute('${def.command} ${args[1..].join(' ')}')
+				print(r.output)
+				return r.exit_code
+			}
+		}
 	}
 	// External plugin: fcc-<verb> on PATH (like git/cargo subcommands).
 	ext := 'fcc-' + first

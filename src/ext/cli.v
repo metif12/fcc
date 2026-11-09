@@ -85,11 +85,105 @@ fn cmd_plugin(args []string, cfg core.FccConfig) int {
 		for c in core.list_commands() {
 			println('  ${c.name}  ${c.description}')
 		}
-		println('(external: any fcc-<verb> on PATH is also a command)')
+		println('config-declared:')
+		if cfg.plugins.len == 0 {
+			println('  (none — fcc plugin add <name> -- <command> [--ext .foo])')
+		}
+		for name, def in cfg.plugins {
+			disabled := if !def.enabled { ' [disabled]' } else { '' }
+			println('  ${name}${disabled}  kind=${def.kind} command=${def.command} ext=${def.extensions}')
+		}
+		println('on PATH:')
+		found := discover_external_commands()
+		if found.len == 0 {
+			println('  (none — any fcc-<verb> on PATH is also a command)')
+		}
+		for verb in found {
+			println('  ${verb}')
+		}
+		return 0
+	}
+	if args.len >= 2 && args[0] == 'add' {
+		return cmd_plugin_add(args[1..])
+	}
+	if args.len == 2 && args[0] == 'remove' {
+		plugin_remove_from_file('fcc.toml', args[1]) or {
+			eprintln('fcc plugin remove: ${err.msg()}')
+			return 1
+		}
+		println('removed ${args[1]} from fcc.toml')
 		return 0
 	}
 	eprintln('usage: fcc plugin list')
+	eprintln('       fcc plugin add <name> -- <command...> [--ext .foo[,.bar]] [--kind input|cli] [--path <exe>]')
+	eprintln('       fcc plugin remove <name>')
 	return 1
+}
+
+// cmd_plugin_add implements `fcc plugin add`: install an external plugin
+// declaration into fcc.toml. Everything after `--` is the command; `--ext`
+// claims extensions (implying kind=input), `--kind` overrides the inference,
+// `--path` records an executable instead of a shell line.
+fn cmd_plugin_add(args []string) int {
+	if args.len == 0 {
+		eprintln('usage: fcc plugin add <name> -- <command...> [--ext .foo[,.bar]] [--kind input|cli]')
+		return 1
+	}
+	name := args[0]
+	mut rest := args[1..].clone()
+	mut exts := []string{}
+	mut kind := ''
+	mut path := ''
+	mut cmd_parts := []string{}
+	mut i := 0
+	for i < rest.len {
+		a := rest[i]
+		if a == '--ext' && i + 1 < rest.len {
+			for e in rest[i + 1].split(',') {
+				e2 := e.trim_space()
+				if e2 != '' {
+					exts << e2
+				}
+			}
+			i += 2
+			continue
+		}
+		if a == '--kind' && i + 1 < rest.len {
+			kind = rest[i + 1]
+			i += 2
+			continue
+		}
+		if a == '--path' && i + 1 < rest.len {
+			path = rest[i + 1]
+			i += 2
+			continue
+		}
+		if a == '--' {
+			i++
+			continue
+		}
+		cmd_parts << a
+		i++
+	}
+	command := cmd_parts.join(' ')
+	if command == '' && path == '' {
+		eprintln('fcc plugin add: need a command (after --) or --path <exe>')
+		return 1
+	}
+	if kind == '' {
+		kind = if exts.len > 0 { 'input' } else { 'cli' }
+	}
+	plugin_add_to_file('fcc.toml', name, core.PluginDef{
+		command:    command
+		path:       path
+		kind:       kind
+		extensions: exts
+	}) or {
+		eprintln('fcc plugin add: ${err.msg()}')
+		return 1
+	}
+	println('added ${name} to fcc.toml')
+	return 0
 }
 
 fn cmd_config(args []string, cfg core.FccConfig) int {

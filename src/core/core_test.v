@@ -150,3 +150,81 @@ fn run_tasks_ids(tasks map[string]TaskDef) ! {
 		return 0
 	})!
 }
+
+fn test_parse_plugin_declaration_keys() {
+	cfg := parse_config_text('[plugin."wlang"]\ncommand = "wlang-transpile"\nkind = "input"\nextensions = [".w", ".wat"]\n[plugin."greet"]\ncommand = "echo hi"\n', 'fcc.toml')!
+	assert cfg.plugins['wlang'].command == 'wlang-transpile'
+	assert cfg.plugins['wlang'].kind == 'input'
+	assert cfg.plugins['wlang'].extensions == ['.w', '.wat']
+	assert cfg.plugins['wlang'].enabled == true
+	assert cfg.plugins['greet'].command == 'echo hi'
+	assert cfg.plugins['greet'].kind == ''
+}
+
+fn test_parse_plugin_enabled_flag() {
+	cfg := parse_config_text('[plugin."bf"]\nenabled = false\n', 'fcc.toml')!
+	assert cfg.plugins['bf'].enabled == false
+	assert is_plugin_disabled('bf', cfg)
+	assert !is_plugin_disabled('other', cfg)
+}
+
+fn test_apply_config_disables_find_and_hooks() {
+	reset_registries()
+	reset_commands()
+	register_input(TestInput{})
+	register_output(TestOutput{})
+	register_hook(TestHook{})
+	assert find_input('x.c') or { panic('no input') }.name() == 'test-in'
+	assert find_output('asm') or { panic('no output') }.name() == 'test-out'
+	mut ctx := PipelineContext{
+		emit: 'asm'
+	}
+	run_hooks(.pre_parse, mut ctx)!
+	assert ctx.data['hook'] == 'ran'
+
+	mut cfg := default_config()
+	cfg.disabled = ['test-in', 'test-out', 'test-hook']
+	apply_config(cfg)
+	assert find_input('x.c') == none
+	assert find_output('asm') == none
+	mut ctx2 := PipelineContext{
+		emit: 'asm'
+	}
+	run_hooks(.pre_parse, mut ctx2)!
+	assert ctx2.data['hook'] == ''
+	assert input_claimed_by_disabled('x.c')
+	assert !input_claimed_by_disabled('y.z')
+	reset_registries()
+	reset_commands()
+}
+
+fn test_dispatch_skips_disabled_command() {
+	reset_registries()
+	reset_commands()
+	register_command(CliCommand{
+		name:        'test-cmd2'
+		description: 'test'
+		handler:     fn (args []string, cfg FccConfig) int {
+			return 7
+		}
+	})
+	assert dispatch_verb(['test-cmd2'], default_config()) == 7
+	mut cfg := default_config()
+	cfg.disabled = ['test-cmd2']
+	assert dispatch_verb(['test-cmd2'], cfg) == -1
+	reset_registries()
+	reset_commands()
+}
+
+fn test_dispatch_runs_config_command() {
+	reset_registries()
+	reset_commands()
+	mut cfg := default_config()
+	cfg.plugins['greet'] = PluginDef{
+		command: 'echo hi'
+	}
+	assert dispatch_verb(['greet', 'there'], cfg) == 0
+	assert dispatch_verb(['missing'], cfg) == -1
+	reset_registries()
+	reset_commands()
+}

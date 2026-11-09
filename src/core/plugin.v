@@ -82,6 +82,57 @@ pub interface HookPlugin {
 __global input_registry []InputPlugin
 __global output_registry []OutputPlugin
 __global hook_registry []HookPlugin
+// disabled_names is the effective disable set from the loaded config
+// (`[plugins] disabled` plus `[plugin.*] enabled = false`), installed by
+// `apply_config`. Registries are process-global, so the disable set is too:
+// `find_input`/`find_output`/`run_hooks` consult it, which is what makes a
+// disabled plugin actually absent from the pipeline rather than merely
+// labelled in `fcc plugin list`.
+__global disabled_names []string
+
+// apply_config installs the config's disable set for this process. The driver
+// calls it once, right after loading the effective config and registering
+// defaults; tests call it (or `reset_registries`, which clears it) per case.
+pub fn apply_config(cfg FccConfig) {
+	mut names := []string{}
+	for n in cfg.disabled {
+		if n !in names {
+			names << n
+		}
+	}
+	for name, def in cfg.plugins {
+		if !def.enabled && name !in names {
+			names << name
+		}
+	}
+	disabled_names = names.clone()
+}
+
+pub fn is_disabled(name string) bool {
+	return name in disabled_names
+}
+
+// input_claimed_by_disabled reports an input only a disabled plugin claims.
+// The driver uses it to fail with "enable it" instead of misparsing the file
+// as C on the legacy path.
+pub fn input_claimed_by_disabled(path string) bool {
+	lower := path.to_lower()
+	for p in input_registry {
+		if !is_disabled(p.name()) {
+			continue
+		}
+		exts := p.extensions()
+		if exts.len == 0 && p.can_handle(path) {
+			return true
+		}
+		for e in exts {
+			if lower.ends_with(e.to_lower()) && p.can_handle(path) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 pub fn register_input(p InputPlugin) {
 	input_registry << p
@@ -110,6 +161,9 @@ pub fn list_hooks() []HookPlugin {
 pub fn find_input(path string) ?InputPlugin {
 	lower := path.to_lower()
 	for p in input_registry {
+		if is_disabled(p.name()) {
+			continue
+		}
 		exts := p.extensions()
 		if exts.len == 0 && p.can_handle(path) {
 			return p
@@ -125,6 +179,9 @@ pub fn find_input(path string) ?InputPlugin {
 
 pub fn find_output(format string) ?OutputPlugin {
 	for p in output_registry {
+		if is_disabled(p.name()) {
+			continue
+		}
 		if format in p.formats() {
 			return p
 		}
@@ -133,7 +190,7 @@ pub fn find_output(format string) ?OutputPlugin {
 }
 
 pub fn run_hooks(stage Stage, mut ctx PipelineContext) ! {
-	mut hs := hook_registry.filter(it.stage() == stage)
+	mut hs := hook_registry.filter(it.stage() == stage && !is_disabled(it.name()))
 	hs.sort(a.priority() < b.priority())
 	for h in hs {
 		h.run(mut ctx)!
@@ -145,4 +202,5 @@ pub fn reset_registries() {
 	input_registry = []InputPlugin{}
 	output_registry = []OutputPlugin{}
 	hook_registry = []HookPlugin{}
+	disabled_names = []string{}
 }

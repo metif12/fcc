@@ -150,8 +150,48 @@ Known limitations, all shared with (not introduced by) this plugin:
 
 1. In-process: `core.register_command(CliCommand{...})` — same mechanism as
    `build` / `plugin` / `config` / `init`.
-2. External: any `fcc-<verb>` executable on `PATH` is dispatched
+2. Config-declared: `[plugin."greet"] command = "greet --hi"` makes
+   `fcc greet ...` run it. Precedence is in-process, then config, then PATH.
+   A disabled in-process command is skipped, so config can replace a builtin
+   verb with an external one of the same name.
+3. External: any `fcc-<verb>` executable on `PATH` is dispatched
    (`fcc foo --bar` runs `fcc-foo --bar`), like git/cargo subcommands.
+
+## Installable extensions (config-declared inputs)
+
+An external *input* plugin is a transpiler command the config names — the
+same transpile-and-reuse shape as the in-process language plugins, except the
+transpiler is any executable, in any language:
+
+```toml
+[plugin."wlang"]
+command = "wlang-transpile"   # or: path = "C:/tools/wtrans.exe"
+kind = "input"                # inferred from extensions when omitted
+extensions = [".w"]
+```
+
+The command runs as `<command> <path>` and must print a C translation unit on
+stdout; stderr passes through untouched. Registration is automatic on every
+run (`register_external_inputs`, right after config load), and a `.w` input
+diverts into the plugin pipeline exactly like `.bf`/`.sh` do — composing with
+every output (`-S`, `-c`, link). Disable with `enabled = false` or
+`[plugins] disabled = ["wlang"]`; compiling a file only a disabled plugin
+claims fails with "needs a disabled plugin" instead of misparsing as C.
+
+Manage declarations without editing TOML by hand:
+
+```console
+$ fcc plugin add wlang -- wlang-transpile --ext .w
+$ fcc plugin list      # in-process, config-declared, and on-PATH, with [disabled]
+$ fcc plugin remove wlang
+```
+
+`fcc plugin add` writes `[plugin."name"]` (command/path, kind, extensions,
+formats) into `fcc.toml`, creating it when missing, and preserves the rest of
+the file byte-identical; `remove` drops the section. A corrupt `fcc.toml` is
+fatal for builds but not for `fcc plugin ...`, which is the tool that repairs
+it. `path` (an executable file) wins over `command` (a shell line) when both
+are set; on Windows, backslashes in paths are escaped on write.
 
 ## Config: fcc.toml / fcc.blip
 

@@ -21,6 +21,14 @@ pub mut:
 	enabled bool = true
 	path    string
 	command string
+	// kind selects the registry: 'input', 'output', 'cli'. Empty infers
+	// from the other keys: extensions -> input, formats -> output,
+	// command alone -> cli.
+	kind string
+	// extensions claims file suffixes for an input plugin (e.g. ['.w']).
+	extensions []string
+	// formats claims emit formats for an output plugin (e.g. ['wat']).
+	formats []string
 	options map[string]string
 }
 
@@ -139,9 +147,12 @@ pub fn parse_config_text(text string, source string) !FccConfig {
 	for pname in pnames {
 		base := 'plugin.' + dotted(pname)
 		c.plugins[pname] = PluginDef{
-			enabled: doc_bool(doc, base + '.enabled', true)
-			path:    doc_string(doc, base + '.path', '')
-			command: doc_string(doc, base + '.command', '')
+			enabled:    doc_bool(doc, base + '.enabled', true)
+			path:       doc_string(doc, base + '.path', '')
+			command:    doc_string(doc, base + '.command', '')
+			kind:       doc_string(doc, base + '.kind', '')
+			extensions: doc_str_array(doc, base + '.extensions', []string{})
+			formats:    doc_str_array(doc, base + '.formats', []string{})
 		}
 	}
 	return c

@@ -481,6 +481,15 @@ fn load_effective_config(args []string) core.FccConfig {
 		return c
 	}
 	mut cfg := core.load_config_file(found) or {
+		// A broken config is fatal — except for the `plugin` verb, which is
+		// the tool that repairs configs. Bricking the repair tool behind
+		// the file it repairs would leave no way out.
+		if args.len > 0 && args[0] == 'plugin' {
+			eprintln('fcc: cannot load config ${found}: ${err.msg()} (continuing with defaults)')
+			mut c := core.default_config()
+			c.merge_build_tasks(os.getwd())
+			return c
+		}
 		eprintln('fcc: cannot load config ${found}: ${err.msg()}')
 		exit(1)
 		return core.default_config()
@@ -569,6 +578,11 @@ fn run_pipeline_modes(o &Options, emit string) {
 pub fn main(args []string) {
 	ensure_extensions()
 	cfg := load_effective_config(args)
+	// Config owns enablement and declares external plugins: install the
+	// disable set, then register config-declared inputs, before any dispatch
+	// or pipeline decision consults the registries.
+	core.apply_config(cfg)
+	ext.register_external_inputs(cfg)
 	// `fcc <verb>` (build / plugin / config / init / external fcc-*) is
 	// handled by the CLI plugin registry before legacy flag parsing, so
 	// new commands never disturb the historic `fcc [options] file...` shape.
@@ -648,6 +662,14 @@ pub fn main(args []string) {
 	if emit != '' && any_input_claimed_by_plugin(&o, &cfg) {
 		run_pipeline_modes(&o, emit)
 		return
+	}
+	if emit != '' {
+		for path in o.inputs {
+			if core.input_claimed_by_disabled(path) {
+				eprintln('fcc: ${path} needs a disabled plugin (enable it in fcc.toml or remove the [plugins] disabled entry)')
+				exit(1)
+			}
+		}
 	}
 	if o.dump_ast {
 		dump_ast(o)
