@@ -53,7 +53,7 @@ ship with it.
   failures characterised (host-ABI divergences, chibicc's private
   `__va_area__`, and a few uncharacterised mismatches) rather than papered
   over. Open items are tracked per case in `docs/PLAN.md`.
-- `v test .`: 17 of 17, on stock V and on the local build.
+- `v test .`: 18 of 18, on stock V and on the local build.
 - CI builds and runs the suite on stock V. Build is green.
 
 ## What "plugin-able" means here
