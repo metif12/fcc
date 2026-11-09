@@ -36,7 +36,13 @@ fn (mut p Preprocessor) next_counter() string {
 /// builtin_token builds the token for a computed macro such as `__LINE__`.
 fn (mut p Preprocessor) builtin_token(m Macro, tok ast.Token, path string) ast.Token {
 	value := match m.builtin {
-		.file { path }
+		.file {
+			if p.current_file != '' {
+				p.current_file
+			} else {
+				path
+			}
+		}
 		.line { i64(tok.line.disp_line + p.line_offset).str() }
 		// [C11 6.10.8.1p2] the value starts at 0 and increments after each use: "a new
 		// integer constant ... beginning with 0". Incrementing *before* reading — which
