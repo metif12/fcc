@@ -111,12 +111,12 @@ mut:
 // the preprocessor already has one of those in this module.
 pub struct ParseResult {
 pub mut:
-	globals   []&ast.Obj
-	errors    []string
-	warnings  []string
+	globals  []&ast.Obj
+	errors   []string
+	warnings []string
 	// typedefs maps a typedef name to its type, so consumers (such as --to-v)
 	// can render named aliases and named anonymous structs.
-	typedefs  map[string]&ast.Type
+	typedefs map[string]&ast.Type
 }
 
 // Parser holds the state of one parse.
@@ -198,10 +198,10 @@ pub fn parse_tokens(toks []ast.Token, path string, packs []PackEvent) ParseResul
 		}
 	}
 	return ParseResult{
-		globals:   p.globals
-		errors:    p.errors
-		warnings:  p.warnings
-		typedefs:  typedefs
+		globals:  p.globals
+		errors:   p.errors
+		warnings: p.warnings
+		typedefs: typedefs
 	}
 }
 
@@ -602,7 +602,7 @@ fn (p &Parser) new_var_node(obj &ast.Obj, tok ast.Token) &ast.Node {
 fn (mut p Parser) new_alloca(sz &ast.Node, tok ast.Token) &ast.Node {
 	ty := func_type(pointer_to(ty_void))
 	return &ast.Node{
-		lang: 'c'
+		lang:    'c'
 		kind:    .funcall
 		tok:     tok
 		lhs:     p.new_var_node(p.builtin_alloca, tok)
@@ -1704,7 +1704,6 @@ fn (mut p Parser) struct_members(mut ty &ast.Type, body_line int) {
 		}
 	}
 	ty.members = members
-
 }
 
 // layout_struct assigns member offsets and the type's own size and alignment.

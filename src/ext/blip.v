@@ -88,9 +88,9 @@ pub fn register_blip() {
 
 struct BlipTranspiler {
 mut:
-	lines []string
+	lines  []string
 	indent int
-	vars  map[string]bool
+	vars   map[string]bool
 }
 
 fn new_blip_transpiler() BlipTranspiler {
@@ -174,7 +174,7 @@ fn (mut t BlipTranspiler) transpile(src string, origin string) {
 fn is_blip_func_def(line string) bool {
 	if !line.contains('(') || !line.contains(')') { return false }
 	idx_paren := line.index(')') or { return false }
-	after := line[idx_paren+1..].trim_space()
+	after := line[idx_paren + 1..].trim_space()
 	if after == '' || after == '{' || after.starts_with('{') {
 		name := line.all_after('fn ').all_before('(').trim_space()
 		if name != '' && !name.contains(' ') && !name.contains(';') {
@@ -303,7 +303,9 @@ fn (mut t BlipTranspiler) transpile_block(lines []string, start int, end int) {
 					depth--
 					if depth == 0 { break }
 				}
-				if l.starts_with('for ') || l.starts_with('while ') || l.starts_with('if ') { depth++ }
+				if l.starts_with('for ') || l.starts_with('while ') || l.starts_with('if ') {
+					depth++
+				}
 				sub << lines[j]
 				j++
 			}
@@ -365,8 +367,8 @@ fn (mut t BlipTranspiler) transpile_block(lines []string, start int, end int) {
 
 fn blip_cond(s string) string {
 	r := blip_expr(s)
-	if r.starts_with('(') && r.ends_with(')') && blip_paren_balanced(r[1..r.len-1]) {
-		return r[1..r.len-1]
+	if r.starts_with('(') && r.ends_with(')') && blip_paren_balanced(r[1..r.len - 1]) {
+		return r[1..r.len - 1]
 	}
 	return r
 }
@@ -378,8 +380,8 @@ fn blip_expr(s string) string {
 fn blip_parse_expr(s string) string {
 	mut e := s
 	for e.starts_with('(') && e.ends_with(')') {
-		if blip_paren_balanced(e[1..e.len-1]) {
-			e = e[1..e.len-1].trim_space()
+		if blip_paren_balanced(e[1..e.len - 1]) {
+			e = e[1..e.len - 1].trim_space()
 		} else {
 			break
 		}
@@ -398,7 +400,7 @@ fn blip_parse_expr(s string) string {
 	}
 	if pos >= 0 && op != '' {
 		left := blip_parse_expr(e[..pos].trim_space())
-		right := blip_parse_expr(e[pos+1..].trim_space())
+		right := blip_parse_expr(e[pos + 1..].trim_space())
 		return '(' + left + ' ' + op + ' ' + right + ')'
 	}
 	depth = 0
@@ -415,7 +417,7 @@ fn blip_parse_expr(s string) string {
 	}
 	if pos >= 0 && op != '' {
 		left := blip_parse_expr(e[..pos].trim_space())
-		right := blip_parse_expr(e[pos+1..].trim_space())
+		right := blip_parse_expr(e[pos + 1..].trim_space())
 		return '(' + left + ' ' + op + ' ' + right + ')'
 	}
 	for _, cop in ['==', '!=', '<=', '>=', '<', '>'] {
@@ -425,20 +427,23 @@ fn blip_parse_expr(s string) string {
 			if e[k] == 40 { depth++ }
 			if e[k] == 41 { depth-- }
 			if depth != 0 { continue }
-			if e[k..k+cop.len] == cop {
+			if e[k..k + cop.len] == cop {
 				idx2 = k
 			}
 		}
 		if idx2 >= 0 {
 			left := blip_parse_expr(e[..idx2].trim_space())
-			right := blip_parse_expr(e[idx2+cop.len..].trim_space())
+			right := blip_parse_expr(e[idx2 + cop.len..].trim_space())
 			return '(' + left + ' ' + cop + ' ' + right + ')'
 		}
 	}
 	if e == '' { return '0' }
 	mut allnum := true
 	for c in e {
-		if !c.is_digit() { allnum = false; break }
+		if !c.is_digit() {
+			allnum = false
+			break
+		}
 	}
 	if allnum && e != '' { return e }
 	return e
@@ -448,7 +453,10 @@ fn blip_paren_balanced(s string) bool {
 	mut d := 0
 	for c in s {
 		if c == 40 { d++ }
-		if c == 41 { d--; if d < 0 { return false } }
+		if c == 41 {
+			d--
+			if d < 0 { return false }
+		}
 	}
 	return d == 0
 }
@@ -473,7 +481,7 @@ fn is_blip_int_literal(s string) bool {
 	return true
 }
 
-pub pub fn transpile_blip(src string, origin string) !string {
+pub fn transpile_blip(src string, origin string) !string {
 	mut t := new_blip_transpiler()
 	t.transpile(src, origin)
 	return t.lines.join('\n')

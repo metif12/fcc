@@ -275,8 +275,8 @@ fn (mut p Parser) stmt() &ast.Node {
 		}
 		mut node := p.new_node(.goto_, tok)
 		node.unique_label = p.brk_label
-			node.is_break = true
-		
+		node.is_break = true
+
 		p.pos++
 		p.expect(';')
 		return node
@@ -627,16 +627,16 @@ fn (mut p Parser) to_assign(binary &ast.Node) &ast.Node {
 
 	if target.kind == .member {
 		mut tmp_name := 'tmp'
-	if target.kind == .var_ref && target.var != unsafe { nil } && target.var.name != '' {
-		tmp_name = 'tmp_' + target.var.name
-	} else if target.kind == .member {
-		if m := target.member {
-			if m.name != '' {
-				tmp_name = 'tmp_' + m.name
+		if target.kind == .var_ref && target.var != unsafe { nil } && target.var.name != '' {
+			tmp_name = 'tmp_' + target.var.name
+		} else if target.kind == .member {
+			if m := target.member {
+				if m.name != '' {
+					tmp_name = 'tmp_' + m.name
+				}
 			}
 		}
-	}
-	tmp := p.new_lvar(tmp_name, pointer_to(target.ty), tok.line.disp_line)
+		tmp := p.new_lvar(tmp_name, pointer_to(target.ty), tok.line.disp_line)
 
 		mut take := p.new_binary(.assign, p.new_var_node(tmp, tok), p.new_unary(.addr,
 			target.lhs, tok), tok)

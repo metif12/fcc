@@ -1323,14 +1323,24 @@ fn vemit_collect_type(t &ast.Type, mut seen map[string]bool, mut out []string) {
 	}
 	match t.kind {
 		.struct_, .union_ {
-					name := if t.tag != '' { v_safe_name(t.tag) } else if t.name != '' { v_safe_name(t.name) } else { '' }
+			name := if t.tag != '' {
+				v_safe_name(t.tag)
+			} else if t.name != '' {
+				v_safe_name(t.name)
+			} else {
+				''
+			}
 			cap_name := if name != '' { name[0..1].to_upper() + name[1..] } else { '' }
 			if cap_name != '' && !(cap_name in seen) {
 				seen[cap_name] = true
 				mut fields := []string{}
 				for m in t.members {
 					vemit_collect_type(m.ty, mut seen, mut out)
-					fields << (if m.is_bitfield { 'mut ' + v_safe_name(m.name) + ' ' + v_type(m.ty) + ' // bitfield: ' + m.bit_width.str() + ' bits' } else { 'mut ' + v_safe_name(m.name) + ' ' + v_type(m.ty) })
+					fields << (if m.is_bitfield {
+						'mut ' + v_safe_name(m.name) + ' ' + v_type(m.ty) + ' // bitfield: ' + m.bit_width.str() + ' bits'
+					} else {
+						'mut ' + v_safe_name(m.name) + ' ' + v_type(m.ty)
+					})
 				}
 				keyword := if t.kind == .union_ { 'struct /* union */' } else { 'struct' }
 				mut body := []string{}
@@ -1344,7 +1354,15 @@ fn vemit_collect_type(t &ast.Type, mut seen map[string]bool, mut out []string) {
 			}
 		}
 		.enum_ {
-			name := if t.tag != '' { v_safe_name(t.tag) } else if t.origin != unsafe { nil } && t.origin.name != '' { v_safe_name(t.origin.name) } else if t.name != '' { v_safe_name(t.name) } else { '' }
+			name := if t.tag != '' {
+				v_safe_name(t.tag)
+			} else if t.origin != unsafe { nil } && t.origin.name != '' {
+				v_safe_name(t.origin.name)
+			} else if t.name != '' {
+				v_safe_name(t.name)
+			} else {
+				''
+			}
 			if name != '' && !(name in seen) {
 				seen[name] = true
 				out << '// enum ${name} { ... }  (members not translated)'
@@ -1513,7 +1531,7 @@ fn v_stmt(n &ast.Node, in_main bool) string {
 					mut stack := [n.lhs]
 					for stack.len > 0 {
 						cur := stack.pop()
-									if cur.kind == .comma {
+						if cur.kind == .comma {
 							stack << cur.lhs
 							stack << cur.rhs
 						} else {

@@ -418,25 +418,25 @@ fn linux_aarch64() &Target {
 		ldouble_align: 16
 		wchar_is_int:  true
 		macros:        [
-			TargetMacro{name: '__SIZE_TYPE__', value: 'unsigned long'},
-			TargetMacro{name: '__PTRDIFF_TYPE__', value: 'long'},
-			TargetMacro{name: '__WCHAR_TYPE__', value: 'int'},
-			TargetMacro{name: '__WINT_TYPE__', value: 'unsigned int'},
-			TargetMacro{name: '__INTPTR_TYPE__', value: 'long'},
-			TargetMacro{name: '__UINTPTR_TYPE__', value: 'unsigned long'},
-			TargetMacro{name: '__INT64_TYPE__', value: 'long'},
-			TargetMacro{name: '__INT32_TYPE__', value: 'int'},
-			TargetMacro{name: '__aarch64__', value: '1'},
-			TargetMacro{name: '__arm64__', value: '1'},
-			TargetMacro{name: '__linux__', value: '1'},
-			TargetMacro{name: '__unix__', value: '1'},
-			TargetMacro{name: '__LP64__', value: '1'},
+			TargetMacro{ name: '__SIZE_TYPE__', value: 'unsigned long' },
+			TargetMacro{ name: '__PTRDIFF_TYPE__', value: 'long' },
+			TargetMacro{ name: '__WCHAR_TYPE__', value: 'int' },
+			TargetMacro{ name: '__WINT_TYPE__', value: 'unsigned int' },
+			TargetMacro{ name: '__INTPTR_TYPE__', value: 'long' },
+			TargetMacro{ name: '__UINTPTR_TYPE__', value: 'unsigned long' },
+			TargetMacro{ name: '__INT64_TYPE__', value: 'long' },
+			TargetMacro{ name: '__INT32_TYPE__', value: 'int' },
+			TargetMacro{ name: '__aarch64__', value: '1' },
+			TargetMacro{ name: '__arm64__', value: '1' },
+			TargetMacro{ name: '__linux__', value: '1' },
+			TargetMacro{ name: '__unix__', value: '1' },
+			TargetMacro{ name: '__LP64__', value: '1' },
 		]
 	}
-	t.ty_long = &Type{kind: .basic, basic: .long_, size: 8, align: 8}
-	t.ty_ulong = &Type{kind: .basic, basic: .long_, size: 8, align: 8, is_unsigned: true}
-	t.ty_ldouble = &Type{kind: .basic, basic: .ldouble_, size: 16, align: 16}
-	t.ty_wchar = &Type{kind: .basic, basic: .int_, size: 4, align: 4}
+	t.ty_long = &Type{ kind: .basic, basic: .long_, size: 8, align: 8 }
+	t.ty_ulong = &Type{ kind: .basic, basic: .long_, size: 8, align: 8, is_unsigned: true }
+	t.ty_ldouble = &Type{ kind: .basic, basic: .ldouble_, size: 16, align: 16 }
+	t.ty_wchar = &Type{ kind: .basic, basic: .int_, size: 4, align: 4 }
 	return t
 }
 

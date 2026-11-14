@@ -457,10 +457,10 @@ fn (mut p Preprocessor) directives(toks []ast.Token, path string) []ast.Token {
 		// The directive name is the line number itself.
 		mut effective_name := name
 		mut effective_rest := rest
-			if effective_name.len > 0 && effective_name[0] >= 48 && effective_name[0] <= 57 {
-				effective_rest = effective_name + ' ' + effective_rest
-				effective_name = 'line'
-			}
+		if effective_name.len > 0 && effective_name[0] >= 48 && effective_name[0] <= 57 {
+			effective_rest = effective_name + ' ' + effective_rest
+			effective_name = 'line'
+		}
 		// Conditionals are tracked even inside a dead branch, so that a nested `#if`
 		// in skipped code cannot unbalance the level of an outer `#else`.
 		directive := effective_name
@@ -635,7 +635,10 @@ fn (mut p Preprocessor) simple_directive(name string, rest string, line int, pat
 				mut shorthand := 0
 				mut is_shorthand := name.len > 0
 				for ci in name {
-					if ci < 48 || ci > 57 { is_shorthand = false; break }
+					if ci < 48 || ci > 57 {
+						is_shorthand = false
+						break
+					}
 					shorthand = shorthand * 10 + int(ci - 48)
 				}
 				// Expand macros in the argument (e.g. #line line).
