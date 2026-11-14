@@ -1,6 +1,6 @@
 module fcc
 
-import ast
+import src.ast
 
 // The `#if` expression evaluator.
 //

@@ -1,6 +1,6 @@
 module fcc
 
-import ast
+import src.ast
 
 // Statement and expression tests.
 //

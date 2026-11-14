@@ -104,7 +104,9 @@ fn (mut t BashTranspiler) emit(s string) {
 }
 
 fn (mut t BashTranspiler) transpile(src string, origin string) {
-	raw_lines := src.split('\n')
+	// Normalize CRLF first: a Windows-edited script would otherwise leak
+	// `\r` into the generated C string literals.
+	raw_lines := src.replace('\r\n', '\n').split('\n')
 	mut start := 0
 	if raw_lines.len > 0 && raw_lines[0].starts_with('#!') {
 		start = 1

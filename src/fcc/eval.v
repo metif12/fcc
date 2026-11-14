@@ -1,6 +1,6 @@
 module fcc
 
-import ast
+import src.ast
 
 // Constant expressions, and the writing of initializer byte images.
 //

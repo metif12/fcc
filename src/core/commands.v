@@ -81,6 +81,9 @@ pub fn dispatch_verb(args []string, cfg FccConfig) int {
 	if def := cfg.plugins[first] {
 		if def.enabled && !is_disabled(first) {
 			if def.path != '' {
+				// `path` names an executable file: run it directly with no
+				// shell, so paths with spaces need no quoting and no
+				// shell metacharacter in an argument can inject.
 				mut cmd := [def.path]
 				cmd << args[1..]
 				r := os.exec(cmd)
@@ -88,9 +91,10 @@ pub fn dispatch_verb(args []string, cfg FccConfig) int {
 				return r.exit_code
 			}
 			if def.command != '' {
-				mut parts := def.command.split(' ')
-				parts << args[1..]
-				r := os.exec(parts)
+				// `command` is a shell line (it may use builtins, pipes,
+				// or extra flags, e.g. `command = "echo hi"`): it needs
+				// a shell by definition, like build-task `run` lines.
+				r := exec_shell('${def.command} ${args[1..].join(' ')}')
 				print(r.output)
 				return r.exit_code
 			}

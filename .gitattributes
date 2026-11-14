@@ -1,0 +1,7 @@
+# Normalize line endings: V sources are LF everywhere (`v fmt` enforces it),
+# so Windows checkouts must not introduce CRLF. C *inputs* to the compiler
+# may still be CRLF -- the tokenizer handles that (see tokenizer_test.v).
+*.v text eol=lf
+*.blip text eol=lf
+*.toml text eol=lf
+*.md text eol=lf

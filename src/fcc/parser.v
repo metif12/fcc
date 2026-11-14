@@ -1,6 +1,6 @@
 module fcc
 
-import ast
+import src.ast
 
 // The declaration half of the parser.
 //

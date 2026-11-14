@@ -1,6 +1,6 @@
 module fcc
 
-import ast
+import src.ast
 import os
 
 // Preprocessor tests.

@@ -3,7 +3,6 @@ module ext
 import os
 import time
 import src.core
-import src.fcc
 
 // Run, test and watch: the `go run` / `go test` / `air` of fcc.
 //

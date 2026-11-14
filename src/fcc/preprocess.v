@@ -1,7 +1,7 @@
 module fcc
 
 import os
-import ast
+import src.ast
 
 // The preprocessor.
 //

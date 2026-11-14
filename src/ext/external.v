@@ -37,6 +37,10 @@ pub:
 	plugin_name string
 	command     string
 	exts        []string
+	// is_path is true when `command` names an executable file (from the
+	// config `path` key) rather than a shell line (from `command`): the
+	// file runs directly with no shell, the line runs under one.
+	is_path bool
 }
 
 pub fn (p ExternalInput) name() string {
@@ -58,9 +62,11 @@ pub fn (p ExternalInput) can_handle(path string) bool {
 }
 
 pub fn (p ExternalInput) load(path string, mut ctx core.PipelineContext) ! {
-	mut parts := p.command.split(' ')
-	parts << path
-	r := os.exec(parts)
+	r := if p.is_path {
+		os.exec([p.command, path])
+	} else {
+		core.exec_shell('${p.command} ${path}')
+	}
 	if r.exit_code != 0 {
 		ctx.diagnostics << '${p.plugin_name}: command exited ${r.exit_code}: ${r.output}'
 		ctx.failed = true
@@ -150,6 +156,7 @@ pub fn register_external_inputs(cfg core.FccConfig) {
 			plugin_name: name
 			command:     cmd
 			exts:        def.extensions.clone()
+			is_path:     def.path != ''
 		})
 	}
 }

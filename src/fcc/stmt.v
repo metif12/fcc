@@ -1,6 +1,6 @@
 module fcc
 
-import ast
+import src.ast
 
 // Statements, assignment and function calls.
 //

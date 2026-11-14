@@ -106,7 +106,9 @@ fn (mut t BlipTranspiler) emit(s string) {
 }
 
 fn (mut t BlipTranspiler) transpile(src string, origin string) {
-	raw_lines := src.split('\n')
+	// Normalize CRLF first, like the bash transpiler: a Windows-edited
+	// source would otherwise leak `\r` into the generated C.
+	raw_lines := src.replace('\r\n', '\n').split('\n')
 	mut start := 0
 	if raw_lines.len > 0 && raw_lines[0].starts_with('#!') {
 		start = 1

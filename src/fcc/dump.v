@@ -1,6 +1,6 @@
 module fcc
 
-import ast
+import src.ast
 
 // Rendering the parse result as text.
 //

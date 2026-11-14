@@ -1,6 +1,6 @@
 module fcc
 
-import ast
+import src.ast
 
 // V-style diagnostics: a snippet with a caret under the terse first line.
 //

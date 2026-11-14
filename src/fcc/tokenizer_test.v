@@ -1,6 +1,6 @@
 module fcc
 
-import ast
+import src.ast
 
 // Tokenizer tests.
 //
@@ -344,6 +344,22 @@ fn test_unterminated_string_does_not_hang() {
 def')
 	assert t.len == 2
 	assert t[0] == '"abc'
+}
+
+// CRLF sources (the Windows default) must tokenize like LF ones: a `\r`
+// before the newline is a line ending, not token content.
+fn test_crlf_directive_has_no_cr() {
+	assert texts('#define Q 9\r\nint x = Q;') == ['#define Q 9', 'int', 'x', '=', 'Q', ';']
+}
+
+fn test_crlf_unterminated_string_has_no_cr() {
+	t := texts('"abc\r\ndef')
+	assert t.len == 2
+	assert t[0] == '"abc'
+}
+
+fn test_crlf_splice_in_string_joins() {
+	assert strdata('"a\\\r\nb"') == 'ab'
 }
 
 // --- keywords ---

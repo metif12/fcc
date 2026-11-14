@@ -1,7 +1,7 @@
 module fcc
 
 import strconv
-import ast
+import src.ast
 
 // The tokenizer.
 //
@@ -893,13 +893,20 @@ fn (mut t Tokenizer) read_quoted(quote u8, from int) ast.Token {
 	mut i := t.pos + 1
 	mut data := []u8{}
 	for i < t.src.len && t.src[i] != quote {
-		if t.src[i] == `\n` {
+		// `\r` ends the literal like `\n` does: a CRLF source would otherwise
+		// capture the carriage return into an unterminated literal (`"abc\r`).
+		if t.src[i] == `\n` || t.src[i] == `\r` {
 			break
 		}
 		// A line splice is deleted before anything is tokenized, so it does not end a
 		// quoted literal either: `"spli\` + newline + `ced"` is one string of six
 		// characters. It has to be tested *before* the newline above, or the newline
 		// that is part of the pair is taken for the end of the line.
+		if t.src[i] == `\\` && i + 2 < t.src.len && t.src[i + 1] == `\r`
+			&& t.src[i + 2] == `\n` {
+			i += 3
+			continue
+		}
 		if t.src[i] == `\\` && i + 1 < t.src.len && t.src[i + 1] == `\n` {
 			i += 2
 			continue
@@ -1050,6 +1057,13 @@ fn (mut t Tokenizer) read_directive() ast.Token {
 	}
 	t.pos = i
 	t.line_start = i
+	// A CRLF source ends this line with `\r\n`: the loop stops at the `\n`
+	// but would keep the `\r` as directive text (`#define Q 9\r`), which no
+	// later phase strips. Windows C files are CRLF by default, so the
+	// carriage return is a line ending here, not directive content.
+	if folded.len > 0 && folded.last() == `\r` {
+		folded.pop()
+	}
 	text := folded.bytestr()
 	return ast.Token{
 		kind: .preproc_any
