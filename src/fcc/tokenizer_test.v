@@ -362,6 +362,15 @@ fn test_crlf_splice_in_string_joins() {
 	assert strdata('"a\\\r\nb"') == 'ab'
 }
 
+fn test_punctuator_table_matches_dispatch() {
+	// The first-byte dispatch in read_punct must agree with the table it
+	// replaced: every entry lexes as exactly itself, never split. The `a `
+	// prefix keeps `#`/`##` off line start, where they would be directives.
+	for p in punctuators {
+		assert texts('a ${p} b') == ['a', p, 'b'], 'punctuator ${p} split or mislexed'
+	}
+}
+
 // --- keywords ---
 
 fn test_c_keywords_are_keywords() {

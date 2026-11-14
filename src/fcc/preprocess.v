@@ -35,8 +35,12 @@ import src.ast
 pub struct Preprocessor {
 pub mut:
 	// macros is an ordered list rather than a map so that a dump is deterministic and a
-	// redefinition can replace in place.
-	macros []Macro
+	// redefinition can replace in place. macro_index accelerates it: every lookup
+	// in phase 2 (one per identifier/keyword token) would otherwise scan the
+	// whole list, which is quadratic on macro-heavy headers. The list stays the
+	// source of truth; the map is rebuilt by every mutation below.
+	macros      []Macro
+	macro_index map[string]int
 	// cond_stack holds the state of every open `#if`, so `#else` and `#endif` can find
 	// the level they belong to and an unterminated `#if` becomes a diagnosable error
 	// at end of file rather than a silent acceptance.
@@ -178,6 +182,7 @@ pub mut:
 pub fn preprocessor(quote_paths []string, angle_paths []string) &Preprocessor {
 	return &Preprocessor{
 		macros:      []Macro{}
+		macro_index: map[string]int{}
 		cond_stack:  []Conditional{}
 		quote_paths: quote_paths.clone()
 		angle_paths: angle_paths.clone()
@@ -203,6 +208,18 @@ pub fn (mut p Preprocessor) define_from_option(spec string) {
 // undefine removes a macro, matching `-U`.
 pub fn (mut p Preprocessor) undefine(name string) {
 	p.macros = p.macros.filter(it.name != name)
+	p.rebuild_macro_index()
+}
+
+// rebuild_macro_index re-accelerates the macro list after a mutation.
+// Defines are rare (one per `#define`) and lookups are per-token, so a full
+// rebuild on write keeps every read O(1) at negligible total cost.
+fn (mut p Preprocessor) rebuild_macro_index() {
+	mut idx := map[string]int{}
+	for i, m in p.macros {
+		idx[m.name] = i
+	}
+	p.macro_index = idx
 }
 
 // define_raw registers a macro whose body is already tokenized.
@@ -218,6 +235,7 @@ pub fn (mut p Preprocessor) define_raw(name string, is_func bool, params []strin
 		body:        body
 		builtin:     .none
 	}
+	p.rebuild_macro_index()
 }
 
 // define_builtin registers one of the computed macros.
@@ -227,6 +245,7 @@ pub fn (mut p Preprocessor) define_builtin(name string, which BuiltinMacro) {
 		name:    name
 		builtin: which
 	}
+	p.rebuild_macro_index()
 }
 
 // define_target_macro registers one of the compiler's predefined *target* macros.
@@ -293,21 +312,17 @@ pub fn (mut p Preprocessor) define_builtins() {
 
 // lookup finds a macro by name, or returns none.
 pub fn (p &Preprocessor) lookup(name string) ?Macro {
-	for m in p.macros {
-		if m.name == name {
-			return m
-		}
+	if idx := p.find_index(name) {
+		return p.macros[idx]
 	}
 	return none
 }
 
 // find_index returns the position of a macro in the table, so that the recursion
-// guard can be set and cleared in place.
-fn (mut p Preprocessor) find_index(name string) ?int {
-	for i, m in p.macros {
-		if m.name == name {
-			return i
-		}
+// guard can be set and cleared in place. It reads the index, not the list.
+fn (p &Preprocessor) find_index(name string) ?int {
+	if name in p.macro_index {
+		return p.macro_index[name]
 	}
 	return none
 }
@@ -819,6 +834,7 @@ fn (mut p Preprocessor) do_pragma(rest string, line int, path string) {
 		if m := saved {
 			p.macros = p.macros.filter(it.name != pop_name)
 			p.macros << m
+			p.rebuild_macro_index()
 		} else {
 			p.undefine(pop_name)
 		}

@@ -516,15 +516,112 @@ fn (mut t Tokenizer) read_punct() ast.Token {
 	if t.pos < t.src.len && t.src[t.pos] == `\\` && (t.peek_at(t.pos + 1) == `\n` || (t.peek_at(t.pos + 1) == `\r` && t.peek_at(t.pos + 2) == `\n`)) {
 		t.skip_splice()
 	}
-	for p in punctuators {
-		if t.src.len - t.pos >= p.len && t.src[t.pos..t.pos + p.len] == p {
-			t.pos += p.len
-			return ast.Token{
-				kind: .punct
-				text: p
-				len:  p.len
-				line: t.make_line()
+	// Dispatch on the first byte rather than scanning the whole `punctuators`
+	// table: every token paid up to ~50 slice-allocating comparisons before,
+	// and the common single-character case paid all of them. Arms are
+	// longest-first within a prefix, exactly like the table order, so `<<=`
+	// still wins over `<<` and `<=`. Anything unmatched is one character,
+	// which is byte-identical to matching the table's tail (same kind, text,
+	// length) — and `test_punctuator_table_matches_dispatch` pins that.
+	if t.pos < t.src.len {
+		c := t.src[t.pos]
+		n1 := t.peek_at(t.pos + 1)
+		n2 := t.peek_at(t.pos + 2)
+		match c {
+			`<` {
+				if n1 == `<` && n2 == `=` {
+					return t.punct_token('<<=', 3)
+				} else if n1 == `<` {
+					return t.punct_token('<<', 2)
+				} else if n1 == `=` {
+					return t.punct_token('<=', 2)
+				}
 			}
+			`>` {
+				if n1 == `>` && n2 == `=` {
+					return t.punct_token('>>=', 3)
+				} else if n1 == `>` {
+					return t.punct_token('>>', 2)
+				} else if n1 == `=` {
+					return t.punct_token('>=', 2)
+				}
+			}
+			`.` {
+				if n1 == `.` && n2 == `.` {
+					return t.punct_token('...', 3)
+				}
+			}
+			`-` {
+				if n1 == `>` {
+					return t.punct_token('->', 2)
+				} else if n1 == `-` {
+					return t.punct_token('--', 2)
+				} else if n1 == `=` {
+					return t.punct_token('-=', 2)
+				}
+			}
+			`+` {
+				if n1 == `+` {
+					return t.punct_token('++', 2)
+				} else if n1 == `=` {
+					return t.punct_token('+=', 2)
+				}
+			}
+			`=` {
+				if n1 == `=` {
+					return t.punct_token('==', 2)
+				}
+			}
+			`!` {
+				if n1 == `=` {
+					return t.punct_token('!=', 2)
+				}
+			}
+			`&` {
+				if n1 == `&` {
+					return t.punct_token('&&', 2)
+				} else if n1 == `=` {
+					return t.punct_token('&=', 2)
+				}
+			}
+			`|` {
+				if n1 == `|` {
+					return t.punct_token('||', 2)
+				} else if n1 == `=` {
+					return t.punct_token('|=', 2)
+				}
+			}
+			`*` {
+				if n1 == `=` {
+					return t.punct_token('*=', 2)
+				}
+			}
+			`/` {
+				if n1 == `=` {
+					return t.punct_token('/=', 2)
+				}
+			}
+			`%` {
+				if n1 == `=` {
+					return t.punct_token('%=', 2)
+				}
+			}
+			`^` {
+				if n1 == `=` {
+					return t.punct_token('^=', 2)
+				}
+			}
+			`:` {
+				if n1 == `:` {
+					return t.punct_token('::', 2)
+				}
+			}
+			`#` {
+				if n1 == `#` {
+					return t.punct_token('##', 2)
+				}
+			}
+			else {}
 		}
 	}
 	// An unrecognized byte becomes a one-character punctuator so the parser can
@@ -547,6 +644,18 @@ fn (mut t Tokenizer) read_punct() ast.Token {
 //
 // The value is decoded here rather than in the parser because C allows a suffix and
 // a base prefix, and `0x10` must not be confused with `10` at parse time.
+// punct_token builds the token for a first-byte dispatch hit in `read_punct`.
+// It is the table match factored out: same kind, text and length, same line.
+fn (mut t Tokenizer) punct_token(text string, n int) ast.Token {
+	t.pos += n
+	return ast.Token{
+		kind: .punct
+		text: text
+		len:  n
+		line: t.make_line()
+	}
+}
+
 fn (mut t Tokenizer) read_number() ast.Token {
 	start := t.pos
 	mut spliced := false
