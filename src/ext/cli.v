@@ -85,7 +85,7 @@ fn cmd_build(args []string, cfg core.FccConfig) int {
 		if run == '' {
 			return 0
 		}
-		r := os.execute(run)
+		r := core.exec_shell(run)
 		print(r.output)
 		return r.exit_code
 	}, force) or {

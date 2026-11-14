@@ -81,12 +81,16 @@ pub fn dispatch_verb(args []string, cfg FccConfig) int {
 	if def := cfg.plugins[first] {
 		if def.enabled && !is_disabled(first) {
 			if def.path != '' {
-				r := os.execute('${def.path} ${args[1..].join(' ')}')
+				mut cmd := [def.path]
+				cmd << args[1..]
+				r := os.exec(cmd)
 				print(r.output)
 				return r.exit_code
 			}
 			if def.command != '' {
-				r := os.execute('${def.command} ${args[1..].join(' ')}')
+				mut parts := def.command.split(' ')
+				parts << args[1..]
+				r := os.exec(parts)
 				print(r.output)
 				return r.exit_code
 			}
@@ -95,7 +99,9 @@ pub fn dispatch_verb(args []string, cfg FccConfig) int {
 	// External plugin: fcc-<verb> on PATH (like git/cargo subcommands).
 	ext := 'fcc-' + first
 	if found := os.find_abs_path_of_executable(ext) {
-		r := os.execute('${found} ${args[1..].join(' ')}')
+		mut cmd := [found]
+		cmd << args[1..]
+		r := os.exec(cmd)
 		print(r.output)
 		return r.exit_code
 	}

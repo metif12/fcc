@@ -58,7 +58,9 @@ pub fn (p ExternalInput) can_handle(path string) bool {
 }
 
 pub fn (p ExternalInput) load(path string, mut ctx core.PipelineContext) ! {
-	r := os.execute('${p.command} ${path}')
+	mut parts := p.command.split(' ')
+	parts << path
+	r := os.exec(parts)
 	if r.exit_code != 0 {
 		ctx.diagnostics << '${p.plugin_name}: command exited ${r.exit_code}: ${r.output}'
 		ctx.failed = true

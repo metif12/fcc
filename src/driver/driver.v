@@ -146,7 +146,6 @@ pub const usage = 'usage: fcc [options] file...
   --to-v        translate C to V source
   --to-v-bindings  emit V bindings to the C (c2v-style)
   --preprocess  preprocess only, print the resulting tokens
-  --dump-ast    parse and print the declarations that were read
   --extern-as   assemble with the system `as` instead of the native emitter
   --version        print the version
   --help           print this message
@@ -193,7 +192,7 @@ pub fn parse_args(args []string) !Options {
 		}
 		if arg == '-o' {
 			i++
-			o.output = need_value(args, i, '-o')
+			o.output = need_value(args, i, '-o') or { return err }
 		} else if arg.starts_with('-o') && arg.len > 2 {
 			o.output = arg[2..]
 		} else if arg == '-c' {
@@ -214,7 +213,7 @@ pub fn parse_args(args []string) !Options {
 			o.emit_v_bindings = true
 		} else if arg == '--emit' {
 			i++
-			o.emits << need_value(args, i, '--emit')
+			o.emits << need_value(args, i, '--emit') or { return err }
 		} else if arg.starts_with('--emit=') {
 			o.emits << arg['--emit='.len..]
 		} else if arg == '--extern-as' {
@@ -232,44 +231,44 @@ pub fn parse_args(args []string) !Options {
 			}
 		} else if arg == '-target' {
 			i++
-			o.target = need_value(args, i, '-target')
+			o.target = need_value(args, i, '-target') or { return err }
 			if o.target == '' {
 				return error('option ${arg} requires a target triple')
 			}
 		} else if arg == '-isystem' {
 			i++
-			o.sys_includes << need_value(args, i, '-isystem')
+			o.sys_includes << need_value(args, i, '-isystem') or { return err }
 		} else if arg == '-include' {
 			i++
-			o.pre_includes << need_value(args, i, '-include')
+			o.pre_includes << need_value(args, i, '-include') or { return err }
 		} else if arg == '-I' {
 			i++
-			o.includes << need_value(args, i, '-I')
+			o.includes << need_value(args, i, '-I') or { return err }
 		} else if arg.starts_with('-I') && arg.len > 2 {
 			o.includes << arg[2..]
 		} else if arg == '-D' {
 			i++
-			o.defines << need_value(args, i, '-D')
+			o.defines << need_value(args, i, '-D') or { return err }
 		} else if arg.starts_with('-D') && arg.len > 2 {
 			o.defines << arg[2..]
 		} else if arg == '-U' {
 			i++
-			o.undefines << need_value(args, i, '-U')
+			o.undefines << need_value(args, i, '-U') or { return err }
 		} else if arg.starts_with('-U') && arg.len > 2 {
 			o.undefines << arg[2..]
 		} else if arg == '-L' {
 			i++
-			o.lib_paths << need_value(args, i, '-L')
+			o.lib_paths << need_value(args, i, '-L') or { return err }
 		} else if arg.starts_with('-L') && arg.len > 2 {
 			o.lib_paths << arg[2..]
 		} else if arg == '-l' {
 			i++
-			o.libs << need_value(args, i, '-l')
+			o.libs << need_value(args, i, '-l') or { return err }
 		} else if arg.starts_with('-l') && arg.len > 2 {
 			o.libs << arg[2..]
 		} else if arg == '-B' {
 			i++
-			o.resource_root = need_value(args, i, '-B')
+			o.resource_root = need_value(args, i, '-B') or { return err }
 		} else if arg.starts_with('-B') && arg.len > 2 {
 			o.resource_root = arg[2..]
 		} else if arg.starts_with('-bt') {
@@ -360,13 +359,12 @@ const options_that_consume_an_operand = [
 	'-iwithprefix'
 	'-iwithprefixbefore'
 	'-isysroot'
-	'-idirafter'
 	'--sysroot',
 ]
 
-fn need_value(args []string, i int, flag string) string {
+fn need_value(args []string, i int, flag string) !string {
 	if i >= args.len {
-		panic('option ${flag} requires an argument')
+		return error('option ${flag} requires an argument')
 	}
 	return args[i]
 }
@@ -404,8 +402,6 @@ fn resolve_triple(o &Options) !string {
 
 // select_target validates `-target` and records it for the front end.
 //
-// It is called once per process, before anything is parsed. The front end builds
-// the target itself, on first use, so nothing here allocates.
 // It is called once per process, before anything is parsed. The front end builds
 // the target itself, on first use, so nothing here allocates.
 //

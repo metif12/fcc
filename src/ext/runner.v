@@ -90,7 +90,7 @@ fn link_objects(ld string, objs []string, exe string, lib_paths []string, libs [
 	for l in libs {
 		cmd << '-l' + l
 	}
-	r := os.execute(cmd.join(' '))
+	r := os.exec(cmd)
 	if r.output != '' {
 		print(r.output)
 	}
@@ -217,7 +217,7 @@ fn cmd_run(args []string, cfg core.FccConfig) int {
 	}
 	mut cmd := [exe]
 	cmd << o.prog_args
-	r := os.execute(cmd.join(' '))
+	r := os.exec(cmd)
 	print(r.output)
 	return r.exit_code
 }
@@ -280,7 +280,7 @@ fn run_one_test(path string, idx int, includes []string, sys_includes []string, 
 		r.elapsed = time.ticks() - t0
 		return r
 	}
-	run := os.execute(exe)
+	run := os.exec([exe])
 	r.elapsed = time.ticks() - t0
 	r.output = run.output
 	if run.exit_code == 0 {
@@ -307,7 +307,7 @@ fn cmd_test(args []string, cfg core.FccConfig) int {
 			if run == '' {
 				return 0
 			}
-			r := os.execute(run)
+			r := core.exec_shell(run)
 			print(r.output)
 			return r.exit_code
 		}, force) or {
@@ -498,7 +498,7 @@ fn run_watch_command(cmd []string, clear bool, first bool) {
 	} else {
 		println('watch: change detected, running: ${cmd.join(' ')}')
 	}
-	r := os.execute(cmd.join(' '))
+	r := os.exec(cmd)
 	print(r.output)
 	if r.exit_code != 0 {
 		println('watch: command exited ${r.exit_code}')

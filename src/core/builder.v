@@ -115,6 +115,17 @@ fn is_up_to_date(t TaskDef) bool {
 	return true
 }
 
+// exec_shell runs a user-provided shell line (build task `run`, watch
+// command). Shell semantics (pipes, redirects) are intentional here, unlike
+// compiler-internal spawns which must use os.exec array form.
+pub fn exec_shell(run string) os.Result {
+	$if windows {
+		return os.exec(['cmd', '/c', run])
+	} $else {
+		return os.exec(['sh', '-c', run])
+	}
+}
+
 // delegate_build_v hands off to `v run build.v <args>` when the project
 // uses a programmatic build file. Returns true when it handled the build.
 pub fn delegate_build_v(dir string, args []string) bool {
@@ -123,8 +134,9 @@ pub fn delegate_build_v(dir string, args []string) bool {
 		return false
 	}
 	vbin := os.find_abs_path_of_executable('v') or { return false }
-	cmd := '${vbin} -enable-globals run ${p} ${args.join(' ')}'
-	r := os.execute(cmd)
+	mut cmd := [vbin, '-enable-globals', 'run', p]
+	cmd << args
+	r := os.exec(cmd)
 	print(r.output)
 	exit(r.exit_code)
 	return true
