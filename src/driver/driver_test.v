@@ -284,3 +284,15 @@ fn test_the_summary_shows_the_target() {
 	assert o2.summary().contains('-target x86_64-linux')
 	assert o3.summary().contains('-target x86_64-plan9')
 }
+
+// A trailing option that needs a value must fail loudly. A bare `--config`
+// used to be skipped silently and compile with defaults, ignoring the user's
+// intent; the same holds for every other value-taking flag.
+fn test_missing_option_value_is_an_error() {
+	for args in [['--config'], ['-o'], ['--emit'], ['-target'], ['-isystem'], ['-include'], ['-I'],
+		['-D'], ['-U'], ['-L'], ['-l'], ['-B']] {
+		mut failed := false
+		parse_args(args) or { failed = true }
+		assert failed, 'expected ${args} to fail'
+	}
+}

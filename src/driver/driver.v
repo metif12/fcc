@@ -183,7 +183,11 @@ pub fn parse_args(args []string) !Options {
 		if arg == '--config' {
 			// Consumed by load_effective_config before parsing; skip value here
 			// so config-aware invocations still parse as legacy compiles.
-			i += 2
+			// The value is still required: a trailing bare `--config` must
+			// fail here rather than silently compiling with defaults.
+			i++
+			need_value(args, i, '--config') or { return err }
+			i++
 			continue
 		}
 		if arg.starts_with('--config=') {

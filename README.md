@@ -55,8 +55,9 @@ ship with it.
   failures characterised (host-ABI divergences, chibicc's private
   `__va_area__`, and a few uncharacterised mismatches) rather than papered
   over. Open items are tracked per case in `docs/PLAN.md`.
-- `v test .`: 21 of 21, on stock V and on the local build.
-- CI builds and runs the suite on stock V. Build is green.
+- `v test .`: 24 of 24, on stock V and on the local build.
+- CI builds, format-checks (`v fmt -verify`), vets and runs the suite on
+  stock V. Build is green.
 
 ## What "plugin-able" means here
 
@@ -214,6 +215,8 @@ $env:TMPDIR = "$env:LOCALAPPDATA\Temp\opencode\vccbuild"
 $env:VJOBS = '4'
 
 v -enable-globals -o fcc.exe .
+v fmt -verify .              # LF + style gate (same as CI)
+v -enable-globals vet .      # real issues fail, style notices stay advisory
 v -enable-globals test .
 ```
 

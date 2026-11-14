@@ -50,6 +50,22 @@ jobs:
           New-Item -ItemType Directory -Path $env:TMPDIR -Force | Out-Null
           v -enable-globals -o fcc.exe .
 
+      - name: Format check
+        # `v fmt -w` normalizes to LF (see .gitattributes); a file that needs
+        # reformatting fails here so CRLF or style drift cannot land silently.
+        shell: powershell
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\vhome;" + $env:PATH
+          v fmt -verify .
+
+      - name: Vet
+        # Plain `v vet` (not -W): style notices stay advisory, real issues fail.
+        shell: powershell
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\vhome;" + $env:PATH
+          $env:TMPDIR = "$env:RUNNER_TEMP\vccbuild"
+          v -enable-globals vet .
+
       - name: Unit tests
         shell: powershell
         run: |
